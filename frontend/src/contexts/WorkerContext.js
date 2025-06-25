@@ -244,7 +244,9 @@ export const WorkerProvider = ({ children }) => {
     getMaterialsForJob,
     formatCurrency,
     formatDate,
+    formatTime,
     formatDuration,
+    getCurrentUKTimeForInput,
     API,
   };
 

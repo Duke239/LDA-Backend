@@ -79,6 +79,7 @@ const JobEditModal = ({ job, onClose, onUpdate }) => {
                 onChange={handleChange}
                 className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-red-500"
                 required
+                disabled={job.archived}
               />
             </div>
 
@@ -93,6 +94,7 @@ const JobEditModal = ({ job, onClose, onUpdate }) => {
                 onChange={handleChange}
                 className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-red-500"
                 required
+                disabled={job.archived}
               />
             </div>
           </div>
@@ -108,6 +110,7 @@ const JobEditModal = ({ job, onClose, onUpdate }) => {
               onChange={handleChange}
               className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-red-500"
               required
+              disabled={job.archived}
             />
           </div>
 
@@ -121,6 +124,7 @@ const JobEditModal = ({ job, onClose, onUpdate }) => {
               onChange={handleChange}
               rows={3}
               className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-red-500"
+              disabled={job.archived}
             />
           </div>
 
@@ -138,6 +142,7 @@ const JobEditModal = ({ job, onClose, onUpdate }) => {
                 min="0"
                 className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-red-500"
                 required
+                disabled={job.archived}
               />
             </div>
 
@@ -150,12 +155,24 @@ const JobEditModal = ({ job, onClose, onUpdate }) => {
                 value={formData.status}
                 onChange={handleChange}
                 className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-red-500"
+                disabled={job.archived}
               >
                 <option value="active">Active</option>
                 <option value="completed">Completed</option>
                 <option value="cancelled">Cancelled</option>
               </select>
             </div>
+          </div>
+
+          <div className="flex items-center">
+            <input
+              type="checkbox"
+              name="archived"
+              checked={formData.archived}
+              onChange={handleChange}
+              className="rounded text-red-600 focus:ring-red-500"
+            />
+            <label className="ml-2 text-sm text-gray-700">Archived</label>
           </div>
 
           <div className="bg-blue-50 border border-blue-200 p-4 rounded-md">
@@ -170,23 +187,25 @@ const JobEditModal = ({ job, onClose, onUpdate }) => {
               onClick={onClose}
               className="flex-1 py-2 px-4 border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2"
             >
-              Cancel
+              {job.archived ? 'Close' : 'Cancel'}
             </button>
-            <button
-              type="submit"
-              disabled={loading}
-              className="flex-1 py-2 px-4 rounded-md text-white font-medium focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
-              style={{ backgroundColor: loading ? '#9CA3AF' : '#D11F2F' }}
-            >
-              {loading ? (
-                <div className="flex items-center justify-center">
-                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-                  Updating...
-                </div>
-              ) : (
-                "Update Job"
-              )}
-            </button>
+            {!job.archived && (
+              <button
+                type="submit"
+                disabled={loading}
+                className="flex-1 py-2 px-4 rounded-md text-white font-medium focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+                style={{ backgroundColor: loading ? '#9CA3AF' : '#D11F2F' }}
+              >
+                {loading ? (
+                  <div className="flex items-center justify-center">
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                    Updating...
+                  </div>
+                ) : (
+                  "Update Job"
+                )}
+              </button>
+            )}
           </div>
         </form>
       </div>

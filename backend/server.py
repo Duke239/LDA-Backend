@@ -201,8 +201,10 @@ async def create_worker(worker: WorkerCreate, admin: str = Depends(verify_admin)
     return worker_obj
 
 @api_router.get("/workers", response_model=List[Worker])
-async def get_workers(active_only: bool = Query(True)):
+async def get_workers(active_only: bool = Query(True), include_archived: bool = Query(False)):
     filter_dict = {"active": True} if active_only else {}
+    if not include_archived:
+        filter_dict["archived"] = {"$ne": True}
     workers = await db.workers.find(filter_dict).to_list(1000)
     return [Worker(**worker) for worker in workers]
 
@@ -228,10 +230,18 @@ async def update_worker(worker_id: str, worker_update: WorkerUpdate, admin: str 
 @api_router.delete("/workers/{worker_id}")
 async def delete_worker(worker_id: str, admin: str = Depends(verify_admin)):
     """Delete worker (Admin only)"""
-    result = await db.workers.update_one({"id": worker_id}, {"$set": {"active": False}})
+    result = await db.workers.delete_one({"id": worker_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Worker not found")
+    return {"message": "Worker deleted successfully"}
+
+@api_router.put("/workers/{worker_id}/archive")
+async def archive_worker(worker_id: str, admin: str = Depends(verify_admin)):
+    """Archive worker (Admin only)"""
+    result = await db.workers.update_one({"id": worker_id}, {"$set": {"archived": True}})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Worker not found")
-    return {"message": "Worker deactivated successfully"}
+    return {"message": "Worker archived successfully"}
 
 # JOB ENDPOINTS
 @api_router.post("/jobs", response_model=Job)
@@ -243,8 +253,10 @@ async def create_job(job: JobCreate, admin: str = Depends(verify_admin)):
     return job_obj
 
 @api_router.get("/jobs", response_model=List[Job])
-async def get_jobs(active_only: bool = Query(False)):
+async def get_jobs(active_only: bool = Query(False), include_archived: bool = Query(False)):
     filter_dict = {"status": {"$ne": "cancelled"}} if active_only else {}
+    if not include_archived:
+        filter_dict["archived"] = {"$ne": True}
     jobs = await db.jobs.find(filter_dict).to_list(1000)
     return [Job(**job) for job in jobs]
 
@@ -270,10 +282,18 @@ async def update_job(job_id: str, job_update: JobUpdate, admin: str = Depends(ve
 @api_router.delete("/jobs/{job_id}")
 async def delete_job(job_id: str, admin: str = Depends(verify_admin)):
     """Delete job (Admin only)"""
-    result = await db.jobs.update_one({"id": job_id}, {"$set": {"status": "cancelled"}})
+    result = await db.jobs.delete_one({"id": job_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"message": "Job deleted successfully"}
+
+@api_router.put("/jobs/{job_id}/archive")
+async def archive_job(job_id: str, admin: str = Depends(verify_admin)):
+    """Archive job (Admin only)"""
+    result = await db.jobs.update_one({"id": job_id}, {"$set": {"archived": True}})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Job not found")
-    return {"message": "Job cancelled successfully"}
+    return {"message": "Job archived successfully"}
 
 # TIME ENTRY ENDPOINTS
 @api_router.post("/time-entries/clock-in", response_model=TimeEntry)

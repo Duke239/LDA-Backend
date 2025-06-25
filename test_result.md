@@ -636,11 +636,6 @@ metadata:
 
 test_plan:
   current_focus:
-    - "Attendance Alerts API"
-    - "Archived Jobs Filtering API"
-    - "Job Unarchiving API"
-    - "Job Editing Authorization Fix"
-    - "New Admin Authentication API"
     - "Hide Default Admin Credentials"
     - "Jobs Page UI Fixes"
     - "Jobs Page Actions Styling"

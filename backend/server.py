@@ -47,7 +47,10 @@ class Worker(BaseModel):
     email: str
     phone: str
     role: str = "worker"  # worker, admin, supervisor
+    hourly_rate: float = 15.0  # Default £15/hour
+    password: Optional[str] = None  # For admin users
     active: bool = True
+    archived: bool = False
     created_date: datetime = Field(default_factory=datetime.utcnow)
 
 class WorkerCreate(BaseModel):
@@ -55,13 +58,18 @@ class WorkerCreate(BaseModel):
     email: str
     phone: str
     role: str = "worker"
+    hourly_rate: float = 15.0
+    password: Optional[str] = None
 
 class WorkerUpdate(BaseModel):
     name: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
     role: Optional[str] = None
+    hourly_rate: Optional[float] = None
+    password: Optional[str] = None
     active: Optional[bool] = None
+    archived: Optional[bool] = None
 
 class Job(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -71,6 +79,7 @@ class Job(BaseModel):
     client: str
     quoted_cost: float
     status: str = "active"  # active, completed, cancelled
+    archived: bool = False
     created_date: datetime = Field(default_factory=datetime.utcnow)
 
 class JobCreate(BaseModel):
@@ -87,11 +96,13 @@ class JobUpdate(BaseModel):
     client: Optional[str] = None
     quoted_cost: Optional[float] = None
     status: Optional[str] = None
+    archived: Optional[bool] = None
 
 class GPSLocation(BaseModel):
     latitude: float
     longitude: float
     accuracy: Optional[float] = None
+    address: Optional[str] = None  # Human readable address
 
 class TimeEntry(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -121,6 +132,8 @@ class Material(BaseModel):
     name: str
     cost: float
     quantity: int
+    supplier: str = ""  # Supplier name
+    reference: str = ""  # Receipt number or reference
     purchase_date: datetime = Field(default_factory=datetime.utcnow)
     notes: str = ""
     created_date: datetime = Field(default_factory=datetime.utcnow)
@@ -130,17 +143,25 @@ class MaterialCreate(BaseModel):
     name: str
     cost: float
     quantity: int
+    supplier: str = ""
+    reference: str = ""
     notes: str = ""
 
 class MaterialUpdate(BaseModel):
     name: Optional[str] = None
     cost: Optional[float] = None
     quantity: Optional[int] = None
+    supplier: Optional[str] = None
+    reference: Optional[str] = None
     notes: Optional[str] = None
 
 class AdminLogin(BaseModel):
     username: str
     password: str
+
+class WorkerLogin(BaseModel):
+    worker_id: str
+    password: Optional[str] = None  # For admin workers
 
 # Security functions
 def verify_admin(credentials: HTTPBasicCredentials = Depends(security)):

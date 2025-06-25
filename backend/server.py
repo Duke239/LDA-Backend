@@ -290,9 +290,14 @@ async def create_job(job: JobCreate, admin: str = Depends(verify_admin)):
 
 @api_router.get("/jobs", response_model=List[Job])
 async def get_jobs(active_only: bool = Query(False), include_archived: bool = Query(False)):
-    filter_dict = {"status": {"$ne": "cancelled"}} if active_only else {}
-    if not include_archived:
+    filter_dict = {}
+    
+    if active_only:
+        filter_dict["status"] = {"$ne": "cancelled"}
         filter_dict["archived"] = {"$ne": True}
+    elif not include_archived:
+        filter_dict["archived"] = {"$ne": True}
+        
     jobs = await db.jobs.find(filter_dict).to_list(1000)
     return [Job(**job) for job in jobs]
 

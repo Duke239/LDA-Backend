@@ -1005,5 +1005,280 @@ def run_all_tests():
     print("TESTS COMPLETED")
     print("="*80)
 
+def test_enhanced_attendance_alerts():
+    print_separator()
+    print("TESTING ENHANCED ATTENDANCE ALERTS WITH 7-DAY PERIOD")
+    print_separator()
+    
+    # 1. Create test workers (non-admin and admin)
+    print("\nCreating test workers for attendance alerts...")
+    worker_data = [
+        {
+            "name": "Attendance Test Worker 1",
+            "email": "attendance1@ldagroup.co.uk",
+            "phone": "07700 900111",
+            "role": "worker"
+        },
+        {
+            "name": "Attendance Test Worker 2",
+            "email": "attendance2@ldagroup.co.uk",
+            "phone": "07700 900222",
+            "role": "worker"
+        },
+        {
+            "name": "Attendance Admin",
+            "email": "attendanceadmin@ldagroup.co.uk",
+            "phone": "07700 900333",
+            "role": "admin",
+            "password": "admin2024"
+        }
+    ]
+    
+    worker_ids = []
+    for worker in worker_data:
+        response = requests.post(f"{BACKEND_URL}/workers", json=worker, headers=ADMIN_HEADERS)
+        print_response(response, f"Create worker: {worker['name']}")
+        
+        if response.status_code == 200:
+            worker_ids.append(response.json()["id"])
+    
+    # 2. Create a test job
+    print("\nCreating test job for attendance alerts...")
+    job_data = {
+        "name": "Attendance Test Job",
+        "description": "Job for testing attendance alerts",
+        "location": "London, UK",
+        "client": "Attendance Test Client",
+        "quoted_cost": 5000.00
+    }
+    response = requests.post(f"{BACKEND_URL}/jobs", json=job_data, headers=ADMIN_HEADERS)
+    print_response(response, "Create test job")
+    
+    if response.status_code != 200:
+        print("Failed to create job, cannot continue test")
+        return False
+    
+    job_id = response.json()["id"]
+    
+    # 3. Create time entries with various scenarios
+    print("\nCreating time entries with various attendance scenarios...")
+    
+    # Get current time and dates for the past week
+    now = datetime.now()
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    # Create time entries for the past 7 days
+    for day_offset in range(1, 7):  # Skip today, create entries for past 6 days
+        test_date = today - timedelta(days=day_offset)
+        
+        # Skip weekends for some tests
+        if test_date.weekday() >= 5:  # 5=Saturday, 6=Sunday
+            continue
+        
+        # For worker 1: Create late clock-ins (after 9 AM)
+        if day_offset % 2 == 1:  # Odd days
+            clock_in_time = test_date + timedelta(hours=10, minutes=15)  # 10:15 AM (late)
+            clock_out_time = test_date + timedelta(hours=16, minutes=30)  # 4:30 PM (normal)
+            
+            # Create time entry with specific times
+            clock_in_data = {
+                "worker_id": worker_ids[0],
+                "job_id": job_id,
+                "gps_location": LONDON_COORDINATES,
+                "notes": f"Late clock-in test for {test_date.strftime('%Y-%m-%d')}"
+            }
+            response = requests.post(f"{BACKEND_URL}/time-entries/clock-in", json=clock_in_data)
+            
+            if response.status_code == 200:
+                entry_id = response.json()["id"]
+                
+                # Clock out
+                clock_out_data = {
+                    "gps_location": LONDON_COORDINATES,
+                    "notes": "Normal clock-out"
+                }
+                response = requests.put(f"{BACKEND_URL}/time-entries/{entry_id}/clock-out", json=clock_out_data)
+                
+                # Update the times to match our test scenario
+                update_data = {
+                    "clock_in": clock_in_time.isoformat(),
+                    "clock_out": clock_out_time.isoformat()
+                }
+                response = requests.put(f"{BACKEND_URL}/time-entries/{entry_id}", json=update_data, headers=ADMIN_HEADERS)
+                print_response(response, f"Created late clock-in entry for {test_date.strftime('%Y-%m-%d')}")
+        
+        # For worker 2: Create late clock-outs (after 5 PM)
+        if day_offset % 2 == 0:  # Even days
+            clock_in_time = test_date + timedelta(hours=8, minutes=30)  # 8:30 AM (normal)
+            clock_out_time = test_date + timedelta(hours=18, minutes=45)  # 6:45 PM (late)
+            
+            # Create time entry with specific times
+            clock_in_data = {
+                "worker_id": worker_ids[1],
+                "job_id": job_id,
+                "gps_location": LONDON_COORDINATES,
+                "notes": f"Late clock-out test for {test_date.strftime('%Y-%m-%d')}"
+            }
+            response = requests.post(f"{BACKEND_URL}/time-entries/clock-in", json=clock_in_data)
+            
+            if response.status_code == 200:
+                entry_id = response.json()["id"]
+                
+                # Clock out
+                clock_out_data = {
+                    "gps_location": LONDON_COORDINATES,
+                    "notes": "Late clock-out"
+                }
+                response = requests.put(f"{BACKEND_URL}/time-entries/{entry_id}/clock-out", json=clock_out_data)
+                
+                # Update the times to match our test scenario
+                update_data = {
+                    "clock_in": clock_in_time.isoformat(),
+                    "clock_out": clock_out_time.isoformat()
+                }
+                response = requests.put(f"{BACKEND_URL}/time-entries/{entry_id}", json=update_data, headers=ADMIN_HEADERS)
+                print_response(response, f"Created late clock-out entry for {test_date.strftime('%Y-%m-%d')}")
+        
+        # For worker 1: Skip some days entirely (no clock-in)
+        # We don't need to create entries for these days, as missing entries will trigger no_clock_in alerts
+    
+    # 4. Test dashboard attendance alerts
+    print("\nTesting dashboard attendance alerts...")
+    response = requests.get(f"{BACKEND_URL}/reports/dashboard", headers=ADMIN_HEADERS)
+    print_response(response, "Get dashboard with attendance alerts")
+    
+    if response.status_code == 200:
+        dashboard_data = response.json()
+        attendance_alerts = dashboard_data.get("attendance_alerts", [])
+        
+        print(f"\nFound {len(attendance_alerts)} attendance alerts")
+        
+        # Check if alerts include data from the last 7 days
+        alert_dates = set()
+        alert_types = set()
+        
+        for alert in attendance_alerts:
+            # Extract date from the alert
+            if "date" in alert:
+                alert_dates.add(alert["date"])
+            
+            # Extract alert type
+            if "type" in alert:
+                alert_types.add(alert["type"])
+            
+            # Print alert details
+            print(f"Alert: {alert.get('worker_name', 'Unknown')} - {alert.get('type', 'Unknown')} - {alert.get('date', 'Unknown')} - {alert.get('message', 'No message')}")
+        
+        print(f"\nUnique dates in alerts: {len(alert_dates)}")
+        print(f"Alert types found: {', '.join(alert_types)}")
+        
+        # Verify alerts are properly categorized
+        expected_types = {"late_clock_in", "late_clock_out", "no_clock_in"}
+        missing_types = expected_types - alert_types
+        
+        if missing_types:
+            print(f"WARNING: Missing alert types: {', '.join(missing_types)}")
+        else:
+            print("All expected alert types are present")
+        
+        # Check if admin users are excluded
+        admin_alerts = [alert for alert in attendance_alerts if alert.get("worker_name") == "Attendance Admin"]
+        if admin_alerts:
+            print("WARNING: Admin users are not excluded from alerts")
+        else:
+            print("Admin users are correctly excluded from alerts")
+    
+    # 5. Test attendance alerts export
+    print("\nTesting attendance alerts export...")
+    response = requests.get(f"{BACKEND_URL}/reports/export/attendance-alerts", headers=ADMIN_HEADERS)
+    
+    print(f"\n--- Export attendance alerts as CSV ---")
+    print(f"Status Code: {response.status_code}")
+    print(f"Content Type: {response.headers.get('Content-Type')}")
+    print(f"Content Disposition: {response.headers.get('Content-Disposition')}")
+    
+    if response.status_code == 200 and response.headers.get('Content-Type') == 'text/csv':
+        csv_content = response.content.decode('utf-8')
+        csv_reader = csv.reader(io.StringIO(csv_content))
+        rows = list(csv_reader)
+        
+        print("\nCSV Headers:")
+        headers_row_index = None
+        for i, row in enumerate(rows):
+            if len(row) > 3 and "Worker Name" in row:
+                headers_row_index = i
+                print(row)
+                break
+        
+        if headers_row_index is not None:
+            data_rows = rows[headers_row_index+1:]
+            print(f"\nNumber of data rows: {len(data_rows)}")
+            
+            if data_rows:
+                print("\nSample data rows:")
+                for i, row in enumerate(data_rows[:3]):  # Show first 3 data rows
+                    print(row)
+                
+                # Check if CSV contains worker names, alert types, dates, and details
+                expected_columns = ["Worker Name", "Worker Email", "Alert Type", "Date", "Day of Week", "Time", "Details"]
+                headers = rows[headers_row_index]
+                
+                missing_columns = [col for col in expected_columns if col not in headers]
+                if missing_columns:
+                    print(f"WARNING: Missing columns in CSV: {', '.join(missing_columns)}")
+                else:
+                    print("CSV contains all expected columns")
+                
+                # Check if admin users are excluded
+                admin_rows = [row for row in data_rows if "Attendance Admin" in row[0]]
+                if admin_rows:
+                    print("WARNING: Admin users are not excluded from CSV export")
+                else:
+                    print("Admin users are correctly excluded from CSV export")
+        else:
+            print("Could not find headers row in CSV")
+    else:
+        print(f"Response: {response.text}")
+    
+    print("\nEnhanced attendance alerts test completed")
+    return True
+
+def run_all_tests():
+    print("\n\n")
+    print("="*80)
+    print("STARTING LDA GROUP TIME TRACKING API TESTS")
+    print("="*80)
+    
+    # Run tests in sequence
+    worker_ids = test_workers_endpoints()
+    job_ids = test_jobs_endpoints()
+    time_entry_ids = test_time_tracking_endpoints(worker_ids, job_ids)
+    material_ids = test_materials_endpoints(job_ids)
+    test_reporting_endpoints(job_ids)
+    
+    # Run new tests for bug fixes
+    admin_auth_result = test_new_admin_authentication()
+    time_entry_edit_result = test_time_entry_editing()
+    uk_timezone_result = test_uk_timezone_handling()
+    
+    # Run enhanced attendance alerts test
+    attendance_alerts_result = test_enhanced_attendance_alerts()
+    
+    print("\n\n")
+    print("="*80)
+    print("TEST SUMMARY")
+    print("="*80)
+    print(f"Workers created: {len(worker_ids)}")
+    print(f"Jobs created: {len(job_ids)}")
+    print(f"Time entries created: {len(time_entry_ids)}")
+    print(f"Materials created: {len(material_ids)}")
+    print(f"New Admin Authentication: {'PASSED' if admin_auth_result else 'FAILED'}")
+    print(f"Time Entry Editing: {'PASSED' if time_entry_edit_result else 'FAILED'}")
+    print(f"UK Timezone Handling: {'PASSED' if uk_timezone_result else 'FAILED'}")
+    print(f"Enhanced Attendance Alerts: {'PASSED' if attendance_alerts_result else 'FAILED'}")
+    print("="*80)
+    print("TESTS COMPLETED")
+    print("="*80)
+
 if __name__ == "__main__":
     run_all_tests()

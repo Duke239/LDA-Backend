@@ -102,7 +102,7 @@
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
 
-user_problem_statement: "I need you to test the complete LDA Group time tracking frontend application that I just built. This is a comprehensive time tracking system with worker and admin interfaces."
+user_problem_statement: "Build a complete LDA Group time tracking application from scratch with core time tracking (GPS location stamps), materials management, admin dashboard with reporting and analytics, LDA Group branding (#D11F2F red, GBP currency), and backend APIs for workers, jobs, time entries, materials, and reporting."
 
 backend:
   - task: "Workers Management API"

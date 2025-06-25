@@ -462,17 +462,38 @@ const AdminDashboard = () => {
             {/* Attendance Alerts */}
             {dashboardStats.attendance_alerts && dashboardStats.attendance_alerts.length > 0 && (
               <div className="bg-white rounded-lg shadow-sm p-6 border-l-4" style={{borderLeftColor: '#d01f2f'}}>
-                <h3 className="text-lg font-semibold text-gray-900 mb-4">Attendance Alerts</h3>
-                <div className="space-y-2">
+                <div className="flex justify-between items-center mb-4">
+                  <h3 className="text-lg font-semibold text-gray-900">Attendance Alerts (Last 7 Days)</h3>
+                  <button
+                    onClick={exportAttendanceAlerts}
+                    className="px-4 py-2 text-white rounded-md text-sm font-medium hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2"
+                    style={{ backgroundColor: '#d01f2f' }}
+                  >
+                    Export Alerts
+                  </button>
+                </div>
+                <div className="space-y-2 max-h-96 overflow-y-auto">
                   {dashboardStats.attendance_alerts.map((alert, index) => (
                     <div key={index} className={`p-3 rounded-md ${
-                      alert.type === 'late_clock_in' ? 'bg-yellow-50 text-yellow-800' :
-                      alert.type === 'late_clock_out' ? 'bg-orange-50 text-orange-800' :
-                      'bg-red-50 text-red-800'
+                      alert.type === 'late_clock_in' ? 'bg-yellow-50 text-yellow-800 border border-yellow-200' :
+                      alert.type === 'late_clock_out' ? 'bg-orange-50 text-orange-800 border border-orange-200' :
+                      'bg-red-50 text-red-800 border border-red-200'
                     }`}>
-                      <span className="font-medium">{alert.worker_name}:</span> {alert.message}
+                      <div className="flex justify-between items-start">
+                        <div>
+                          <span className="font-medium">{alert.worker_name}:</span> {alert.message}
+                        </div>
+                        {alert.date && (
+                          <span className="text-xs opacity-75 ml-2">
+                            {new Date(alert.date).toLocaleDateString('en-GB')}
+                          </span>
+                        )}
+                      </div>
                     </div>
                   ))}
+                </div>
+                <div className="mt-4 text-sm text-gray-500">
+                  Showing {dashboardStats.attendance_alerts.length} alert{dashboardStats.attendance_alerts.length !== 1 ? 's' : ''} from the last 7 days
                 </div>
               </div>
             )}

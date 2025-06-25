@@ -467,9 +467,9 @@ async def delete_material(material_id: str, admin: str = Depends(verify_admin)):
 async def get_dashboard_stats(admin: str = Depends(verify_admin)):
     """Get dashboard statistics (Admin only)"""
     # Get basic counts
-    total_workers = await db.workers.count_documents({"active": True})
-    total_jobs = await db.jobs.count_documents({"status": {"$ne": "cancelled"}})
-    active_jobs = await db.jobs.count_documents({"status": "active"})
+    total_workers = await db.workers.count_documents({"active": True, "archived": {"$ne": True}})
+    total_jobs = await db.jobs.count_documents({"status": {"$ne": "cancelled"}, "archived": {"$ne": True}})
+    active_jobs = await db.jobs.count_documents({"status": "active", "archived": {"$ne": True}})
     
     # Get total hours this week
     week_start = datetime.utcnow() - timedelta(days=7)
@@ -478,7 +478,7 @@ async def get_dashboard_stats(admin: str = Depends(verify_admin)):
         "duration_minutes": {"$exists": True}
     }).to_list(1000)
     
-    total_minutes = sum((entry.get("duration_minutes", 0) or 0) for entry in week_entries)
+    total_minutes = sum(entry.get("duration_minutes", 0) for entry in week_entries)
     total_hours = round(total_minutes / 60, 1)
     
     # Get total materials cost this month
@@ -489,12 +489,71 @@ async def get_dashboard_stats(admin: str = Depends(verify_admin)):
     
     total_materials_cost = sum(mat.get("cost", 0) * mat.get("quantity", 1) for mat in month_materials)
     
+    # Get attendance alerts (workers who haven't logged in before 9am or out after 5pm)
+    today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    nine_am = today.replace(hour=9)
+    five_pm = today.replace(hour=17)
+    
+    # Get all non-admin workers
+    non_admin_workers = await db.workers.find({
+        "role": {"$ne": "admin"},
+        "active": True,
+        "archived": {"$ne": True}
+    }).to_list(1000)
+    
+    attendance_alerts = []
+    for worker in non_admin_workers:
+        # Check if worker clocked in late (after 9am)
+        late_entries = await db.time_entries.find({
+            "worker_id": worker["id"],
+            "clock_in": {"$gte": nine_am, "$lt": today + timedelta(days=1)}
+        }).to_list(10)
+        
+        # Check if worker clocked out late (after 5pm)
+        late_out_entries = await db.time_entries.find({
+            "worker_id": worker["id"],
+            "clock_out": {"$gte": five_pm, "$lt": today + timedelta(days=1)}
+        }).to_list(10)
+        
+        # Check if worker hasn't logged in at all today
+        no_entries = await db.time_entries.find({
+            "worker_id": worker["id"],
+            "clock_in": {"$gte": today, "$lt": today + timedelta(days=1)}
+        }).to_list(1)
+        
+        if late_entries:
+            for entry in late_entries:
+                attendance_alerts.append({
+                    "worker_name": worker["name"],
+                    "type": "late_clock_in",
+                    "time": entry["clock_in"],
+                    "message": f"Clocked in late at {entry['clock_in'].strftime('%H:%M')}"
+                })
+        
+        if late_out_entries:
+            for entry in late_out_entries:
+                attendance_alerts.append({
+                    "worker_name": worker["name"],
+                    "type": "late_clock_out", 
+                    "time": entry["clock_out"],
+                    "message": f"Clocked out late at {entry['clock_out'].strftime('%H:%M')}"
+                })
+                
+        if not no_entries and datetime.utcnow().hour >= 9:
+            attendance_alerts.append({
+                "worker_name": worker["name"],
+                "type": "no_clock_in",
+                "time": today,
+                "message": "No clock in recorded today"
+            })
+    
     return {
         "total_workers": total_workers,
         "total_jobs": total_jobs,
         "active_jobs": active_jobs,
         "total_hours_this_week": total_hours,
-        "total_materials_cost_this_month": total_materials_cost
+        "total_materials_cost_this_month": total_materials_cost,
+        "attendance_alerts": attendance_alerts
     }
 
 @api_router.get("/reports/job-costs/{job_id}")

@@ -468,16 +468,23 @@ async def get_job_cost_report(job_id: str, admin: str = Depends(verify_admin)):
     materials = await db.materials.find({"job_id": job_id}).to_list(1000)
     total_materials_cost = sum(mat.get("cost", 0) * mat.get("quantity", 1) for mat in materials)
     
-    # Assuming £15/hour labor cost (can be configurable)
-    labor_cost = total_hours * 15
+    # Calculate labor cost using worker hourly rates
+    labor_cost = 0
+    worker_ids = list(set(entry.get("worker_id") for entry in time_entries if entry.get("worker_id")))
+    workers = await db.workers.find({"id": {"$in": worker_ids}}).to_list(1000) if worker_ids else []
+    worker_rates = {worker["id"]: worker.get("hourly_rate", 15.0) for worker in workers}
+    worker_names = {worker["id"]: worker["name"] for worker in workers}
+    
+    # Calculate labor cost per entry
+    for entry in time_entries:
+        if entry.get("duration_minutes"):
+            worker_rate = worker_rates.get(entry.get("worker_id"), 15.0)
+            entry_hours = entry.get("duration_minutes") / 60
+            labor_cost += entry_hours * worker_rate
+    
     total_cost = labor_cost + total_materials_cost
     quoted_cost = job.get("quoted_cost", 0)
     cost_variance = quoted_cost - total_cost
-    
-    # Get worker names for time entries
-    worker_ids = list(set(entry.get("worker_id") for entry in time_entries if entry.get("worker_id")))
-    workers = await db.workers.find({"id": {"$in": worker_ids}}).to_list(1000) if worker_ids else []
-    worker_names = {worker["id"]: worker["name"] for worker in workers}
     
     # Clean time entries data
     clean_time_entries = []
@@ -489,7 +496,10 @@ async def get_job_cost_report(job_id: str, admin: str = Depends(verify_admin)):
             "clock_in": entry.get("clock_in"),
             "clock_out": entry.get("clock_out"),
             "duration_minutes": entry.get("duration_minutes"),
-            "notes": entry.get("notes", "")
+            "notes": entry.get("notes", ""),
+            "gps_location_in": entry.get("gps_location_in"),
+            "gps_location_out": entry.get("gps_location_out"),
+            "hourly_rate": worker_rates.get(entry.get("worker_id"), 15.0)
         }
         clean_time_entries.append(clean_entry)
     
@@ -501,6 +511,8 @@ async def get_job_cost_report(job_id: str, admin: str = Depends(verify_admin)):
             "name": material.get("name"),
             "cost": material.get("cost"),
             "quantity": material.get("quantity"),
+            "supplier": material.get("supplier", ""),
+            "reference": material.get("reference", ""),
             "purchase_date": material.get("purchase_date"),
             "notes": material.get("notes", "")
         }

@@ -361,9 +361,10 @@ def test_new_admin_authentication():
     print_response(response, "Update worker after login")
     
     # Check if we can access job cost report (protected endpoint)
-    job_ids = test_jobs_endpoints()
-    if job_ids:
-        response = requests.get(f"{BACKEND_URL}/reports/job-costs/{job_ids[0]}", headers=new_admin_headers)
+    job_response = requests.get(f"{BACKEND_URL}/jobs", headers=new_admin_headers)
+    if job_response.status_code == 200 and len(job_response.json()) > 0:
+        job_id = job_response.json()[0]["id"]
+        response = requests.get(f"{BACKEND_URL}/reports/job-costs/{job_id}", headers=new_admin_headers)
         print_response(response, "Access job cost report after login")
     
     print("\nAdmin authentication test completed")

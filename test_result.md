@@ -576,15 +576,18 @@ metadata:
 
   - task: "Archived Jobs Filtering API"
     implemented: true
-    working: "NA"
+    working: true
     file: "/app/backend/server.py"
     stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
         - working: "NA"
           agent: "main"
           comment: "Need to test that archived jobs are properly hidden from active lists in all API endpoints."
+        - working: true
+          agent: "testing"
+          comment: "Successfully tested the archived jobs filtering API. Verified that GET /api/jobs does not return archived jobs by default. When include_archived=true is specified, archived jobs are correctly included in the response."
 
   - task: "Job Unarchiving API"
     implemented: true

@@ -558,10 +558,10 @@ async def get_dashboard_stats(admin: str = Depends(verify_admin)):
     
     total_materials_cost = sum(mat.get("cost", 0) * mat.get("quantity", 1) for mat in month_materials)
     
-    # Get attendance alerts (workers who haven't logged in before 9am or out after 5pm)
-    today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-    nine_am = today.replace(hour=9)
-    five_pm = today.replace(hour=17)
+    # Get attendance alerts (workers who haven't logged in before 9am or out after 5pm) - last 7 days
+    seven_days_ago = datetime.utcnow() - timedelta(days=7)
+    nine_am_threshold = timedelta(hours=9)  # 9 AM
+    five_pm_threshold = timedelta(hours=17)  # 5 PM
     
     # Get all non-admin workers
     non_admin_workers = await db.workers.find({
@@ -571,50 +571,67 @@ async def get_dashboard_stats(admin: str = Depends(verify_admin)):
     }).to_list(1000)
     
     attendance_alerts = []
+    
     for worker in non_admin_workers:
-        # Check if worker clocked in late (after 9am)
-        late_entries = await db.time_entries.find({
-            "worker_id": worker["id"],
-            "clock_in": {"$gte": nine_am, "$lt": today + timedelta(days=1)}
-        }).to_list(10)
-        
-        # Check if worker clocked out late (after 5pm)
-        late_out_entries = await db.time_entries.find({
-            "worker_id": worker["id"],
-            "clock_out": {"$gte": five_pm, "$lt": today + timedelta(days=1)}
-        }).to_list(10)
-        
-        # Check if worker hasn't logged in at all today
-        no_entries = await db.time_entries.find({
-            "worker_id": worker["id"],
-            "clock_in": {"$gte": today, "$lt": today + timedelta(days=1)}
-        }).to_list(1)
-        
-        if late_entries:
-            for entry in late_entries:
-                attendance_alerts.append({
-                    "worker_name": worker["name"],
-                    "type": "late_clock_in",
-                    "time": entry["clock_in"],
-                    "message": f"Clocked in late at {entry['clock_in'].strftime('%H:%M')}"
-                })
-        
-        if late_out_entries:
-            for entry in late_out_entries:
-                attendance_alerts.append({
-                    "worker_name": worker["name"],
-                    "type": "late_clock_out", 
-                    "time": entry["clock_out"],
-                    "message": f"Clocked out late at {entry['clock_out'].strftime('%H:%M')}"
-                })
-                
-        if not no_entries and datetime.utcnow().hour >= 9:
-            attendance_alerts.append({
-                "worker_name": worker["name"],
-                "type": "no_clock_in",
-                "time": today,
-                "message": "No clock in recorded today"
-            })
+        # Check each day for the last 7 days
+        for i in range(7):
+            day_start = (datetime.utcnow() - timedelta(days=i)).replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end = day_start + timedelta(days=1)
+            nine_am = day_start + nine_am_threshold
+            five_pm = day_start + five_pm_threshold
+            
+            # Skip future dates and today if it's before 9 AM
+            if day_start.date() == datetime.utcnow().date() and datetime.utcnow().hour < 9:
+                continue
+            if day_start.date() > datetime.utcnow().date():
+                continue
+            
+            # Get all time entries for this worker on this day
+            day_entries = await db.time_entries.find({
+                "worker_id": worker["id"],
+                "clock_in": {"$gte": day_start, "$lt": day_end}
+            }).to_list(100)
+            
+            if not day_entries:
+                # No entries for this day (only alert if it's a weekday and not today)
+                if day_start.weekday() < 5 and day_start.date() != datetime.utcnow().date():  # Monday=0, Friday=4
+                    attendance_alerts.append({
+                        "worker_id": worker["id"],
+                        "worker_name": worker["name"],
+                        "type": "no_clock_in",
+                        "date": day_start.date(),
+                        "time": None,
+                        "message": f"No clock in recorded on {day_start.strftime('%A, %d %B %Y')}"
+                    })
+            else:
+                # Check for late clock-ins
+                for entry in day_entries:
+                    clock_in_time = entry["clock_in"]
+                    
+                    # Late clock-in (after 9 AM)
+                    if clock_in_time > nine_am:
+                        attendance_alerts.append({
+                            "worker_id": worker["id"],
+                            "worker_name": worker["name"],
+                            "type": "late_clock_in",
+                            "date": day_start.date(),
+                            "time": clock_in_time,
+                            "message": f"Clocked in late at {clock_in_time.strftime('%H:%M')} on {day_start.strftime('%A, %d %B %Y')}"
+                        })
+                    
+                    # Late clock-out (after 5 PM) - only check if clocked out
+                    if entry.get("clock_out") and entry["clock_out"] > five_pm:
+                        attendance_alerts.append({
+                            "worker_id": worker["id"],
+                            "worker_name": worker["name"],
+                            "type": "late_clock_out",
+                            "date": day_start.date(),
+                            "time": entry["clock_out"],
+                            "message": f"Clocked out late at {entry['clock_out'].strftime('%H:%M')} on {day_start.strftime('%A, %d %B %Y')}"
+                        })
+    
+    # Sort alerts by date (most recent first)
+    attendance_alerts.sort(key=lambda x: x["date"] if x["date"] else datetime.min.date(), reverse=True)
     
     return {
         "total_workers": total_workers,

@@ -606,15 +606,18 @@ metadata:
 
   - task: "Job Editing Authorization Fix"
     implemented: true
-    working: "NA"
+    working: true
     file: "/app/backend/server.py"
     stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
         - working: "NA"
           agent: "main"
           comment: "Need to test that job editing authorization has been fixed and no longer returns 'not authorized' error."
+        - working: true
+          agent: "testing"
+          comment: "Successfully tested the job editing authorization fix. Admins can now edit job details without getting 'not authorized' errors. The PUT /api/jobs/{job_id} endpoint correctly updates job information and returns the updated job details."
 
   - task: "New Admin Authentication API"
     implemented: true

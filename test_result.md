@@ -309,15 +309,18 @@ frontend:
           
   - task: "Individual Job Reports"
     implemented: true
-    working: false
+    working: true
     file: "/app/frontend/src/components/JobReportModal.js"
-    stuck_count: 1
+    stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
         - working: false
           agent: "testing"
           comment: "Report buttons are visible for each job in the Jobs tab, but when clicking on them, the Job Report modal does not appear (timeout after 30 seconds). This suggests there might be an issue with the job report functionality."
+        - working: true
+          agent: "testing"
+          comment: "Fixed the issue with the job report API. The problem was in the backend code where it was trying to sum duration_minutes values that could be None. Updated the code to handle None values properly. The job report API now works correctly, and the CSV export functionality also works as expected."
           
   - task: "Job-Specific CSV Export"
     implemented: true

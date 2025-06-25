@@ -102,8 +102,8 @@ const EditTimeEntryModal = ({ timeEntry, workers, jobs, onClose, onUpdate }) => 
       const updateData = {
         worker_id: formData.worker_id,
         job_id: formData.job_id,
-        clock_in: new Date(formData.clock_in).toISOString(),
-        clock_out: formData.clock_out ? new Date(formData.clock_out).toISOString() : null,
+        clock_in: convertUKInputToUTC(formData.clock_in),
+        clock_out: formData.clock_out ? convertUKInputToUTC(formData.clock_out) : null,
         duration_minutes: duration_minutes,
         notes: formData.notes
       };

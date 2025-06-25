@@ -651,14 +651,20 @@ async def export_time_entries(
     # Get data
     time_entries = await db.time_entries.find(filter_dict).to_list(1000)
     
-    # Get worker and job names
+    # Get worker and job names with hourly rates
     worker_names = {}
+    worker_rates = {}
     job_names = {}
     
     for entry in time_entries:
         if entry["worker_id"] not in worker_names:
             worker = await db.workers.find_one({"id": entry["worker_id"]})
-            worker_names[entry["worker_id"]] = worker.get("name", "Unknown") if worker else "Unknown"
+            if worker:
+                worker_names[entry["worker_id"]] = worker.get("name", "Unknown")
+                worker_rates[entry["worker_id"]] = worker.get("hourly_rate", 15.0)
+            else:
+                worker_names[entry["worker_id"]] = "Unknown"
+                worker_rates[entry["worker_id"]] = 15.0
         
         if entry["job_id"] not in job_names:
             job = await db.jobs.find_one({"id": entry["job_id"]})
@@ -671,7 +677,9 @@ async def export_time_entries(
     # Headers
     writer.writerow([
         "Worker Name", "Job Name", "Clock In", "Clock Out", 
-        "Duration (hours)", "Notes", "GPS In Lat", "GPS In Lng"
+        "Duration (hours)", "Hourly Rate", "Labor Cost", "Notes", 
+        "GPS In Lat", "GPS In Lng", "GPS In Address",
+        "GPS Out Lat", "GPS Out Lng", "GPS Out Address"
     ])
     
     # Data rows
@@ -679,12 +687,26 @@ async def export_time_entries(
         clock_in = entry.get("clock_in", "")
         clock_out = entry.get("clock_out", "")
         duration_hours = round(entry.get("duration_minutes", 0) / 60, 2) if entry.get("duration_minutes") else ""
+        hourly_rate = worker_rates.get(entry["worker_id"], 15.0)
+        labor_cost = duration_hours * hourly_rate if duration_hours else 0
         
-        gps_lat = ""
-        gps_lng = ""
+        # GPS In location
+        gps_in_lat = ""
+        gps_in_lng = ""
+        gps_in_address = ""
         if entry.get("gps_location_in"):
-            gps_lat = entry["gps_location_in"].get("latitude", "")
-            gps_lng = entry["gps_location_in"].get("longitude", "")
+            gps_in_lat = entry["gps_location_in"].get("latitude", "")
+            gps_in_lng = entry["gps_location_in"].get("longitude", "")
+            gps_in_address = entry["gps_location_in"].get("address", "")
+        
+        # GPS Out location
+        gps_out_lat = ""
+        gps_out_lng = ""
+        gps_out_address = ""
+        if entry.get("gps_location_out"):
+            gps_out_lat = entry["gps_location_out"].get("latitude", "")
+            gps_out_lng = entry["gps_location_out"].get("longitude", "")
+            gps_out_address = entry["gps_location_out"].get("address", "")
         
         writer.writerow([
             worker_names.get(entry["worker_id"], "Unknown"),
@@ -692,9 +714,15 @@ async def export_time_entries(
             clock_in.strftime("%Y-%m-%d %H:%M:%S") if clock_in else "",
             clock_out.strftime("%Y-%m-%d %H:%M:%S") if clock_out else "",
             duration_hours,
+            f"£{hourly_rate:.2f}",
+            f"£{labor_cost:.2f}",
             entry.get("notes", ""),
-            gps_lat,
-            gps_lng
+            gps_in_lat,
+            gps_in_lng,
+            gps_in_address,
+            gps_out_lat,
+            gps_out_lng,
+            gps_out_address
         ])
     
     output.seek(0)

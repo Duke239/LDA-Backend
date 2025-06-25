@@ -388,7 +388,7 @@ async def get_dashboard_stats(admin: str = Depends(verify_admin)):
         "duration_minutes": {"$exists": True}
     }).to_list(1000)
     
-    total_minutes = sum((entry.get("duration_minutes", 0) or 0) for entry in week_entries)
+    total_minutes = sum(entry.get("duration_minutes", 0) or 0 for entry in week_entries)
     total_hours = round(total_minutes / 60, 1)
     
     # Get total materials cost this month
@@ -420,7 +420,7 @@ async def get_job_cost_report(job_id: str, admin: str = Depends(verify_admin)):
         "job_id": job_id
     }).to_list(1000)
     
-    total_minutes = sum((entry.get("duration_minutes", 0) or 0) for entry in time_entries)
+    total_minutes = sum(entry.get("duration_minutes", 0) for entry in time_entries if entry.get("duration_minutes"))
     total_hours = round(total_minutes / 60, 1)
     
     # Get materials for this job
@@ -497,7 +497,7 @@ async def export_job_report(job_id: str, admin: str = Depends(verify_admin)):
     worker_names = {worker["id"]: worker["name"] for worker in workers}
     
     # Calculate totals
-    total_minutes = sum((entry.get("duration_minutes", 0) or 0) for entry in time_entries)
+    total_minutes = sum(entry.get("duration_minutes", 0) for entry in time_entries if entry.get("duration_minutes"))
     total_hours = round(total_minutes / 60, 1)
     labor_cost = total_hours * 15
     materials_cost = sum(mat.get("cost", 0) * mat.get("quantity", 1) for mat in materials)

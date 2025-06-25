@@ -168,13 +168,37 @@ def verify_admin(credentials: HTTPBasicCredentials = Depends(security)):
     """Verify admin credentials"""
     is_correct_username = secrets.compare_digest(credentials.username, ADMIN_USERNAME)
     is_correct_password = secrets.compare_digest(credentials.password, ADMIN_PASSWORD)
-    if not (is_correct_username and is_correct_password):
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid admin credentials",
-            headers={"WWW-Authenticate": "Basic"},
+    
+    if is_correct_username and is_correct_password:
+        return credentials.username
+    
+    # Check if it's an admin user in the database
+    try:
+        # Use asyncio to run the async function in sync context
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        admin_user = loop.run_until_complete(
+            db.workers.find_one({
+                "email": credentials.username,
+                "role": "admin",
+                "password": credentials.password,
+                "active": True,
+                "archived": {"$ne": True}
+            })
         )
-    return credentials.username
+        
+        if admin_user:
+            return credentials.username
+    except Exception as e:
+        print(f"Error checking admin user: {e}")
+    
+    raise HTTPException(
+        status_code=401,
+        detail="Invalid admin credentials",
+        headers={"WWW-Authenticate": "Basic"},
+    )
 
 # Helper functions
 def calculate_duration(clock_in: datetime, clock_out: datetime) -> int:

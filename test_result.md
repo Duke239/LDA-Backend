@@ -621,15 +621,18 @@ metadata:
 
   - task: "New Admin Authentication API"
     implemented: true
-    working: "NA"
+    working: true
     file: "/app/backend/server.py"
     stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
         - working: "NA"
           agent: "main"
           comment: "Need to test that newly added admin users can login correctly without 'Invalid admin credentials' error."
+        - working: true
+          agent: "testing"
+          comment: "Successfully tested the new admin authentication API. Newly created admin users can authenticate successfully using the POST /api/admin/login endpoint. The API correctly validates admin credentials and returns a success response."
 
 test_plan:
   current_focus:

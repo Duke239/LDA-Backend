@@ -166,15 +166,53 @@ export const WorkerProvider = ({ children }) => {
     }).format(amount);
   };
 
-  // Format date
+  // Format date in UK timezone
   const formatDate = (date) => {
-    return new Date(date).toLocaleDateString('en-GB', {
+    if (!date) return 'N/A';
+    
+    // Create date object and ensure it's treated as UTC from backend
+    const utcDate = new Date(date);
+    
+    // Format in UK timezone (this automatically handles BST/GMT)
+    return new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Europe/London',
       year: 'numeric',
       month: 'short',
       day: 'numeric',
       hour: '2-digit',
+      minute: '2-digit',
+      hour12: false // Use 24-hour format
+    }).format(utcDate);
+  };
+
+  // Format time only in UK timezone
+  const formatTime = (date) => {
+    if (!date) return 'N/A';
+    
+    const utcDate = new Date(date);
+    
+    return new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Europe/London',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    }).format(utcDate);
+  };
+
+  // Get current UK time for datetime-local inputs
+  const getCurrentUKTimeForInput = () => {
+    const now = new Date();
+    // Get UK time offset
+    const ukTime = new Intl.DateTimeFormat('sv-SE', {
+      timeZone: 'Europe/London',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
       minute: '2-digit'
-    });
+    }).format(now);
+    
+    return ukTime.replace(' ', 'T');
   };
 
   // Format duration

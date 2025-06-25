@@ -94,8 +94,10 @@ const EditTimeEntryModal = ({ timeEntry, workers, jobs, onClose, onUpdate }) => 
       // Calculate duration if both clock in and out are provided
       let duration_minutes = null;
       if (formData.clock_out && formData.clock_in) {
-        const clockIn = new Date(formData.clock_in);
-        const clockOut = new Date(formData.clock_out);
+        const clockInUTC = convertUKInputToUTC(formData.clock_in);
+        const clockOutUTC = convertUKInputToUTC(formData.clock_out);
+        const clockIn = new Date(clockInUTC);
+        const clockOut = new Date(clockOutUTC);
         duration_minutes = Math.floor((clockOut - clockIn) / 60000); // Convert to minutes
       }
 

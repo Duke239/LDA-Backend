@@ -3,6 +3,9 @@ import { useNavigate } from "react-router-dom";
 import { useWorker } from "../contexts/WorkerContext";
 import axios from "axios";
 import JobEditModal from "./JobEditModal";
+import AddWorkerModal from "./AddWorkerModal";
+import AddJobModal from "./AddJobModal";
+import JobReportModal from "./JobReportModal";
 
 const AdminDashboard = () => {
   const navigate = useNavigate();
@@ -22,14 +25,36 @@ const AdminDashboard = () => {
     endDate: ""
   });
   const [editingJob, setEditingJob] = useState(null);
+  const [showAddWorker, setShowAddWorker] = useState(false);
+  const [showAddJob, setShowAddJob] = useState(false);
+  const [viewingJobReport, setViewingJobReport] = useState(null);
+
+  // Get auth headers for admin requests
+  const getAuthHeaders = () => {
+    const adminAuth = localStorage.getItem('adminAuth');
+    if (!adminAuth) {
+      navigate('/');
+      return {};
+    }
+    return {
+      'Authorization': `Basic ${adminAuth}`,
+      'Content-Type': 'application/json'
+    };
+  };
 
   // Fetch dashboard stats
   const fetchDashboardStats = async () => {
     try {
-      const response = await axios.get(`${API}/reports/dashboard`);
+      const response = await axios.get(`${API}/reports/dashboard`, {
+        headers: getAuthHeaders()
+      });
       setDashboardStats(response.data);
     } catch (error) {
-      console.error("Error fetching dashboard stats:", error);
+      if (error.response?.status === 401) {
+        handleLogout();
+      } else {
+        console.error("Error fetching dashboard stats:", error);
+      }
     }
   };
 
@@ -83,7 +108,8 @@ const AdminDashboard = () => {
       if (filters.endDate) params.append('end_date', filters.endDate);
 
       const response = await axios.get(`${API}/reports/export/time-entries?${params}`, {
-        responseType: 'blob'
+        responseType: 'blob',
+        headers: getAuthHeaders()
       });
 
       const url = window.URL.createObjectURL(new Blob([response.data]));
@@ -95,6 +121,29 @@ const AdminDashboard = () => {
       link.remove();
     } catch (error) {
       console.error("Error exporting time entries:", error);
+    }
+  };
+
+  // Export job report
+  const exportJobReport = async (jobId) => {
+    try {
+      const response = await axios.get(`${API}/reports/export/job/${jobId}`, {
+        responseType: 'blob',
+        headers: getAuthHeaders()
+      });
+
+      const job = jobs.find(j => j.id === jobId);
+      const filename = `job_report_${job?.name?.replace(/\s+/g, '_') || 'unknown'}.csv`;
+
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', filename);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch (error) {
+      console.error("Error exporting job report:", error);
     }
   };
 
@@ -124,6 +173,13 @@ const AdminDashboard = () => {
   };
 
   useEffect(() => {
+    // Check if admin is authenticated
+    const adminAuth = localStorage.getItem('adminAuth');
+    if (!adminAuth) {
+      navigate('/');
+      return;
+    }
+
     fetchDashboardStats();
     fetchData();
   }, []);
@@ -135,12 +191,23 @@ const AdminDashboard = () => {
   }, [filters, activeTab]);
 
   const handleLogout = () => {
+    localStorage.removeItem('adminAuth');
     navigate("/");
   };
 
   const handleJobUpdate = () => {
     fetchData(); // Refresh data after job update
     setEditingJob(null);
+  };
+
+  const handleWorkerAdded = () => {
+    fetchData(); // Refresh data after worker added
+    setShowAddWorker(false);
+  };
+
+  const handleJobAdded = () => {
+    fetchData(); // Refresh data after job added
+    setShowAddJob(false);
   };
 
   const StatCard = ({ title, value, color = "blue" }) => (
@@ -238,6 +305,12 @@ const AdminDashboard = () => {
           <div className="space-y-6">
             <div className="flex justify-between items-center">
               <h2 className="text-2xl font-bold text-gray-900">Jobs Management</h2>
+              <button
+                onClick={() => setShowAddJob(true)}
+                className="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2"
+              >
+                Add New Job
+              </button>
             </div>
 
             <div className="bg-white shadow-sm rounded-lg overflow-hidden">
@@ -305,13 +378,25 @@ const AdminDashboard = () => {
                             {formatCurrency(variance)}
                           </span>
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium space-x-2">
                           <button
                             onClick={() => setEditingJob(job)}
                             className="text-red-600 hover:text-red-900"
                             style={{ color: '#D11F2F' }}
                           >
                             Edit
+                          </button>
+                          <button
+                            onClick={() => setViewingJobReport(job.id)}
+                            className="text-blue-600 hover:text-blue-900"
+                          >
+                            Report
+                          </button>
+                          <button
+                            onClick={() => exportJobReport(job.id)}
+                            className="text-green-600 hover:text-green-900"
+                          >
+                            Export
                           </button>
                         </td>
                       </tr>
@@ -461,6 +546,12 @@ const AdminDashboard = () => {
           <div className="space-y-6">
             <div className="flex justify-between items-center">
               <h2 className="text-2xl font-bold text-gray-900">Workers Management</h2>
+              <button
+                onClick={() => setShowAddWorker(true)}
+                className="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2"
+              >
+                Add New Worker
+              </button>
             </div>
 
             <div className="bg-white shadow-sm rounded-lg overflow-hidden">
@@ -517,12 +608,33 @@ const AdminDashboard = () => {
         )}
       </div>
 
-      {/* Job Edit Modal */}
+      {/* Modals */}
       {editingJob && (
         <JobEditModal 
           job={editingJob} 
           onClose={() => setEditingJob(null)}
           onUpdate={handleJobUpdate}
+        />
+      )}
+
+      {showAddWorker && (
+        <AddWorkerModal 
+          onClose={() => setShowAddWorker(false)}
+          onAdded={handleWorkerAdded}
+        />
+      )}
+
+      {showAddJob && (
+        <AddJobModal 
+          onClose={() => setShowAddJob(false)}
+          onAdded={handleJobAdded}
+        />
+      )}
+
+      {viewingJobReport && (
+        <JobReportModal 
+          jobId={viewingJobReport}
+          onClose={() => setViewingJobReport(null)}
         />
       )}
     </div>

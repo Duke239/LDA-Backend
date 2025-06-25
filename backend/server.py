@@ -1,5 +1,6 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Query
+from fastapi import FastAPI, APIRouter, HTTPException, Query, Depends
 from fastapi.responses import StreamingResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -14,6 +15,7 @@ import json
 import io
 import csv
 from decimal import Decimal
+import secrets
 
 
 ROOT_DIR = Path(__file__).parent
@@ -23,6 +25,13 @@ load_dotenv(ROOT_DIR / '.env')
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
+
+# Security
+security = HTTPBasic()
+
+# Admin credentials (in production, store securely)
+ADMIN_USERNAME = "admin"
+ADMIN_PASSWORD = "ldagroup2024"
 
 # Create the main app without a prefix
 app = FastAPI(title="LDA Group Time Tracking API")
@@ -129,15 +138,42 @@ class MaterialUpdate(BaseModel):
     quantity: Optional[int] = None
     notes: Optional[str] = None
 
+class AdminLogin(BaseModel):
+    username: str
+    password: str
+
+# Security functions
+def verify_admin(credentials: HTTPBasicCredentials = Depends(security)):
+    """Verify admin credentials"""
+    is_correct_username = secrets.compare_digest(credentials.username, ADMIN_USERNAME)
+    is_correct_password = secrets.compare_digest(credentials.password, ADMIN_PASSWORD)
+    if not (is_correct_username and is_correct_password):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid admin credentials",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return credentials.username
+
 # Helper functions
 def calculate_duration(clock_in: datetime, clock_out: datetime) -> int:
     """Calculate duration in minutes between two datetime objects"""
     delta = clock_out - clock_in
     return int(delta.total_seconds() / 60)
 
+# AUTHENTICATION ENDPOINTS
+@api_router.post("/admin/login")
+async def admin_login(login_data: AdminLogin):
+    """Admin login endpoint"""
+    if login_data.username == ADMIN_USERNAME and login_data.password == ADMIN_PASSWORD:
+        return {"success": True, "message": "Admin login successful"}
+    else:
+        raise HTTPException(status_code=401, detail="Invalid admin credentials")
+
 # WORKER ENDPOINTS
 @api_router.post("/workers", response_model=Worker)
-async def create_worker(worker: WorkerCreate):
+async def create_worker(worker: WorkerCreate, admin: str = Depends(verify_admin)):
+    """Create a new worker (Admin only)"""
     worker_dict = worker.dict()
     worker_obj = Worker(**worker_dict)
     await db.workers.insert_one(worker_obj.dict())
@@ -157,7 +193,8 @@ async def get_worker(worker_id: str):
     return Worker(**worker)
 
 @api_router.put("/workers/{worker_id}", response_model=Worker)
-async def update_worker(worker_id: str, worker_update: WorkerUpdate):
+async def update_worker(worker_id: str, worker_update: WorkerUpdate, admin: str = Depends(verify_admin)):
+    """Update worker (Admin only)"""
     update_dict = {k: v for k, v in worker_update.dict().items() if v is not None}
     
     result = await db.workers.update_one({"id": worker_id}, {"$set": update_dict})
@@ -167,9 +204,18 @@ async def update_worker(worker_id: str, worker_update: WorkerUpdate):
     updated_worker = await db.workers.find_one({"id": worker_id})
     return Worker(**updated_worker)
 
+@api_router.delete("/workers/{worker_id}")
+async def delete_worker(worker_id: str, admin: str = Depends(verify_admin)):
+    """Delete worker (Admin only)"""
+    result = await db.workers.update_one({"id": worker_id}, {"$set": {"active": False}})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Worker not found")
+    return {"message": "Worker deactivated successfully"}
+
 # JOB ENDPOINTS
 @api_router.post("/jobs", response_model=Job)
-async def create_job(job: JobCreate):
+async def create_job(job: JobCreate, admin: str = Depends(verify_admin)):
+    """Create a new job (Admin only)"""
     job_dict = job.dict()
     job_obj = Job(**job_dict)
     await db.jobs.insert_one(job_obj.dict())
@@ -189,7 +235,8 @@ async def get_job(job_id: str):
     return Job(**job)
 
 @api_router.put("/jobs/{job_id}", response_model=Job)
-async def update_job(job_id: str, job_update: JobUpdate):
+async def update_job(job_id: str, job_update: JobUpdate, admin: str = Depends(verify_admin)):
+    """Update job (Admin only)"""
     update_dict = {k: v for k, v in job_update.dict().items() if v is not None}
     
     result = await db.jobs.update_one({"id": job_id}, {"$set": update_dict})
@@ -198,6 +245,14 @@ async def update_job(job_id: str, job_update: JobUpdate):
     
     updated_job = await db.jobs.find_one({"id": job_id})
     return Job(**updated_job)
+
+@api_router.delete("/jobs/{job_id}")
+async def delete_job(job_id: str, admin: str = Depends(verify_admin)):
+    """Delete job (Admin only)"""
+    result = await db.jobs.update_one({"id": job_id}, {"$set": {"status": "cancelled"}})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"message": "Job cancelled successfully"}
 
 # TIME ENTRY ENDPOINTS
 @api_router.post("/time-entries/clock-in", response_model=TimeEntry)
@@ -298,7 +353,8 @@ async def get_materials(job_id: Optional[str] = Query(None)):
     return [Material(**material) for material in materials]
 
 @api_router.put("/materials/{material_id}", response_model=Material)
-async def update_material(material_id: str, material_update: MaterialUpdate):
+async def update_material(material_id: str, material_update: MaterialUpdate, admin: str = Depends(verify_admin)):
+    """Update material (Admin only)"""
     update_dict = {k: v for k, v in material_update.dict().items() if v is not None}
     
     result = await db.materials.update_one({"id": material_id}, {"$set": update_dict})
@@ -309,7 +365,8 @@ async def update_material(material_id: str, material_update: MaterialUpdate):
     return Material(**updated_material)
 
 @api_router.delete("/materials/{material_id}")
-async def delete_material(material_id: str):
+async def delete_material(material_id: str, admin: str = Depends(verify_admin)):
+    """Delete material (Admin only)"""
     result = await db.materials.delete_one({"id": material_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Material not found")
@@ -317,7 +374,8 @@ async def delete_material(material_id: str):
 
 # REPORTING ENDPOINTS
 @api_router.get("/reports/dashboard")
-async def get_dashboard_stats():
+async def get_dashboard_stats(admin: str = Depends(verify_admin)):
+    """Get dashboard statistics (Admin only)"""
     # Get basic counts
     total_workers = await db.workers.count_documents({"active": True})
     total_jobs = await db.jobs.count_documents({"status": {"$ne": "cancelled"}})
@@ -350,7 +408,8 @@ async def get_dashboard_stats():
     }
 
 @api_router.get("/reports/job-costs/{job_id}")
-async def get_job_cost_report(job_id: str):
+async def get_job_cost_report(job_id: str, admin: str = Depends(verify_admin)):
+    """Get detailed job cost report (Admin only)"""
     # Get job details
     job = await db.jobs.find_one({"id": job_id})
     if not job:
@@ -375,6 +434,15 @@ async def get_job_cost_report(job_id: str):
     quoted_cost = job.get("quoted_cost", 0)
     cost_variance = quoted_cost - total_cost
     
+    # Get worker names for time entries
+    worker_ids = list(set(entry.get("worker_id") for entry in time_entries))
+    workers = await db.workers.find({"id": {"$in": worker_ids}}).to_list(1000)
+    worker_names = {worker["id"]: worker["name"] for worker in workers}
+    
+    # Add worker names to time entries
+    for entry in time_entries:
+        entry["worker_name"] = worker_names.get(entry.get("worker_id"), "Unknown")
+    
     return {
         "job": Job(**job),
         "total_hours": total_hours,
@@ -383,16 +451,112 @@ async def get_job_cost_report(job_id: str):
         "total_cost": total_cost,
         "quoted_cost": quoted_cost,
         "cost_variance": cost_variance,
+        "time_entries": time_entries,
+        "materials": materials,
         "time_entries_count": len(time_entries),
         "materials_count": len(materials)
     }
+
+@api_router.get("/reports/export/job/{job_id}")
+async def export_job_report(job_id: str, admin: str = Depends(verify_admin)):
+    """Export comprehensive job report as CSV (Admin only)"""
+    # Get job details
+    job = await db.jobs.find_one({"id": job_id})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    # Get time entries and materials
+    time_entries = await db.time_entries.find({"job_id": job_id}).to_list(1000)
+    materials = await db.materials.find({"job_id": job_id}).to_list(1000)
+    
+    # Get worker names
+    worker_ids = list(set(entry.get("worker_id") for entry in time_entries))
+    workers = await db.workers.find({"id": {"$in": worker_ids}}).to_list(1000)
+    worker_names = {worker["id"]: worker["name"] for worker in workers}
+    
+    # Calculate totals
+    total_minutes = sum(entry.get("duration_minutes", 0) for entry in time_entries if entry.get("duration_minutes"))
+    total_hours = round(total_minutes / 60, 1)
+    labor_cost = total_hours * 15
+    materials_cost = sum(mat.get("cost", 0) * mat.get("quantity", 1) for mat in materials)
+    total_cost = labor_cost + materials_cost
+    cost_variance = job.get("quoted_cost", 0) - total_cost
+    
+    # Create CSV
+    output = io.StringIO()
+    writer = csv.writer(output)
+    
+    # Job summary
+    writer.writerow(["JOB REPORT - " + job.get("name", "")])
+    writer.writerow(["Client", job.get("client", "")])
+    writer.writerow(["Location", job.get("location", "")])
+    writer.writerow(["Quoted Cost", f"£{job.get('quoted_cost', 0):,.2f}"])
+    writer.writerow(["Actual Cost", f"£{total_cost:,.2f}"])
+    writer.writerow(["Variance", f"£{cost_variance:,.2f}"])
+    writer.writerow([])
+    
+    # Time entries
+    writer.writerow(["TIME ENTRIES"])
+    writer.writerow(["Worker", "Clock In", "Clock Out", "Duration (hours)", "Labor Cost", "Notes"])
+    
+    for entry in time_entries:
+        worker_name = worker_names.get(entry.get("worker_id"), "Unknown")
+        clock_in = entry.get("clock_in", "")
+        clock_out = entry.get("clock_out", "")
+        duration_hours = round(entry.get("duration_minutes", 0) / 60, 2) if entry.get("duration_minutes") else 0
+        entry_labor_cost = duration_hours * 15
+        
+        writer.writerow([
+            worker_name,
+            clock_in.strftime("%Y-%m-%d %H:%M:%S") if clock_in else "",
+            clock_out.strftime("%Y-%m-%d %H:%M:%S") if clock_out else "Active",
+            duration_hours,
+            f"£{entry_labor_cost:.2f}",
+            entry.get("notes", "")
+        ])
+    
+    writer.writerow([])
+    writer.writerow(["TOTAL LABOR", "", "", total_hours, f"£{labor_cost:.2f}", ""])
+    writer.writerow([])
+    
+    # Materials
+    writer.writerow(["MATERIALS"])
+    writer.writerow(["Material", "Quantity", "Unit Cost", "Total Cost", "Purchase Date", "Notes"])
+    
+    for material in materials:
+        total_material_cost = material.get("cost", 0) * material.get("quantity", 1)
+        purchase_date = material.get("purchase_date", "")
+        
+        writer.writerow([
+            material.get("name", ""),
+            material.get("quantity", 1),
+            f"£{material.get('cost', 0):.2f}",
+            f"£{total_material_cost:.2f}",
+            purchase_date.strftime("%Y-%m-%d") if purchase_date else "",
+            material.get("notes", "")
+        ])
+    
+    writer.writerow([])
+    writer.writerow(["TOTAL MATERIALS", "", "", f"£{materials_cost:.2f}", "", ""])
+    
+    output.seek(0)
+    
+    filename = f"job_report_{job.get('name', 'unknown').replace(' ', '_')}.csv"
+    
+    return StreamingResponse(
+        io.BytesIO(output.getvalue().encode()),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
 
 @api_router.get("/reports/export/time-entries")
 async def export_time_entries(
     job_id: Optional[str] = Query(None),
     start_date: Optional[str] = Query(None),
-    end_date: Optional[str] = Query(None)
+    end_date: Optional[str] = Query(None),
+    admin: str = Depends(verify_admin)
 ):
+    """Export time entries as CSV (Admin only)"""
     # Build filter
     filter_dict = {}
     if job_id:
@@ -469,7 +633,7 @@ async def export_time_entries(
 # Root endpoint
 @api_router.get("/")
 async def root():
-    return {"message": "LDA Group Time Tracking API", "version": "1.0.0"}
+    return {"message": "LDA Group Time Tracking API", "version": "2.0.0"}
 
 # Include the router in the main app
 app.include_router(api_router)

@@ -927,6 +927,145 @@ async def export_time_entries(
         headers={"Content-Disposition": "attachment; filename=time_entries.csv"}
     )
 
+@api_router.get("/reports/export/attendance-alerts")
+async def export_attendance_alerts(admin: str = Depends(verify_admin)):
+    """Export attendance alerts for the last 7 days as CSV (Admin only)"""
+    
+    # Get attendance alerts for the last 7 days (same logic as dashboard)
+    seven_days_ago = datetime.utcnow() - timedelta(days=7)
+    nine_am_threshold = timedelta(hours=9)  # 9 AM
+    five_pm_threshold = timedelta(hours=17)  # 5 PM
+    
+    # Get all non-admin workers
+    non_admin_workers = await db.workers.find({
+        "role": {"$ne": "admin"},
+        "active": True,
+        "archived": {"$ne": True}
+    }).to_list(1000)
+    
+    attendance_alerts = []
+    
+    for worker in non_admin_workers:
+        # Check each day for the last 7 days
+        for i in range(7):
+            day_start = (datetime.utcnow() - timedelta(days=i)).replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end = day_start + timedelta(days=1)
+            nine_am = day_start + nine_am_threshold
+            five_pm = day_start + five_pm_threshold
+            
+            # Skip future dates and today if it's before 9 AM
+            if day_start.date() == datetime.utcnow().date() and datetime.utcnow().hour < 9:
+                continue
+            if day_start.date() > datetime.utcnow().date():
+                continue
+            
+            # Get all time entries for this worker on this day
+            day_entries = await db.time_entries.find({
+                "worker_id": worker["id"],
+                "clock_in": {"$gte": day_start, "$lt": day_end}
+            }).to_list(100)
+            
+            if not day_entries:
+                # No entries for this day (only alert if it's a weekday and not today)
+                if day_start.weekday() < 5 and day_start.date() != datetime.utcnow().date():  # Monday=0, Friday=4
+                    attendance_alerts.append({
+                        "worker_name": worker["name"],
+                        "worker_email": worker.get("email", ""),
+                        "type": "No Clock In",
+                        "date": day_start.strftime('%Y-%m-%d'),
+                        "day_of_week": day_start.strftime('%A'),
+                        "time": "N/A",
+                        "details": f"No clock in recorded on {day_start.strftime('%A, %d %B %Y')}"
+                    })
+            else:
+                # Check for late clock-ins
+                for entry in day_entries:
+                    clock_in_time = entry["clock_in"]
+                    
+                    # Late clock-in (after 9 AM)
+                    if clock_in_time > nine_am:
+                        # Convert to UK time for display
+                        uk_time = utc_to_uk(clock_in_time)
+                        attendance_alerts.append({
+                            "worker_name": worker["name"],
+                            "worker_email": worker.get("email", ""),
+                            "type": "Late Clock In",
+                            "date": day_start.strftime('%Y-%m-%d'),
+                            "day_of_week": day_start.strftime('%A'),
+                            "time": uk_time.strftime('%H:%M') if uk_time else "N/A",
+                            "details": f"Clocked in late at {uk_time.strftime('%H:%M') if uk_time else 'Unknown'} on {day_start.strftime('%A, %d %B %Y')}"
+                        })
+                    
+                    # Late clock-out (after 5 PM) - only check if clocked out
+                    if entry.get("clock_out") and entry["clock_out"] > five_pm:
+                        uk_time = utc_to_uk(entry["clock_out"])
+                        attendance_alerts.append({
+                            "worker_name": worker["name"],
+                            "worker_email": worker.get("email", ""),
+                            "type": "Late Clock Out",
+                            "date": day_start.strftime('%Y-%m-%d'),
+                            "day_of_week": day_start.strftime('%A'),
+                            "time": uk_time.strftime('%H:%M') if uk_time else "N/A",
+                            "details": f"Clocked out late at {uk_time.strftime('%H:%M') if uk_time else 'Unknown'} on {day_start.strftime('%A, %d %B %Y')}"
+                        })
+    
+    # Sort alerts by date (most recent first), then by worker name
+    attendance_alerts.sort(key=lambda x: (x["date"], x["worker_name"]), reverse=True)
+    
+    # Create CSV
+    output = io.StringIO()
+    writer = csv.writer(output)
+    
+    # Headers
+    writer.writerow([
+        "ATTENDANCE ALERTS - LAST 7 DAYS",
+        f"Generated: {get_uk_time().strftime('%Y-%m-%d %H:%M:%S')} UK Time"
+    ])
+    writer.writerow([])
+    writer.writerow([
+        "Worker Name", "Worker Email", "Alert Type", "Date", "Day of Week", "Time", "Details"
+    ])
+    
+    # Data rows
+    for alert in attendance_alerts:
+        writer.writerow([
+            alert["worker_name"],
+            alert["worker_email"],
+            alert["type"],
+            alert["date"],
+            alert["day_of_week"],
+            alert["time"],
+            alert["details"]
+        ])
+    
+    # Summary
+    writer.writerow([])
+    writer.writerow(["SUMMARY"])
+    writer.writerow([])
+    
+    # Count by type
+    type_counts = {}
+    for alert in attendance_alerts:
+        alert_type = alert["type"]
+        type_counts[alert_type] = type_counts.get(alert_type, 0) + 1
+    
+    for alert_type, count in type_counts.items():
+        writer.writerow([alert_type, count])
+    
+    writer.writerow([])
+    writer.writerow(["Total Alerts", len(attendance_alerts)])
+    
+    output.seek(0)
+    
+    # Generate filename with current date
+    filename = f"attendance_alerts_{datetime.utcnow().strftime('%Y%m%d')}.csv"
+    
+    return StreamingResponse(
+        io.BytesIO(output.getvalue().encode()),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
 # Root endpoint
 @api_router.get("/")
 async def root():

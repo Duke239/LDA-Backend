@@ -23,12 +23,15 @@ const JobReportModal = ({ jobId, onClose }) => {
       setLoading(true);
       setError("");
       
+      console.log(`Fetching job report for job ID: ${jobId}`);
       const response = await axios.get(`${API}/reports/job-costs/${jobId}`, {
         headers: getAuthHeaders()
       });
       
+      console.log("Job report data received:", response.data);
       setReportData(response.data);
     } catch (err) {
+      console.error("Error fetching job report:", err);
       setError(err.response?.data?.detail || "Error fetching job report");
     } finally {
       setLoading(false);

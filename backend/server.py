@@ -417,11 +417,10 @@ async def get_job_cost_report(job_id: str, admin: str = Depends(verify_admin)):
     
     # Get time entries for this job
     time_entries = await db.time_entries.find({
-        "job_id": job_id,
-        "duration_minutes": {"$exists": True}
+        "job_id": job_id
     }).to_list(1000)
     
-    total_minutes = sum(entry.get("duration_minutes", 0) for entry in time_entries)
+    total_minutes = sum(entry.get("duration_minutes", 0) for entry in time_entries if entry.get("duration_minutes"))
     total_hours = round(total_minutes / 60, 1)
     
     # Get materials for this job
@@ -435,13 +434,36 @@ async def get_job_cost_report(job_id: str, admin: str = Depends(verify_admin)):
     cost_variance = quoted_cost - total_cost
     
     # Get worker names for time entries
-    worker_ids = list(set(entry.get("worker_id") for entry in time_entries))
-    workers = await db.workers.find({"id": {"$in": worker_ids}}).to_list(1000)
+    worker_ids = list(set(entry.get("worker_id") for entry in time_entries if entry.get("worker_id")))
+    workers = await db.workers.find({"id": {"$in": worker_ids}}).to_list(1000) if worker_ids else []
     worker_names = {worker["id"]: worker["name"] for worker in workers}
     
-    # Add worker names to time entries
+    # Clean time entries data
+    clean_time_entries = []
     for entry in time_entries:
-        entry["worker_name"] = worker_names.get(entry.get("worker_id"), "Unknown")
+        clean_entry = {
+            "id": entry.get("id"),
+            "worker_id": entry.get("worker_id"),
+            "worker_name": worker_names.get(entry.get("worker_id"), "Unknown"),
+            "clock_in": entry.get("clock_in"),
+            "clock_out": entry.get("clock_out"),
+            "duration_minutes": entry.get("duration_minutes"),
+            "notes": entry.get("notes", "")
+        }
+        clean_time_entries.append(clean_entry)
+    
+    # Clean materials data
+    clean_materials = []
+    for material in materials:
+        clean_material = {
+            "id": material.get("id"),
+            "name": material.get("name"),
+            "cost": material.get("cost"),
+            "quantity": material.get("quantity"),
+            "purchase_date": material.get("purchase_date"),
+            "notes": material.get("notes", "")
+        }
+        clean_materials.append(clean_material)
     
     return {
         "job": Job(**job),
@@ -451,8 +473,8 @@ async def get_job_cost_report(job_id: str, admin: str = Depends(verify_admin)):
         "total_cost": total_cost,
         "quoted_cost": quoted_cost,
         "cost_variance": cost_variance,
-        "time_entries": time_entries,
-        "materials": materials,
+        "time_entries": clean_time_entries,
+        "materials": clean_materials,
         "time_entries_count": len(time_entries),
         "materials_count": len(materials)
     }

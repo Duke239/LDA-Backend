@@ -3,12 +3,73 @@ import { useWorker } from "../contexts/WorkerContext";
 import axios from "axios";
 
 const EditTimeEntryModal = ({ timeEntry, workers, jobs, onClose, onUpdate }) => {
-  const { API, formatDate } = useWorker();
+  const { API, formatDate, getCurrentUKTimeForInput } = useWorker();
+  
+  // Convert UTC times from backend to UK local time for datetime-local inputs
+  const convertUTCToUKInput = (utcDateString) => {
+    if (!utcDateString) return "";
+    
+    const utcDate = new Date(utcDateString);
+    
+    // Format as UK local time for datetime-local input
+    return new Intl.DateTimeFormat('sv-SE', {
+      timeZone: 'Europe/London',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit'
+    }).format(utcDate).replace(' ', 'T');
+  };
+  
+  // Convert UK local time from input to UTC for backend
+  const convertUKInputToUTC = (ukTimeString) => {
+    if (!ukTimeString) return null;
+    
+    // Create a date object treating the input as UK local time
+    const ukDate = new Date(ukTimeString);
+    
+    // Get the timezone offset for UK at this date
+    const ukFormatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Europe/London',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    });
+    
+    const utcFormatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'UTC',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    });
+    
+    // Create a test date to find the offset
+    const testDate = new Date(ukTimeString);
+    const ukTime = ukFormatter.format(testDate);
+    const utcTime = utcFormatter.format(testDate);
+    
+    // Calculate offset and adjust
+    const ukTimestamp = new Date(ukTime).getTime();
+    const utcTimestamp = new Date(utcTime).getTime();
+    const offset = ukTimestamp - utcTimestamp;
+    
+    return new Date(testDate.getTime() - offset).toISOString();
+  };
+
   const [formData, setFormData] = useState({
     worker_id: timeEntry.worker_id,
     job_id: timeEntry.job_id,
-    clock_in: timeEntry.clock_in ? new Date(timeEntry.clock_in).toISOString().slice(0, 16) : "",
-    clock_out: timeEntry.clock_out ? new Date(timeEntry.clock_out).toISOString().slice(0, 16) : "",
+    clock_in: convertUTCToUKInput(timeEntry.clock_in),
+    clock_out: convertUTCToUKInput(timeEntry.clock_out),
     notes: timeEntry.notes || ""
   });
   const [loading, setLoading] = useState(false);

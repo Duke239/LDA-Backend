@@ -31,10 +31,10 @@ export const WorkerProvider = ({ children }) => {
     }
   };
 
-  // Fetch jobs
+  // Fetch jobs (excluding archived by default)
   const fetchJobs = async () => {
     try {
-      const response = await axios.get(`${API}/jobs`);
+      const response = await axios.get(`${API}/jobs?active_only=true`);
       setJobs(response.data);
     } catch (error) {
       console.error("Error fetching jobs:", error);
@@ -57,26 +57,15 @@ export const WorkerProvider = ({ children }) => {
             accuracy: position.coords.accuracy,
           };
 
-          // Try to get address from coordinates
+          // Try to get address from coordinates using a simple reverse geocoding
           try {
-            const response = await fetch(
-              `https://api.opencagedata.com/geocode/v1/json?q=${location.latitude}+${location.longitude}&key=YOUR_API_KEY&limit=1`
-            );
+            // Fallback to basic address format using coordinates
+            location.address = `Lat: ${location.latitude.toFixed(6)}, Lng: ${location.longitude.toFixed(6)}`;
             
-            if (response.ok) {
-              const data = await response.json();
-              if (data.results && data.results.length > 0) {
-                location.address = data.results[0].formatted;
-              }
-            }
+            // You can replace this with a proper geocoding service if needed
+            // For now, we'll use a simple coordinate-based address
           } catch (error) {
             console.warn("Could not get address from coordinates:", error);
-            // Fallback to basic address format
-            location.address = `${location.latitude.toFixed(6)}, ${location.longitude.toFixed(6)}`;
-          }
-
-          // If no address was found, create a basic one
-          if (!location.address) {
             location.address = `${location.latitude.toFixed(6)}, ${location.longitude.toFixed(6)}`;
           }
 

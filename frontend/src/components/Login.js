@@ -54,6 +54,11 @@ const Login = () => {
     }
   };
 
+  // Filter out archived workers and admin users, then sort alphabetically
+  const availableWorkers = workers
+    .filter(worker => !worker.archived && worker.role !== 'admin')
+    .sort((a, b) => a.name.localeCompare(b.name));
+
   return (
     <div className="min-h-screen bg-gray-50 flex items-center justify-center" style={{
       background: 'linear-gradient(135deg, #f9fafb 0%, #f3f4f6 50%, #fef2f2 100%)'
@@ -125,7 +130,7 @@ const Login = () => {
                     className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-red-500"
                   >
                     <option value="">Choose your name...</option>
-                    {workers.filter(worker => !worker.archived).map((worker) => (
+                    {availableWorkers.map((worker) => (
                       <option key={worker.id} value={worker.id}>
                         {worker.name}
                       </option>
@@ -147,7 +152,7 @@ const Login = () => {
               <form onSubmit={handleAdminLogin} className="space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Admin Username
+                    Admin Username/Email
                   </label>
                   <input
                     type="text"
@@ -157,7 +162,7 @@ const Login = () => {
                       username: e.target.value
                     })}
                     className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-red-500"
-                    placeholder="Enter admin username"
+                    placeholder="Enter admin username or email"
                     required
                   />
                 </div>
@@ -201,13 +206,6 @@ const Login = () => {
 
         <div className="text-center text-sm text-gray-500">
           <p>Need help? Contact your supervisor.</p>
-          {isAdmin && (
-            <div className="mt-2 text-xs bg-red-50 p-3 rounded-md border" style={{borderColor: '#d01f2f'}}>
-              <strong className="text-red-700">Default admin credentials:</strong><br />
-              <span className="text-red-600">Username: admin</span><br />
-              <span className="text-red-600">Password: ldagroup2024</span>
-            </div>
-          )}
         </div>
       </div>
     </div>

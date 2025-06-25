@@ -445,17 +445,113 @@ frontend:
           agent: "testing"
           comment: "Successfully verified the company values display. Red squares with 'We Care, We Deliver, We are Professional, We Celebrate' are displayed at the bottom of the worker dashboard. The values are properly styled with the brand color and are responsive on different screen sizes."
 
-  - task: "Company Logo"
+  - task: "Hide Default Admin Credentials"
     implemented: true
-    working: true
+    working: "NA"
     file: "/app/frontend/src/components/Login.js"
     stuck_count: 0
-    priority: "medium"
-    needs_retesting: false
+    priority: "high"
+    needs_retesting: true
     status_history:
-        - working: true
-          agent: "testing"
-          comment: "Successfully verified the company logo display. The LDA Group logo is displayed on the login page, worker dashboard, and admin dashboard. The logo is properly sized and positioned, and maintains its quality on different screen sizes."
+        - working: "NA"
+          agent: "main"
+          comment: "Need to test that default admin credentials are hidden from the login page."
+
+  - task: "Jobs Page UI Fixes"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/src/components/AdminDashboard.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Need to test that jobs page UI fixes are working correctly - actions should not be hidden and columns should be properly displayed when including archived jobs."
+
+  - task: "Jobs Page Actions Styling"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/src/components/AdminDashboard.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Need to test that jobs page actions are styled with red background and white text buttons, and that export function is hidden."
+
+  - task: "Time Entry Editing Modal"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/src/components/EditTimeEntryModal.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Need to test the new time entry editing functionality where admins can edit time entries on the reports page."
+
+  - task: "Attendance Dashboard Log"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/src/components/AdminDashboard.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Need to test that attendance alerts (late login/early logout) are displayed on the dashboard, excluding admins."
+
+  - task: "Exclude Admins from Worker Dropdown"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/src/components/Login.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Need to test that admin users are excluded from worker selection dropdowns."
+
+  - task: "Alphabetical Worker Sorting"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/src/components/Login.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Need to test that worker dropdown list is organized alphabetically."
+
+  - task: "Job Unarchiving Frontend"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/src/components/AdminDashboard.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Need to test the job unarchiving feature in the admin dashboard."
+
+  - task: "Job Filtering & Export Frontend"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/src/components/AdminDashboard.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Need to test client/status filtering and CSV export functionality on the Job Management page."
 
 metadata:
   created_by: "testing_agent"

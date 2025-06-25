@@ -381,6 +381,49 @@ async def clock_out(entry_id: str, clock_out_data: TimeEntryClockOut):
     updated_entry = await db.time_entries.find_one({"id": entry_id})
     return TimeEntry(**updated_entry)
 
+@api_router.put("/time-entries/{entry_id}", response_model=TimeEntry)
+async def update_time_entry(entry_id: str, entry_data: dict, admin: str = Depends(verify_admin)):
+    """Update time entry (Admin only)"""
+    # Find the existing time entry
+    existing_entry = await db.time_entries.find_one({"id": entry_id})
+    if not existing_entry:
+        raise HTTPException(status_code=404, detail="Time entry not found")
+    
+    # Prepare update dictionary
+    update_dict = {}
+    
+    # Update allowed fields
+    if "worker_id" in entry_data:
+        update_dict["worker_id"] = entry_data["worker_id"]
+    if "job_id" in entry_data:
+        update_dict["job_id"] = entry_data["job_id"]
+    if "clock_in" in entry_data:
+        update_dict["clock_in"] = datetime.fromisoformat(entry_data["clock_in"].replace('Z', '+00:00'))
+    if "clock_out" in entry_data and entry_data["clock_out"]:
+        update_dict["clock_out"] = datetime.fromisoformat(entry_data["clock_out"].replace('Z', '+00:00'))
+    elif "clock_out" in entry_data and entry_data["clock_out"] is None:
+        update_dict["clock_out"] = None
+        update_dict["duration_minutes"] = None
+    if "notes" in entry_data:
+        update_dict["notes"] = entry_data["notes"]
+    
+    # Recalculate duration if both clock_in and clock_out are present
+    if "duration_minutes" in entry_data:
+        update_dict["duration_minutes"] = entry_data["duration_minutes"]
+    elif "clock_in" in update_dict and "clock_out" in update_dict and update_dict["clock_out"]:
+        clock_in = update_dict["clock_in"] if "clock_in" in update_dict else existing_entry["clock_in"]
+        clock_out = update_dict["clock_out"]
+        update_dict["duration_minutes"] = calculate_duration(clock_in, clock_out)
+    
+    # Update the time entry
+    result = await db.time_entries.update_one({"id": entry_id}, {"$set": update_dict})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Time entry not found")
+    
+    # Return updated entry
+    updated_entry = await db.time_entries.find_one({"id": entry_id})
+    return TimeEntry(**updated_entry)
+
 @api_router.get("/time-entries", response_model=List[TimeEntry])
 async def get_time_entries(
     worker_id: Optional[str] = Query(None),

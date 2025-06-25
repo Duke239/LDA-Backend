@@ -61,7 +61,10 @@ const JobReportModal = ({ jobId, onClose }) => {
   };
 
   useEffect(() => {
-    fetchJobReport();
+    console.log(`JobReportModal mounted with jobId: ${jobId}`);
+    if (jobId) {
+      fetchJobReport();
+    }
   }, [jobId]);
 
   if (loading) {

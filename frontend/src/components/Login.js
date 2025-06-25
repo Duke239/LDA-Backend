@@ -55,15 +55,20 @@ const Login = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+    <div className="min-h-screen bg-gray-50 flex items-center justify-center" style={{
+      background: 'linear-gradient(135deg, #f9fafb 0%, #f3f4f6 50%, #fef2f2 100%)'
+    }}>
       <div className="max-w-md w-full space-y-8">
         <div className="text-center">
+          <div className="flex justify-center mb-4">
+            <img src="/lda-logo.svg" alt="LDA Group" className="h-24 w-24" />
+          </div>
           <h1 className="text-4xl font-bold text-gray-900 mb-2">LDA Group</h1>
           <h2 className="text-xl font-semibold text-gray-600">Time Tracking</h2>
           <p className="text-gray-500 mt-2">Select your profile to continue</p>
         </div>
 
-        <div className="bg-white p-8 rounded-lg shadow-md">
+        <div className="bg-white p-8 rounded-lg shadow-md border-l-4" style={{borderLeftColor: '#d01f2f'}}>
           {error && (
             <div className="mb-4 bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-md">
               {error}
@@ -83,6 +88,7 @@ const Login = () => {
                     setError("");
                   }}
                   className="text-red-600 focus:ring-red-500"
+                  style={{accentColor: '#d01f2f'}}
                 />
                 <span className="text-gray-700">Worker</span>
               </label>
@@ -100,6 +106,7 @@ const Login = () => {
                     setError("");
                   }}
                   className="text-red-600 focus:ring-red-500"
+                  style={{accentColor: '#d01f2f'}}
                 />
                 <span className="text-gray-700">Admin</span>
               </label>
@@ -118,7 +125,7 @@ const Login = () => {
                     className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-red-500"
                   >
                     <option value="">Choose your name...</option>
-                    {workers.map((worker) => (
+                    {workers.filter(worker => !worker.archived).map((worker) => (
                       <option key={worker.id} value={worker.id}>
                         {worker.name}
                       </option>
@@ -129,8 +136,8 @@ const Login = () => {
                 <button
                   onClick={handleWorkerLogin}
                   disabled={!selectedWorker}
-                  className="w-full bg-red-600 text-white py-2 px-4 rounded-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
-                  style={{ backgroundColor: selectedWorker ? '#D11F2F' : '#9CA3AF' }}
+                  className="w-full text-white py-3 px-4 rounded-md hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors font-medium"
+                  style={{ backgroundColor: selectedWorker ? '#d01f2f' : '#9CA3AF' }}
                 >
                   Start Working
                 </button>
@@ -175,8 +182,8 @@ const Login = () => {
                 <button
                   type="submit"
                   disabled={loading || !adminCredentials.username || !adminCredentials.password}
-                  className="w-full bg-red-600 text-white py-2 px-4 rounded-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
-                  style={{ backgroundColor: (loading || !adminCredentials.username || !adminCredentials.password) ? '#9CA3AF' : '#D11F2F' }}
+                  className="w-full text-white py-3 px-4 rounded-md hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors font-medium"
+                  style={{ backgroundColor: (loading || !adminCredentials.username || !adminCredentials.password) ? '#9CA3AF' : '#d01f2f' }}
                 >
                   {loading ? (
                     <div className="flex items-center justify-center">
@@ -195,11 +202,11 @@ const Login = () => {
         <div className="text-center text-sm text-gray-500">
           <p>Need help? Contact your supervisor.</p>
           {isAdmin && (
-            <p className="mt-2 text-xs">
-              <strong>Default admin credentials:</strong><br />
-              Username: admin<br />
-              Password: ldagroup2024
-            </p>
+            <div className="mt-2 text-xs bg-red-50 p-3 rounded-md border" style={{borderColor: '#d01f2f'}}>
+              <strong className="text-red-700">Default admin credentials:</strong><br />
+              <span className="text-red-600">Username: admin</span><br />
+              <span className="text-red-600">Password: ldagroup2024</span>
+            </div>
           )}
         </div>
       </div>

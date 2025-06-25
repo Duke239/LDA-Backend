@@ -41,8 +41,8 @@ export const WorkerProvider = ({ children }) => {
     }
   };
 
-  // Get current position
-  const getCurrentPosition = () => {
+  // Get current position with address lookup
+  const getCurrentPosition = async () => {
     return new Promise((resolve, reject) => {
       if (!navigator.geolocation) {
         reject(new Error("Geolocation is not supported"));
@@ -50,12 +50,37 @@ export const WorkerProvider = ({ children }) => {
       }
 
       navigator.geolocation.getCurrentPosition(
-        (position) => {
-          resolve({
+        async (position) => {
+          const location = {
             latitude: position.coords.latitude,
             longitude: position.coords.longitude,
             accuracy: position.coords.accuracy,
-          });
+          };
+
+          // Try to get address from coordinates
+          try {
+            const response = await fetch(
+              `https://api.opencagedata.com/geocode/v1/json?q=${location.latitude}+${location.longitude}&key=YOUR_API_KEY&limit=1`
+            );
+            
+            if (response.ok) {
+              const data = await response.json();
+              if (data.results && data.results.length > 0) {
+                location.address = data.results[0].formatted;
+              }
+            }
+          } catch (error) {
+            console.warn("Could not get address from coordinates:", error);
+            // Fallback to basic address format
+            location.address = `${location.latitude.toFixed(6)}, ${location.longitude.toFixed(6)}`;
+          }
+
+          // If no address was found, create a basic one
+          if (!location.address) {
+            location.address = `${location.latitude.toFixed(6)}, ${location.longitude.toFixed(6)}`;
+          }
+
+          resolve(location);
         },
         (error) => {
           console.warn("GPS error:", error);

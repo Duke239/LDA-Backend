@@ -8,7 +8,9 @@ const AddWorkerModal = ({ onClose, onAdded }) => {
     name: "",
     email: "",
     phone: "",
-    role: "worker"
+    role: "worker",
+    hourly_rate: 15.0,
+    password: ""
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -25,11 +27,22 @@ const AddWorkerModal = ({ onClose, onAdded }) => {
   const handleSubmit = async (e) => {
     e.preventDefault();
     
+    // Validate admin password if role is admin
+    if (formData.role === 'admin' && !formData.password) {
+      setError("Password is required for admin users");
+      return;
+    }
+
     try {
       setLoading(true);
       setError("");
       
-      await axios.post(`${API}/workers`, formData, {
+      const submitData = { ...formData };
+      if (formData.role !== 'admin') {
+        delete submitData.password; // Remove password for non-admin users
+      }
+      
+      await axios.post(`${API}/workers`, submitData, {
         headers: getAuthHeaders()
       });
       
@@ -45,7 +58,7 @@ const AddWorkerModal = ({ onClose, onAdded }) => {
     const { name, value } = e.target;
     setFormData(prev => ({
       ...prev,
-      [name]: value
+      [name]: name === 'hourly_rate' ? parseFloat(value) || 0 : value
     }));
   };
 
@@ -108,21 +121,57 @@ const AddWorkerModal = ({ onClose, onAdded }) => {
             />
           </div>
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Role
-            </label>
-            <select
-              name="role"
-              value={formData.role}
-              onChange={handleChange}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-red-500"
-            >
-              <option value="worker">Worker</option>
-              <option value="supervisor">Supervisor</option>
-              <option value="admin">Admin</option>
-            </select>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Role
+              </label>
+              <select
+                name="role"
+                value={formData.role}
+                onChange={handleChange}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-red-500"
+              >
+                <option value="worker">Worker</option>
+                <option value="supervisor">Supervisor</option>
+                <option value="admin">Admin</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Hourly Rate (£)
+              </label>
+              <input
+                type="number"
+                name="hourly_rate"
+                value={formData.hourly_rate}
+                onChange={handleChange}
+                step="0.01"
+                min="0"
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-red-500"
+                required
+              />
+            </div>
           </div>
+
+          {formData.role === 'admin' && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Admin Password *
+              </label>
+              <input
+                type="password"
+                name="password"
+                value={formData.password}
+                onChange={handleChange}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-red-500"
+                placeholder="Enter admin password"
+                required={formData.role === 'admin'}
+              />
+              <p className="text-xs text-gray-500 mt-1">Required for admin users to access admin dashboard</p>
+            </div>
+          )}
 
           <div className="flex space-x-3 pt-4">
             <button
@@ -136,7 +185,7 @@ const AddWorkerModal = ({ onClose, onAdded }) => {
               type="submit"
               disabled={loading}
               className="flex-1 py-2 px-4 rounded-md text-white font-medium focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
-              style={{ backgroundColor: loading ? '#9CA3AF' : '#D11F2F' }}
+              style={{ backgroundColor: loading ? '#9CA3AF' : '#d01f2f' }}
             >
               {loading ? (
                 <div className="flex items-center justify-center">

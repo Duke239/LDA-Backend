@@ -7,6 +7,8 @@ const AddMaterial = ({ jobId, onClose }) => {
     name: "",
     cost: "",
     quantity: 1,
+    supplier: "",
+    reference: "",
     notes: ""
   });
   const [loading, setLoading] = useState(false);
@@ -29,6 +31,8 @@ const AddMaterial = ({ jobId, onClose }) => {
         name: material.name,
         cost: parseFloat(material.cost),
         quantity: parseInt(material.quantity),
+        supplier: material.supplier,
+        reference: material.reference,
         notes: material.notes
       });
 
@@ -102,6 +106,32 @@ const AddMaterial = ({ jobId, onClose }) => {
             </div>
           </div>
 
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Supplier
+            </label>
+            <input
+              type="text"
+              value={material.supplier}
+              onChange={(e) => setMaterial({ ...material, supplier: e.target.value })}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-red-500"
+              placeholder="e.g., B&Q, Wickes, Travis Perkins"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Reference / Receipt Number
+            </label>
+            <input
+              type="text"
+              value={material.reference}
+              onChange={(e) => setMaterial({ ...material, reference: e.target.value })}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-red-500"
+              placeholder="Receipt number or reference"
+            />
+          </div>
+
           {totalCost > 0 && (
             <div className="bg-blue-50 border border-blue-200 p-3 rounded-md">
               <p className="text-blue-800 font-medium">
@@ -135,7 +165,7 @@ const AddMaterial = ({ jobId, onClose }) => {
               type="submit"
               disabled={loading}
               className="flex-1 py-2 px-4 rounded-md text-white font-medium focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
-              style={{ backgroundColor: loading ? '#9CA3AF' : '#D11F2F' }}
+              style={{ backgroundColor: loading ? '#9CA3AF' : '#d01f2f' }}
             >
               {loading ? (
                 <div className="flex items-center justify-center">

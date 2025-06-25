@@ -44,22 +44,32 @@ const WorkerDashboard = () => {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-red-600 mx-auto"></div>
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-red-600 mx-auto" style={{borderBottomColor: '#d01f2f'}}></div>
           <p className="mt-4 text-gray-600">Loading...</p>
         </div>
       </div>
     );
   }
 
+  const companyValues = [
+    "We Care",
+    "We Deliver", 
+    "We are Professional",
+    "We Celebrate"
+  ];
+
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
-      <div className="bg-white shadow-sm border-b border-gray-200">
+      <div className="bg-white shadow-sm border-b border-gray-200" style={{borderBottomColor: '#d01f2f', borderBottomWidth: '3px'}}>
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between items-center py-4">
-            <div>
-              <h1 className="text-2xl font-bold text-gray-900">LDA Group</h1>
-              <p className="text-gray-600">Welcome, {currentWorker.name}</p>
+            <div className="flex items-center space-x-4">
+              <img src="/lda-logo.svg" alt="LDA Group" className="h-12 w-12" />
+              <div>
+                <h1 className="text-2xl font-bold text-gray-900">LDA Group</h1>
+                <p className="text-gray-600">Welcome, {currentWorker.name}</p>
+              </div>
             </div>
             <button
               onClick={handleLogout}
@@ -111,7 +121,8 @@ const WorkerDashboard = () => {
               <div className="mt-6">
                 <button
                   onClick={() => setShowAddMaterial(true)}
-                  className="w-full bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-colors"
+                  className="w-full text-white py-2 px-4 rounded-md hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 transition-colors"
+                  style={{backgroundColor: '#d01f2f'}}
                 >
                   Add Materials
                 </button>
@@ -141,7 +152,7 @@ const WorkerDashboard = () => {
                 <h3 className="font-medium text-purple-900 mb-2">Add Materials</h3>
                 <p className="text-purple-800 text-sm">
                   While clocked in, you can add materials purchased for the job. 
-                  Include receipts and accurate costs.
+                  Include supplier details and receipt numbers.
                 </p>
               </div>
               <div className="bg-orange-50 p-4 rounded-lg">
@@ -151,6 +162,21 @@ const WorkerDashboard = () => {
                   GPS helps verify you're at the correct job site.
                 </p>
               </div>
+            </div>
+          </div>
+
+          {/* Company Values */}
+          <div className="lg:col-span-2">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              {companyValues.map((value, index) => (
+                <div
+                  key={index}
+                  className="text-white text-center py-4 px-2 rounded-lg font-bold text-sm md:text-base"
+                  style={{backgroundColor: '#d01f2f'}}
+                >
+                  {value}
+                </div>
+              ))}
             </div>
           </div>
         </div>

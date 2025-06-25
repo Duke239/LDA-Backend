@@ -6,7 +6,7 @@ import csv
 import io
 
 # Configuration
-BACKEND_URL = "https://dc892d2a-066c-47a1-bd95-54ff09f63917.preview.emergentagent.com/api"
+BACKEND_URL = "https://8ed69a34-0256-47a2-a1bb-2bd068b0c0bc.preview.emergentagent.com/api"
 LONDON_COORDINATES = {"latitude": 51.5074, "longitude": -0.1278, "accuracy": 10.0}
 
 # Test data

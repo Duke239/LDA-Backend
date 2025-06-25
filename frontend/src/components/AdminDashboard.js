@@ -23,27 +23,32 @@ const AdminDashboard = () => {
   const [loading, setLoading] = useState(false);
 
   // Function to export attendance alerts
-  const exportAttendanceAlerts = () => {
-    if (!dashboardStats.attendance_alerts || dashboardStats.attendance_alerts.length === 0) return;
-    
-    const csvContent = [
-      ['Worker Name', 'Alert Type', 'Message', 'Date'],
-      ...dashboardStats.attendance_alerts.map(alert => [
-        alert.worker_name,
-        alert.type,
-        alert.message,
-        alert.date ? new Date(alert.date).toLocaleDateString('en-GB') : ''
-      ])
-    ].map(row => row.join(',')).join('\n');
+  const exportAttendanceAlerts = async () => {
+    try {
+      const adminAuth = localStorage.getItem('adminAuth');
+      const response = await fetch(`${API}/reports/export/attendance-alerts`, {
+        headers: {
+          'Authorization': `Basic ${adminAuth}`
+        }
+      });
 
-    const blob = new Blob([csvContent], { type: 'text/csv' });
-    const url = window.URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.setAttribute('download', `attendance_alerts_${new Date().toISOString().split('T')[0]}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
+      if (response.ok) {
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.setAttribute('download', `attendance_alerts_${new Date().toISOString().split('T')[0]}.csv`);
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(url);
+      } else {
+        alert('Error exporting attendance alerts');
+      }
+    } catch (error) {
+      console.error('Error exporting attendance alerts:', error);
+      alert('Error exporting attendance alerts');
+    }
   };
   
   // Filters for reports

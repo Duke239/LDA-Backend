@@ -336,6 +336,14 @@ async def archive_job(job_id: str, admin: str = Depends(verify_admin)):
         raise HTTPException(status_code=404, detail="Job not found")
     return {"message": "Job archived successfully"}
 
+@api_router.put("/jobs/{job_id}/unarchive")
+async def unarchive_job(job_id: str, admin: str = Depends(verify_admin)):
+    """Unarchive job (Admin only)"""
+    result = await db.jobs.update_one({"id": job_id}, {"$set": {"archived": False}})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"message": "Job unarchived successfully"}
+
 # TIME ENTRY ENDPOINTS
 @api_router.post("/time-entries/clock-in", response_model=TimeEntry)
 async def clock_in(entry: TimeEntryClockIn):

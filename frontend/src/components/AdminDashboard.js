@@ -6,6 +6,8 @@ import JobEditModal from "./JobEditModal";
 import AddWorkerModal from "./AddWorkerModal";
 import AddJobModal from "./AddJobModal";
 import JobReportModal from "./JobReportModal";
+import EditWorkerModal from "./EditWorkerModal";
+import AddMaterialToJobModal from "./AddMaterialToJobModal";
 
 const AdminDashboard = () => {
   const navigate = useNavigate();
@@ -28,6 +30,9 @@ const AdminDashboard = () => {
   const [showAddWorker, setShowAddWorker] = useState(false);
   const [showAddJob, setShowAddJob] = useState(false);
   const [viewingJobReport, setViewingJobReport] = useState(null);
+  const [editingWorker, setEditingWorker] = useState(null);
+  const [addingMaterialToJob, setAddingMaterialToJob] = useState(null);
+  const [includeArchived, setIncludeArchived] = useState(false);
 
   // Get auth headers for admin requests
   const getAuthHeaders = () => {
@@ -63,8 +68,8 @@ const AdminDashboard = () => {
     setLoading(true);
     try {
       const [jobsRes, workersRes, timeEntriesRes, materialsRes] = await Promise.all([
-        axios.get(`${API}/jobs`),
-        axios.get(`${API}/workers`),
+        axios.get(`${API}/jobs?include_archived=${includeArchived}`),
+        axios.get(`${API}/workers?include_archived=${includeArchived}`),
         axios.get(`${API}/time-entries`),
         axios.get(`${API}/materials`)
       ]);
@@ -77,6 +82,58 @@ const AdminDashboard = () => {
       console.error("Error fetching data:", error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Archive worker
+  const archiveWorker = async (workerId) => {
+    try {
+      await axios.put(`${API}/workers/${workerId}/archive`, {}, {
+        headers: getAuthHeaders()
+      });
+      fetchData();
+    } catch (error) {
+      console.error("Error archiving worker:", error);
+    }
+  };
+
+  // Delete worker
+  const deleteWorker = async (workerId) => {
+    if (window.confirm("Are you sure you want to permanently delete this worker?")) {
+      try {
+        await axios.delete(`${API}/workers/${workerId}`, {
+          headers: getAuthHeaders()
+        });
+        fetchData();
+      } catch (error) {
+        console.error("Error deleting worker:", error);
+      }
+    }
+  };
+
+  // Archive job
+  const archiveJob = async (jobId) => {
+    try {
+      await axios.put(`${API}/jobs/${jobId}/archive`, {}, {
+        headers: getAuthHeaders()
+      });
+      fetchData();
+    } catch (error) {
+      console.error("Error archiving job:", error);
+    }
+  };
+
+  // Delete job
+  const deleteJob = async (jobId) => {
+    if (window.confirm("Are you sure you want to permanently delete this job?")) {
+      try {
+        await axios.delete(`${API}/jobs/${jobId}`, {
+          headers: getAuthHeaders()
+        });
+        fetchData();
+      } catch (error) {
+        console.error("Error deleting job:", error);
+      }
     }
   };
 
@@ -159,13 +216,22 @@ const AdminDashboard = () => {
     return job ? job.name : "Unknown";
   };
 
-  // Calculate job totals
+  // Calculate job totals with individual hourly rates
   const getJobTotals = (jobId) => {
     const jobTimeEntries = timeEntries.filter(entry => entry.job_id === jobId && entry.duration_minutes);
     const jobMaterials = materials.filter(material => material.job_id === jobId);
     
     const totalHours = jobTimeEntries.reduce((sum, entry) => sum + (entry.duration_minutes || 0), 0) / 60;
-    const laborCost = totalHours * 15; // £15/hour
+    
+    // Calculate labor cost using individual worker hourly rates
+    let laborCost = 0;
+    jobTimeEntries.forEach(entry => {
+      const worker = workers.find(w => w.id === entry.worker_id);
+      const hourlyRate = worker?.hourly_rate || 15.0;
+      const entryHours = (entry.duration_minutes || 0) / 60;
+      laborCost += entryHours * hourlyRate;
+    });
+    
     const materialsCost = jobMaterials.reduce((sum, material) => sum + (material.cost * material.quantity), 0);
     const totalCost = laborCost + materialsCost;
     
@@ -182,7 +248,7 @@ const AdminDashboard = () => {
 
     fetchDashboardStats();
     fetchData();
-  }, []);
+  }, [includeArchived]);
 
   useEffect(() => {
     if (activeTab === "reports") {
@@ -196,22 +262,32 @@ const AdminDashboard = () => {
   };
 
   const handleJobUpdate = () => {
-    fetchData(); // Refresh data after job update
+    fetchData();
     setEditingJob(null);
   };
 
   const handleWorkerAdded = () => {
-    fetchData(); // Refresh data after worker added
+    fetchData();
     setShowAddWorker(false);
   };
 
   const handleJobAdded = () => {
-    fetchData(); // Refresh data after job added
+    fetchData();
     setShowAddJob(false);
   };
 
+  const handleWorkerUpdated = () => {
+    fetchData();
+    setEditingWorker(null);
+  };
+
+  const handleMaterialAdded = () => {
+    fetchData();
+    setAddingMaterialToJob(null);
+  };
+
   const StatCard = ({ title, value, color = "blue" }) => (
-    <div className="bg-white rounded-lg shadow-sm p-6">
+    <div className="bg-white rounded-lg shadow-sm p-6 border-l-4" style={{borderLeftColor: '#d01f2f'}}>
       <div className="flex items-center">
         <div className="flex-1">
           <p className="text-sm font-medium text-gray-600">{title}</p>
@@ -224,12 +300,15 @@ const AdminDashboard = () => {
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
-      <div className="bg-white shadow-sm border-b border-gray-200">
+      <div className="bg-white shadow-sm border-b-4" style={{borderBottomColor: '#d01f2f'}}>
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between items-center py-4">
-            <div>
-              <h1 className="text-2xl font-bold text-gray-900">LDA Group</h1>
-              <p className="text-gray-600">Admin Dashboard</p>
+            <div className="flex items-center space-x-4">
+              <img src="/lda-logo.svg" alt="LDA Group" className="h-12 w-12" />
+              <div>
+                <h1 className="text-2xl font-bold text-gray-900">LDA Group</h1>
+                <p className="text-gray-600">Admin Dashboard</p>
+              </div>
             </div>
             <button
               onClick={handleLogout}
@@ -256,12 +335,12 @@ const AdminDashboard = () => {
                 onClick={() => setActiveTab(tab.id)}
                 className={`py-4 px-1 border-b-2 font-medium text-sm ${
                   activeTab === tab.id
-                    ? "border-red-600 text-red-600"
+                    ? "text-red-600"
                     : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
                 }`}
                 style={{ 
-                  borderBottomColor: activeTab === tab.id ? '#D11F2F' : 'transparent',
-                  color: activeTab === tab.id ? '#D11F2F' : undefined
+                  borderBottomColor: activeTab === tab.id ? '#d01f2f' : 'transparent',
+                  color: activeTab === tab.id ? '#d01f2f' : undefined
                 }}
               >
                 {tab.label}
@@ -272,6 +351,19 @@ const AdminDashboard = () => {
       </div>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Archive Toggle */}
+        <div className="mb-6 flex justify-end">
+          <label className="flex items-center space-x-2">
+            <input
+              type="checkbox"
+              checked={includeArchived}
+              onChange={(e) => setIncludeArchived(e.target.checked)}
+              className="rounded text-red-600 focus:ring-red-500"
+            />
+            <span className="text-sm text-gray-600">Include archived items</span>
+          </label>
+        </div>
+
         {/* Dashboard Tab */}
         {activeTab === "dashboard" && (
           <div className="space-y-6">
@@ -346,10 +438,12 @@ const AdminDashboard = () => {
                     const variance = job.quoted_cost - totals.totalCost;
                     
                     return (
-                      <tr key={job.id}>
+                      <tr key={job.id} className={job.archived ? "bg-gray-100" : ""}>
                         <td className="px-6 py-4 whitespace-nowrap">
                           <div>
-                            <div className="text-sm font-medium text-gray-900">{job.name}</div>
+                            <div className="text-sm font-medium text-gray-900">
+                              {job.name} {job.archived && <span className="text-xs text-gray-500">(Archived)</span>}
+                            </div>
                             <div className="text-sm text-gray-500">{job.location}</div>
                           </div>
                         </td>
@@ -382,7 +476,7 @@ const AdminDashboard = () => {
                           <button
                             onClick={() => setEditingJob(job)}
                             className="text-red-600 hover:text-red-900"
-                            style={{ color: '#D11F2F' }}
+                            style={{ color: '#d01f2f' }}
                           >
                             Edit
                           </button>
@@ -397,6 +491,26 @@ const AdminDashboard = () => {
                             className="text-green-600 hover:text-green-900"
                           >
                             Export
+                          </button>
+                          <button
+                            onClick={() => setAddingMaterialToJob(job.id)}
+                            className="text-purple-600 hover:text-purple-900"
+                          >
+                            Add Material
+                          </button>
+                          {!job.archived ? (
+                            <button
+                              onClick={() => archiveJob(job.id)}
+                              className="text-yellow-600 hover:text-yellow-900"
+                            >
+                              Archive
+                            </button>
+                          ) : null}
+                          <button
+                            onClick={() => deleteJob(job.id)}
+                            className="text-red-600 hover:text-red-900"
+                          >
+                            Delete
                           </button>
                         </td>
                       </tr>
@@ -504,13 +618,18 @@ const AdminDashboard = () => {
                         Duration
                       </th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Hourly Rate
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                         Cost
                       </th>
                     </tr>
                   </thead>
                   <tbody className="bg-white divide-y divide-gray-200">
                     {timeEntries.map((entry) => {
-                      const laborCost = entry.duration_minutes ? (entry.duration_minutes / 60) * 15 : 0;
+                      const worker = workers.find(w => w.id === entry.worker_id);
+                      const hourlyRate = worker?.hourly_rate || 15.0;
+                      const laborCost = entry.duration_minutes ? (entry.duration_minutes / 60) * hourlyRate : 0;
                       return (
                         <tr key={entry.id}>
                           <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
@@ -527,6 +646,9 @@ const AdminDashboard = () => {
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                             {entry.duration_minutes ? formatDuration(entry.duration_minutes) : "Active"}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                            {formatCurrency(hourlyRate)}
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                             {formatCurrency(laborCost)}
@@ -571,15 +693,21 @@ const AdminDashboard = () => {
                       Role
                     </th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Hourly Rate
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                       Status
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Actions
                     </th>
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
                   {workers.map((worker) => (
-                    <tr key={worker.id}>
+                    <tr key={worker.id} className={worker.archived ? "bg-gray-100" : ""}>
                       <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                        {worker.name}
+                        {worker.name} {worker.archived && <span className="text-xs text-gray-500">(Archived)</span>}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                         {worker.email}
@@ -590,6 +718,9 @@ const AdminDashboard = () => {
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                         {worker.role}
                       </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                        {formatCurrency(worker.hourly_rate || 15.0)}
+                      </td>
                       <td className="px-6 py-4 whitespace-nowrap">
                         <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
                           worker.active 
@@ -598,6 +729,29 @@ const AdminDashboard = () => {
                         }`}>
                           {worker.active ? 'Active' : 'Inactive'}
                         </span>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium space-x-2">
+                        <button
+                          onClick={() => setEditingWorker(worker)}
+                          className="text-red-600 hover:text-red-900"
+                          style={{ color: '#d01f2f' }}
+                        >
+                          Edit
+                        </button>
+                        {!worker.archived ? (
+                          <button
+                            onClick={() => archiveWorker(worker.id)}
+                            className="text-yellow-600 hover:text-yellow-900"
+                          >
+                            Archive
+                          </button>
+                        ) : null}
+                        <button
+                          onClick={() => deleteWorker(worker.id)}
+                          className="text-red-600 hover:text-red-900"
+                        >
+                          Delete
+                        </button>
                       </td>
                     </tr>
                   ))}
@@ -635,6 +789,22 @@ const AdminDashboard = () => {
         <JobReportModal 
           jobId={viewingJobReport}
           onClose={() => setViewingJobReport(null)}
+        />
+      )}
+
+      {editingWorker && (
+        <EditWorkerModal 
+          worker={editingWorker}
+          onClose={() => setEditingWorker(null)}
+          onUpdate={handleWorkerUpdated}
+        />
+      )}
+
+      {addingMaterialToJob && (
+        <AddMaterialToJobModal 
+          jobId={addingMaterialToJob}
+          onClose={() => setAddingMaterialToJob(null)}
+          onAdded={handleMaterialAdded}
         />
       )}
     </div>

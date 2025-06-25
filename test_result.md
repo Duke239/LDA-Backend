@@ -463,8 +463,82 @@ metadata:
   test_sequence: 2
   run_ui: true
 
+  - task: "Attendance Alerts API"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Need to test the attendance alerts endpoint that displays late login/early logout alerts on the dashboard (excluding admins)."
+
+  - task: "Archived Jobs Filtering API"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Need to test that archived jobs are properly hidden from active lists in all API endpoints."
+
+  - task: "Job Unarchiving API"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Need to test the job unarchiving endpoint that allows admins to unarchive jobs."
+
+  - task: "Job Editing Authorization Fix"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Need to test that job editing authorization has been fixed and no longer returns 'not authorized' error."
+
+  - task: "New Admin Authentication API"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: "Need to test that newly added admin users can login correctly without 'Invalid admin credentials' error."
+
 test_plan:
-  current_focus: []
+  current_focus:
+    - "Attendance Alerts API"
+    - "Archived Jobs Filtering API"
+    - "Job Unarchiving API"
+    - "Job Editing Authorization Fix"
+    - "New Admin Authentication API"
+    - "Hide Default Admin Credentials"
+    - "Jobs Page UI Fixes"
+    - "Jobs Page Actions Styling"
+    - "Time Entry Editing Modal"
+    - "Attendance Dashboard Log"
+    - "Exclude Admins from Worker Dropdown"
+    - "Alphabetical Worker Sorting"
+    - "Job Unarchiving Frontend"
+    - "Job Filtering & Export Frontend"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"

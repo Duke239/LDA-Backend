@@ -12,7 +12,7 @@ import EditTimeEntryModal from "./EditTimeEntryModal";
 
 const AdminDashboard = () => {
   const navigate = useNavigate();
-  const { API, formatCurrency, formatDate, formatDuration } = useWorker();
+  const { API, formatCurrency, formatDate, formatTime, formatDuration } = useWorker();
   
   const [activeTab, setActiveTab] = useState("dashboard");
   const [dashboardStats, setDashboardStats] = useState({});

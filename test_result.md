@@ -561,15 +561,18 @@ metadata:
 
   - task: "Attendance Alerts API"
     implemented: true
-    working: "NA"
+    working: true
     file: "/app/backend/server.py"
     stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
         - working: "NA"
           agent: "main"
           comment: "Need to test the attendance alerts endpoint that displays late login/early logout alerts on the dashboard (excluding admins)."
+        - working: true
+          agent: "testing"
+          comment: "Successfully tested the attendance alerts API. Fixed an issue with handling None values in duration_minutes. The API now correctly excludes admin users from attendance alerts and properly displays late login/early logout alerts on the dashboard."
 
   - task: "Archived Jobs Filtering API"
     implemented: true

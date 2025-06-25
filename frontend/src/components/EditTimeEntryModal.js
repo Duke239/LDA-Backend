@@ -270,6 +270,9 @@ const EditTimeEntryModal = ({ timeEntry, workers, jobs, onClose, onUpdate }) => 
               You can edit time entries to correct mistakes or add missing clock-outs. 
               Changes will be reflected in all reports and cost calculations.
             </p>
+            <p className="text-blue-800 text-sm mt-1">
+              <strong>Times shown in UK local time (GMT/BST automatically handled)</strong>
+            </p>
           </div>
 
           <div className="flex space-x-3 pt-4">

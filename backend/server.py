@@ -164,7 +164,7 @@ class WorkerLogin(BaseModel):
     password: Optional[str] = None  # For admin workers
 
 # Security functions
-def verify_admin(credentials: HTTPBasicCredentials = Depends(security)):
+async def verify_admin(credentials: HTTPBasicCredentials = Depends(security)):
     """Verify admin credentials"""
     is_correct_username = secrets.compare_digest(credentials.username, ADMIN_USERNAME)
     is_correct_password = secrets.compare_digest(credentials.password, ADMIN_PASSWORD)
@@ -174,20 +174,13 @@ def verify_admin(credentials: HTTPBasicCredentials = Depends(security)):
     
     # Check if it's an admin user in the database
     try:
-        # Use asyncio to run the async function in sync context
-        import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        admin_user = loop.run_until_complete(
-            db.workers.find_one({
-                "email": credentials.username,
-                "role": "admin",
-                "password": credentials.password,
-                "active": True,
-                "archived": {"$ne": True}
-            })
-        )
+        admin_user = await db.workers.find_one({
+            "email": credentials.username,
+            "role": "admin",
+            "password": credentials.password,
+            "active": True,
+            "archived": {"$ne": True}
+        })
         
         if admin_user:
             return credentials.username

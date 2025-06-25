@@ -591,15 +591,18 @@ metadata:
 
   - task: "Job Unarchiving API"
     implemented: true
-    working: "NA"
+    working: true
     file: "/app/backend/server.py"
     stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
         - working: "NA"
           agent: "main"
           comment: "Need to test the job unarchiving endpoint that allows admins to unarchive jobs."
+        - working: true
+          agent: "testing"
+          comment: "Successfully tested the job unarchiving API. The PUT /api/jobs/{job_id}/unarchive endpoint correctly changes a job's status from archived back to active. Verified that the archived flag is set to false after unarchiving."
 
   - task: "Job Editing Authorization Fix"
     implemented: true

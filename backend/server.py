@@ -212,8 +212,20 @@ async def admin_login(login_data: AdminLogin):
     """Admin login endpoint"""
     if login_data.username == ADMIN_USERNAME and login_data.password == ADMIN_PASSWORD:
         return {"success": True, "message": "Admin login successful"}
-    else:
-        raise HTTPException(status_code=401, detail="Invalid admin credentials")
+    
+    # Check if it's an admin user in the database
+    admin_user = await db.workers.find_one({
+        "email": login_data.username,
+        "role": "admin", 
+        "password": login_data.password,
+        "active": True,
+        "archived": {"$ne": True}
+    })
+    
+    if admin_user:
+        return {"success": True, "message": "Admin login successful"}
+    
+    raise HTTPException(status_code=401, detail="Invalid admin credentials")
 
 # WORKER ENDPOINTS
 @api_router.post("/workers", response_model=Worker)

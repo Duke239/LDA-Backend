@@ -126,6 +126,14 @@ class TimeEntryClockOut(BaseModel):
     gps_location: Optional[GPSLocation] = None
     notes: str = ""
 
+class TimeEntryUpdate(BaseModel):
+    worker_id: Optional[str] = None
+    job_id: Optional[str] = None
+    clock_in: Optional[str] = None
+    clock_out: Optional[str] = None
+    duration_minutes: Optional[int] = None
+    notes: Optional[str] = None
+
 class Material(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     job_id: str

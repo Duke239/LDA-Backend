@@ -22,6 +22,29 @@ import pytz
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
+# UK timezone handling
+UK_TZ = pytz.timezone('Europe/London')
+
+def get_uk_time():
+    """Get current UK time (handles BST/GMT automatically)"""
+    return datetime.now(UK_TZ)
+
+def utc_to_uk(utc_dt):
+    """Convert UTC datetime to UK time"""
+    if utc_dt is None:
+        return None
+    if utc_dt.tzinfo is None:
+        utc_dt = pytz.utc.localize(utc_dt)
+    return utc_dt.astimezone(UK_TZ)
+
+def uk_to_utc(uk_dt):
+    """Convert UK time to UTC"""
+    if uk_dt is None:
+        return None
+    if uk_dt.tzinfo is None:
+        uk_dt = UK_TZ.localize(uk_dt)
+    return uk_dt.astimezone(pytz.utc)
+
 # MongoDB connection
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)

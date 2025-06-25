@@ -10,10 +10,20 @@ const JobEditModal = ({ job, onClose, onUpdate }) => {
     location: job.location,
     client: job.client,
     quoted_cost: job.quoted_cost,
-    status: job.status
+    status: job.status,
+    archived: job.archived || false
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  // Get auth headers for admin requests
+  const getAuthHeaders = () => {
+    const adminAuth = localStorage.getItem('adminAuth');
+    return {
+      'Authorization': `Basic ${adminAuth}`,
+      'Content-Type': 'application/json'
+    };
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -22,7 +32,10 @@ const JobEditModal = ({ job, onClose, onUpdate }) => {
       setLoading(true);
       setError("");
       
-      await axios.put(`${API}/jobs/${job.id}`, formData);
+      await axios.put(`${API}/jobs/${job.id}`, formData, {
+        headers: getAuthHeaders()
+      });
+      
       onUpdate();
     } catch (err) {
       setError(err.response?.data?.detail || "Error updating job");
@@ -32,10 +45,11 @@ const JobEditModal = ({ job, onClose, onUpdate }) => {
   };
 
   const handleChange = (e) => {
-    const { name, value } = e.target;
+    const { name, value, type, checked } = e.target;
     setFormData(prev => ({
       ...prev,
-      [name]: name === 'quoted_cost' ? parseFloat(value) || 0 : value
+      [name]: type === 'checkbox' ? checked : 
+               name === 'quoted_cost' ? parseFloat(value) || 0 : value
     }));
   };
 

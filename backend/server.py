@@ -390,7 +390,7 @@ async def clock_out(entry_id: str, clock_out_data: TimeEntryClockOut):
     return TimeEntry(**updated_entry)
 
 @api_router.put("/time-entries/{entry_id}", response_model=TimeEntry)
-async def update_time_entry(entry_id: str, entry_data: dict, admin: str = Depends(verify_admin)):
+async def update_time_entry(entry_id: str, entry_update: TimeEntryUpdate, admin: str = Depends(verify_admin)):
     """Update time entry (Admin only)"""
     # Find the existing time entry
     existing_entry = await db.time_entries.find_one({"id": entry_id})
@@ -401,23 +401,24 @@ async def update_time_entry(entry_id: str, entry_data: dict, admin: str = Depend
     update_dict = {}
     
     # Update allowed fields
-    if "worker_id" in entry_data:
-        update_dict["worker_id"] = entry_data["worker_id"]
-    if "job_id" in entry_data:
-        update_dict["job_id"] = entry_data["job_id"]
-    if "clock_in" in entry_data:
-        update_dict["clock_in"] = datetime.fromisoformat(entry_data["clock_in"].replace('Z', '+00:00'))
-    if "clock_out" in entry_data and entry_data["clock_out"]:
-        update_dict["clock_out"] = datetime.fromisoformat(entry_data["clock_out"].replace('Z', '+00:00'))
-    elif "clock_out" in entry_data and entry_data["clock_out"] is None:
-        update_dict["clock_out"] = None
-        update_dict["duration_minutes"] = None
-    if "notes" in entry_data:
-        update_dict["notes"] = entry_data["notes"]
+    if entry_update.worker_id:
+        update_dict["worker_id"] = entry_update.worker_id
+    if entry_update.job_id:
+        update_dict["job_id"] = entry_update.job_id
+    if entry_update.clock_in:
+        update_dict["clock_in"] = datetime.fromisoformat(entry_update.clock_in.replace('Z', '+00:00'))
+    if entry_update.clock_out is not None:
+        if entry_update.clock_out:
+            update_dict["clock_out"] = datetime.fromisoformat(entry_update.clock_out.replace('Z', '+00:00'))
+        else:
+            update_dict["clock_out"] = None
+            update_dict["duration_minutes"] = None
+    if entry_update.notes is not None:
+        update_dict["notes"] = entry_update.notes
     
     # Recalculate duration if both clock_in and clock_out are present
-    if "duration_minutes" in entry_data:
-        update_dict["duration_minutes"] = entry_data["duration_minutes"]
+    if entry_update.duration_minutes is not None:
+        update_dict["duration_minutes"] = entry_update.duration_minutes
     elif "clock_in" in update_dict and "clock_out" in update_dict and update_dict["clock_out"]:
         clock_in = update_dict["clock_in"] if "clock_in" in update_dict else existing_entry["clock_in"]
         clock_out = update_dict["clock_out"]

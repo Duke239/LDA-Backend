@@ -324,15 +324,18 @@ frontend:
           
   - task: "Job-Specific CSV Export"
     implemented: true
-    working: false
+    working: true
     file: "/app/frontend/src/components/AdminDashboard.js"
-    stuck_count: 1
+    stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
         - working: false
           agent: "testing"
           comment: "Export buttons are visible for each job, but couldn't test if they work properly due to the issue with the job report functionality."
+        - working: true
+          agent: "testing"
+          comment: "Successfully tested the job-specific CSV export functionality. When clicking the Export button for a job, a CSV file is downloaded with the job data. The export functionality works correctly."
 
 metadata:
   created_by: "testing_agent"

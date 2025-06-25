@@ -478,7 +478,7 @@ async def get_dashboard_stats(admin: str = Depends(verify_admin)):
         "duration_minutes": {"$exists": True}
     }).to_list(1000)
     
-    total_minutes = sum(entry.get("duration_minutes", 0) for entry in week_entries)
+    total_minutes = sum(entry.get("duration_minutes", 0) or 0 for entry in week_entries)
     total_hours = round(total_minutes / 60, 1)
     
     # Get total materials cost this month

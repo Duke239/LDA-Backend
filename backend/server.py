@@ -49,12 +49,11 @@ def uk_to_utc(uk_dt):
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(
     mongo_url,
-    tls=True,
     serverSelectionTimeoutMS=5000,
     connectTimeoutMS=10000,
     socketTimeoutMS=10000,
     maxPoolSize=10,
-    ssl_cert_reqs=0  # Disable certificate validation
+    tlsInsecure=True  # Allow insecure TLS connections
 )
 db = client[os.environ.get('DB_NAME', 'lda_timetracking')]
 

@@ -1,0 +1,17 @@
+LDA Group Time Tracking - Data Restoration
+==================================================
+Loading backup data...
+✅ Backup data loaded successfully
+Collections found: ['workers', 'jobs', 'time_entries', 'materials']
+  workers: 19 documents
+  jobs: 23 documents
+  time_entries: 25 documents
+  materials: 17 documents
+Testing backend connection to http://localhost:8001/api...
+✅ Backend connection successful
+Using local backend for restoration
+
+Starting restoration to http://localhost:8001/api...
+
+Restoring 19 workers...
+  ❌ Error creating worker Mike Wilson: HTTPConnectionPool(host='localhost', port=8001): Read timed out. (read timeout=10)

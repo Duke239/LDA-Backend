@@ -16,3 +16,6 @@ Starting restoration to http://localhost:8001/api...
 Restoring 19 workers...
   ❌ Error creating worker Mike Wilson: HTTPConnectionPool(host='localhost', port=8001): Read timed out. (read timeout=10)
   ❌ Error creating worker Admin User: HTTPConnectionPool(host='localhost', port=8001): Read timed out. (read timeout=10)
+  ❌ Error creating worker Jane Doe: HTTPConnectionPool(host='localhost', port=8001): Read timed out. (read timeout=10)
+  ❌ Error creating worker Peter Williamson: HTTPConnectionPool(host='localhost', port=8001): Read timed out. (read timeout=10)
+  ❌ Error creating worker Duke McIntyre: HTTPConnectionPool(host='localhost', port=8001): Read timed out. (read timeout=10)

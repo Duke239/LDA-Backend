@@ -1,0 +1,1226 @@
+{
+  "workers": [
+    {
+      "_id": "685ba6de3bccff3b4d0d49f9",
+      "id": "ea447cd4-a414-46d2-bf99-80a318b2934a",
+      "name": "Mike Wilson",
+      "email": "mike.wilson@ldagroup.co.uk",
+      "phone": "07700 900789",
+      "role": "worker",
+      "active": true,
+      "created_date": "2025-06-25T07:35:58.468000"
+    },
+    {
+      "_id": "685ba6de3bccff3b4d0d49fa",
+      "id": "e2c8c176-ffe3-4e05-95db-9540592d9d08",
+      "name": "Admin User",
+      "email": "admin@ldagroup.co.uk",
+      "phone": "07700 900999",
+      "role": "admin",
+      "active": true,
+      "created_date": "2025-06-25T07:35:58.489000"
+    },
+    {
+      "_id": "685bb4e38c76b2368620e825",
+      "id": "1e0ccd21-8fd2-4949-aa47-167dada0948c",
+      "name": "Jane Doe",
+      "email": "jane.doe@ldagroup.co.uk",
+      "phone": "07123456789",
+      "role": "supervisor",
+      "active": true,
+      "created_date": "2025-06-25T08:35:47.332000",
+      "archived": true
+    },
+    {
+      "_id": "685c05b69d156264507d3c25",
+      "id": "ce87cab7-5932-4fc2-b88a-0dab7b8a504b",
+      "name": "Peter Williamson",
+      "email": "jhfgfgh@jghgfghfd.com",
+      "phone": "gfgfgfdgdf",
+      "role": "worker",
+      "hourly_rate": 25.0,
+      "password": null,
+      "active": true,
+      "archived": false,
+      "created_date": "2025-06-25T14:20:38.280000"
+    },
+    {
+      "_id": "685c0b569d156264507d3c28",
+      "id": "861e8355-e358-4e0e-a8a0-be13184ae24b",
+      "name": "Duke McIntyre",
+      "email": "dukemcintyre@ldagroup.co.uk",
+      "phone": "07894792240",
+      "role": "admin",
+      "hourly_rate": 15.0,
+      "password": "t8Z-v73Q2501",
+      "active": true,
+      "archived": false,
+      "created_date": "2025-06-25T14:44:38.963000"
+    },
+    {
+      "_id": "685c2281e027b75c7969a2f5",
+      "id": "498107ed-5695-4e84-8b31-f51428695f0e",
+      "name": "Regular Worker 52db5159",
+      "email": "regular.worker.52db5159@ldagroup.co.uk",
+      "phone": "07700 900123",
+      "role": "worker",
+      "hourly_rate": 15.0,
+      "password": null,
+      "active": true,
+      "archived": false,
+      "created_date": "2025-06-25T16:23:29.853000"
+    },
+    {
+      "_id": "685c2281e027b75c7969a2f6",
+      "id": "debdd683-53bb-4174-90c7-6ea362d33b57",
+      "name": "Admin Worker 52db5159",
+      "email": "admin.worker.52db5159@ldagroup.co.uk",
+      "phone": "07700 900456",
+      "role": "admin",
+      "hourly_rate": 15.0,
+      "password": "adminpass123",
+      "active": true,
+      "archived": false,
+      "created_date": "2025-06-25T16:23:29.899000"
+    },
+    {
+      "_id": "685c2282e027b75c7969a2fd",
+      "id": "ae52389f-a20d-4917-b887-be6c24e6e914",
+      "name": "New Admin f8939b99",
+      "email": "new.admin.f8939b99@ldagroup.co.uk",
+      "phone": "07700 900789",
+      "role": "admin",
+      "hourly_rate": 15.0,
+      "password": "newadminpass123",
+      "active": true,
+      "archived": false,
+      "created_date": "2025-06-25T16:23:30.580000"
+    },
+    {
+      "_id": "685c22a33e5e80bd817bebef",
+      "id": "65cf38f0-9a0c-4982-b835-0c8efc083c0e",
+      "name": "Regular Worker 04e2857b",
+      "email": "regular.worker.04e2857b@ldagroup.co.uk",
+      "phone": "07700 900123",
+      "role": "worker",
+      "hourly_rate": 15.0,
+      "password": null,
+      "active": true,
+      "archived": false,
+      "created_date": "2025-06-25T16:24:03.882000"
+    },
+    {
+      "_id": "685c22a33e5e80bd817bebf0",
+      "id": "8e2cf9cc-fa2b-41a5-a718-e747120bbb23",
+      "name": "Admin Worker 04e2857b",
+      "email": "admin.worker.04e2857b@ldagroup.co.uk",
+      "phone": "07700 900456",
+      "role": "admin",
+      "hourly_rate": 15.0,
+      "password": "adminpass123",
+      "active": true,
+      "archived": false,
+      "created_date": "2025-06-25T16:24:03.930000"
+    },
+    {
+      "_id": "685c22a43e5e80bd817bebf7",
+      "id": "f839c1b5-1ef2-4226-9de8-e003b52495d8",
+      "name": "New Admin 6b943d27",
+      "email": "new.admin.6b943d27@ldagroup.co.uk",
+      "phone": "07700 900789",
+      "role": "admin",
+      "hourly_rate": 15.0,
+      "password": "newadminpass123",
+      "active": true,
+      "archived": false,
+      "created_date": "2025-06-25T16:24:04.567000"
+    },
+    {
+      "_id": "685c2bbc990074da3a217d55",
+      "id": "14658a3d-4ac7-4f74-9fde-a138e5ffcf0a",
+      "name": "Sarah Jones",
+      "email": "sarah.jones@ldagroup.co.uk",
+      "phone": "07700 900456",
+      "role": "supervisor",
+      "hourly_rate": 15.0,
+      "password": null,
+      "active": true,
+      "archived": false,
+      "created_date": "2025-06-25T17:02:52.595000"
+    },
+    {
+      "_id": "685c2bbc990074da3a217d56",
+      "id": "42ecaa0e-eb19-4232-a0cf-19d28efeb27f",
+      "name": "Mike Wilson",
+      "email": "mike.wilson@ldagroup.co.uk",
+      "phone": "07700 900789",
+      "role": "worker",
+      "hourly_rate": 15.0,
+      "password": null,
+      "active": true,
+      "archived": false,
+      "created_date": "2025-06-25T17:02:52.625000"
+    },
+    {
+      "_id": "685c2bbc990074da3a217d57",
+      "id": "830ce4ca-f9e5-48e5-86d4-c772e06701bb",
+      "name": "Admin User",
+      "email": "admin@ldagroup.co.uk",
+      "phone": "07700 900999",
+      "role": "admin",
+      "hourly_rate": 15.0,
+      "password": null,
+      "active": true,
+      "archived": false,
+      "created_date": "2025-06-25T17:02:52.645000"
+    },
+    {
+      "_id": "685c2c9e16075827ff2e4399",
+      "id": "ec4ca7f9-5f0d-40e0-b8a5-326ff080be32",
+      "name": "Duke",
+      "email": "dukemcintyre@ldagroup.co.uk",
+      "phone": "07894792240",
+      "role": "admin",
+      "hourly_rate": 15.0,
+      "password": "w1033349",
+      "active": true,
+      "archived": false,
+      "created_date": "2025-06-25T17:06:38.626000"
+    },
+    {
+      "_id": "685c2d9de02b87ea6dc99439",
+      "id": "b1edad53-84ec-4f92-84dc-dcd7f742607f",
+      "name": "Admin User",
+      "email": "admin@ldagroup.co.uk",
+      "phone": "07700 900999",
+      "role": "admin",
+      "hourly_rate": 15.0,
+      "password": null,
+      "active": true,
+      "archived": false,
+      "created_date": "2025-06-25T17:10:53.619000"
+    },
+    {
+      "_id": "685c2da6e02b87ea6dc99443",
+      "id": "d5d7303f-e891-4fe9-984c-444dd4454e00",
+      "name": "Attendance Test Worker 1",
+      "email": "attendance1@ldagroup.co.uk",
+      "phone": "07700 900111",
+      "role": "worker",
+      "hourly_rate": 15.0,
+      "password": null,
+      "active": true,
+      "archived": false,
+      "created_date": "2025-06-25T17:11:02.820000"
+    },
+    {
+      "_id": "685c2da6e02b87ea6dc99444",
+      "id": "c3807bd6-286a-4950-b0a9-4a1e84c4d7ac",
+      "name": "Attendance Test Worker 2",
+      "email": "attendance2@ldagroup.co.uk",
+      "phone": "07700 900222",
+      "role": "worker",
+      "hourly_rate": 15.0,
+      "password": null,
+      "active": true,
+      "archived": false,
+      "created_date": "2025-06-25T17:11:02.896000"
+    },
+    {
+      "_id": "685c2da6e02b87ea6dc99445",
+      "id": "fa473e01-f613-451a-98b3-cb74a963e31b",
+      "name": "Attendance Admin",
+      "email": "attendanceadmin@ldagroup.co.uk",
+      "phone": "07700 900333",
+      "role": "admin",
+      "hourly_rate": 15.0,
+      "password": "admin2024",
+      "active": true,
+      "archived": false,
+      "created_date": "2025-06-25T17:11:02.952000"
+    }
+  ],
+  "jobs": [
+    {
+      "_id": "685ba682ea4d3f9c5508b621",
+      "id": "e3a2a92b-3938-4ccb-98ed-dc3c2b4fc31c",
+      "name": "Kitchen Renovation - Smith House",
+      "description": "Updated kitchen renovation with premium fixtures",
+      "location": "123 Baker Street, London",
+      "client": "Smith Family",
+      "quoted_cost": 16000.0,
+      "status": "completed",
+      "created_date": "2025-06-25T07:34:26.436000",
+      "archived": false
+    },
+    {
+      "_id": "685ba682ea4d3f9c5508b622",
+      "id": "b7bed04d-1505-4829-bd11-161a3e213a8c",
+      "name": "Bathroom Refit - Johnson Property",
+      "description": "Full bathroom remodeling with new fixtures and tiling",
+      "location": "45 Oxford Road, London",
+      "client": "Johnson Ltd",
+      "quoted_cost": 10000.0,
+      "status": "completed",
+      "created_date": "2025-06-25T07:34:26.517000",
+      "archived": false
+    },
+    {
+      "_id": "685ba682ea4d3f9c5508b623",
+      "id": "83d68f94-d8b7-40ab-8df6-95f767e8778b",
+      "name": "Garden Landscaping - Williams Home",
+      "description": "Complete garden redesign with new patio, plants, and water feature",
+      "location": "78 Kensington Gardens, London",
+      "client": "Williams Family",
+      "quoted_cost": 12000.0,
+      "status": "active",
+      "created_date": "2025-06-25T07:34:26.546000",
+      "archived": false
+    },
+    {
+      "_id": "685ba6de3bccff3b4d0d49fb",
+      "id": "c96f7752-884b-46d7-b4a0-8abceaa1eb46",
+      "name": "Kitchen Renovation - Smith House",
+      "description": "Updated kitchen renovation with premium fixtures",
+      "location": "123 Baker Street, London",
+      "client": "Smith Family",
+      "quoted_cost": 16000.0,
+      "status": "active",
+      "created_date": "2025-06-25T07:35:58.629000"
+    },
+    {
+      "_id": "685ba6de3bccff3b4d0d49fc",
+      "id": "8a7fad1f-843e-4dfb-8abf-cd7dbd61a15e",
+      "name": "Bathroom Refit - Johnson Property",
+      "description": "Full bathroom remodeling with new fixtures and tiling",
+      "location": "45 Oxford Road, London",
+      "client": "Johnson Ltd",
+      "quoted_cost": 8500.0,
+      "status": "active",
+      "created_date": "2025-06-25T07:35:58.649000"
+    },
+    {
+      "_id": "685ba6de3bccff3b4d0d49fd",
+      "id": "4c814087-c05d-4127-8c0c-4e8286132286",
+      "name": "Garden Landscaping - Williams Home",
+      "description": "Complete garden redesign with new patio, plants, and water feature",
+      "location": "78 Kensington Gardens, London",
+      "client": "Williams Family",
+      "quoted_cost": 12000.0,
+      "status": "active",
+      "created_date": "2025-06-25T07:35:58.701000"
+    },
+    {
+      "_id": "685bb5208c76b2368620e826",
+      "id": "199cc07c-4062-49de-90a8-a5419d5cb0ae",
+      "name": "Office Renovation",
+      "description": "Complete renovation of office space including new flooring, lighting, and partition walls.",
+      "location": "123 Business Park, London",
+      "client": "ABC Corporation",
+      "quoted_cost": 15000.0,
+      "status": "active",
+      "created_date": "2025-06-25T08:36:48.532000"
+    },
+    {
+      "_id": "685bee3bf822af4cf8333a17",
+      "id": "43a6efd5-30c6-4538-80e3-fd5434667a77",
+      "name": "Chicken Road",
+      "description": "dkjfghlkjhfgdjskhgjkds",
+      "location": "1 Chicken Road, Wallsend, NE28 8NH",
+      "client": "Duke McIntyre",
+      "quoted_cost": 8000.0,
+      "status": "active",
+      "created_date": "2025-06-25T12:40:27.447000",
+      "archived": true
+    },
+    {
+      "_id": "685c2281e027b75c7969a2f7",
+      "id": "2b86158b-f6f9-4ad2-b056-d0fd69ad2aaa",
+      "name": "Test Job 52db5159",
+      "description": "Test job for attendance alerts",
+      "location": "123 Test Street, London",
+      "client": "Test Client",
+      "quoted_cost": 5000.0,
+      "status": "active",
+      "archived": false,
+      "created_date": "2025-06-25T16:23:29.939000"
+    },
+    {
+      "_id": "685c2282e027b75c7969a2fa",
+      "id": "e4d7eb81-9b4d-41ae-9e37-1914c489eb54",
+      "name": "Archived Job Test 5766c0ad",
+      "description": "Test job for archiving",
+      "location": "123 Archive Street, London",
+      "client": "Archive Client",
+      "quoted_cost": 5000.0,
+      "status": "active",
+      "archived": true,
+      "created_date": "2025-06-25T16:23:30.068000"
+    },
+    {
+      "_id": "685c2282e027b75c7969a2fb",
+      "id": "40d7d40d-f3fd-4a77-97ac-9b67806e0472",
+      "name": "Unarchive Job Test e4e86afe",
+      "description": "Test job for unarchiving",
+      "location": "123 Unarchive Street, London",
+      "client": "Unarchive Client",
+      "quoted_cost": 5000.0,
+      "status": "active",
+      "archived": false,
+      "created_date": "2025-06-25T16:23:30.215000"
+    },
+    {
+      "_id": "685c2282e027b75c7969a2fc",
+      "id": "5c6e7fdd-133a-4553-9e45-5a96df210038",
+      "name": "Updated Job aa18c067",
+      "description": "Updated description",
+      "location": "123 Edit Street, London",
+      "client": "Edit Client",
+      "quoted_cost": 6000.0,
+      "status": "active",
+      "archived": false,
+      "created_date": "2025-06-25T16:23:30.499000"
+    },
+    {
+      "_id": "685c22a33e5e80bd817bebf1",
+      "id": "59c7f77e-3dd4-43cc-ba9f-d4f5aa30e391",
+      "name": "Test Job 04e2857b",
+      "description": "Test job for attendance alerts",
+      "location": "123 Test Street, London",
+      "client": "Test Client",
+      "quoted_cost": 5000.0,
+      "status": "active",
+      "archived": false,
+      "created_date": "2025-06-25T16:24:03.999000"
+    },
+    {
+      "_id": "685c22a43e5e80bd817bebf4",
+      "id": "f0b52415-6b26-4f57-8f8d-74b64fc14271",
+      "name": "Archived Job Test 95c4446f",
+      "description": "Test job for archiving",
+      "location": "123 Archive Street, London",
+      "client": "Archive Client",
+      "quoted_cost": 5000.0,
+      "status": "active",
+      "archived": true,
+      "created_date": "2025-06-25T16:24:04.155000"
+    },
+    {
+      "_id": "685c22a43e5e80bd817bebf5",
+      "id": "26f7d020-ba53-4854-95d9-d91b795d114c",
+      "name": "Unarchive Job Test b7f8919d",
+      "description": "Test job for unarchiving",
+      "location": "123 Unarchive Street, London",
+      "client": "Unarchive Client",
+      "quoted_cost": 5000.0,
+      "status": "active",
+      "archived": false,
+      "created_date": "2025-06-25T16:24:04.282000"
+    },
+    {
+      "_id": "685c22a43e5e80bd817bebf6",
+      "id": "8d3365e5-d042-4094-924d-ac7f50f90b42",
+      "name": "Updated Job a6dd64d8",
+      "description": "Updated description",
+      "location": "123 Edit Street, London",
+      "client": "Edit Client",
+      "quoted_cost": 6000.0,
+      "status": "active",
+      "archived": false,
+      "created_date": "2025-06-25T16:24:04.484000"
+    },
+    {
+      "_id": "685c2bbc990074da3a217d58",
+      "id": "c5069665-e52a-42cd-be82-8ba4d50c2dd0",
+      "name": "Kitchen Renovation - Smith House",
+      "description": "Updated kitchen renovation with premium fixtures",
+      "location": "123 Baker Street, London",
+      "client": "Smith Family",
+      "quoted_cost": 16000.0,
+      "status": "active",
+      "archived": false,
+      "created_date": "2025-06-25T17:02:52.781000"
+    },
+    {
+      "_id": "685c2bbc990074da3a217d59",
+      "id": "098c4e6f-34ac-4002-b371-0ce59345377a",
+      "name": "Bathroom Refit - Johnson Property",
+      "description": "Full bathroom remodeling with new fixtures and tiling",
+      "location": "45 Oxford Road, London",
+      "client": "Johnson Ltd",
+      "quoted_cost": 8500.0,
+      "status": "active",
+      "archived": false,
+      "created_date": "2025-06-25T17:02:52.801000"
+    },
+    {
+      "_id": "685c2bbc990074da3a217d5a",
+      "id": "88313d64-6f6b-47e6-bf31-df16296b57b4",
+      "name": "Garden Landscaping - Williams Home",
+      "description": "Complete garden redesign with new patio, plants, and water feature",
+      "location": "78 Kensington Gardens, London",
+      "client": "Williams Family",
+      "quoted_cost": 12000.0,
+      "status": "active",
+      "archived": false,
+      "created_date": "2025-06-25T17:02:52.863000"
+    },
+    {
+      "_id": "685c2d9de02b87ea6dc9943a",
+      "id": "a30249b4-0502-4189-a035-0de506983a6e",
+      "name": "Kitchen Renovation - Smith House",
+      "description": "Updated kitchen renovation with premium fixtures",
+      "location": "123 Baker Street, London",
+      "client": "Smith Family",
+      "quoted_cost": 16000.0,
+      "status": "active",
+      "archived": false,
+      "created_date": "2025-06-25T17:10:53.756000"
+    },
+    {
+      "_id": "685c2d9de02b87ea6dc9943b",
+      "id": "5d3d8839-0915-4da7-aa34-1c5002c21341",
+      "name": "Bathroom Refit - Johnson Property",
+      "description": "Full bathroom remodeling with new fixtures and tiling",
+      "location": "45 Oxford Road, London",
+      "client": "Johnson Ltd",
+      "quoted_cost": 8500.0,
+      "status": "active",
+      "archived": false,
+      "created_date": "2025-06-25T17:10:53.776000"
+    },
+    {
+      "_id": "685c2d9de02b87ea6dc9943c",
+      "id": "31fc76a6-b5bb-430c-a4ef-558423c30ffc",
+      "name": "Garden Landscaping - Williams Home",
+      "description": "Complete garden redesign with new patio, plants, and water feature",
+      "location": "78 Kensington Gardens, London",
+      "client": "Williams Family",
+      "quoted_cost": 12000.0,
+      "status": "active",
+      "archived": false,
+      "created_date": "2025-06-25T17:10:53.795000"
+    },
+    {
+      "_id": "685c2da7e02b87ea6dc99446",
+      "id": "4385e6b3-5d9f-4fe7-b654-4fada1df8c4f",
+      "name": "Attendance Test Job",
+      "description": "Job for testing attendance alerts",
+      "location": "London, UK",
+      "client": "Attendance Test Client",
+      "quoted_cost": 5000.0,
+      "status": "active",
+      "archived": false,
+      "created_date": "2025-06-25T17:11:03.017000"
+    }
+  ],
+  "time_entries": [
+    {
+      "_id": "685ba682ea4d3f9c5508b624",
+      "id": "66a9d6fe-fd56-43cd-8649-894acdb90295",
+      "worker_id": "66c84b90-70ff-4f1b-8a36-2d97bddb3384",
+      "job_id": "e3a2a92b-3938-4ccb-98ed-dc3c2b4fc31c",
+      "clock_in": "2025-06-24T05:34:00",
+      "clock_out": "2025-06-25T17:34:00",
+      "duration_minutes": 2160,
+      "gps_location_in": {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "accuracy": 10.0
+      },
+      "gps_location_out": {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "accuracy": 10.0
+      },
+      "notes": "Completed initial assessment",
+      "created_date": "2025-06-25T07:34:26.673000"
+    },
+    {
+      "_id": "685ba687ea4d3f9c5508b625",
+      "id": "a3aa47af-bbc2-44e2-baf8-2a4290da17f8",
+      "worker_id": "2517d66e-4c17-4b81-b599-4a55e0052818",
+      "job_id": "b7bed04d-1505-4829-bd11-161a3e213a8c",
+      "clock_in": "2025-06-25T07:34:31.850000",
+      "clock_out": "2025-06-25T07:34:34.869000",
+      "duration_minutes": 0,
+      "gps_location_in": {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "accuracy": 10.0
+      },
+      "gps_location_out": {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "accuracy": 10.0
+      },
+      "notes": "Completed initial measurements",
+      "created_date": "2025-06-25T07:34:31.850000"
+    },
+    {
+      "_id": "685ba6de3bccff3b4d0d49fe",
+      "id": "a63e9bfc-0f1f-4722-9467-c5ad4d1c1ce7",
+      "worker_id": "2ba0385c-e7ec-43d6-876a-ff7c24629e17",
+      "job_id": "c96f7752-884b-46d7-b4a0-8abceaa1eb46",
+      "clock_in": "2025-06-25T07:35:58.842000",
+      "clock_out": "2025-06-25T07:36:03.924000",
+      "duration_minutes": 0,
+      "gps_location_in": {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "accuracy": 10.0
+      },
+      "gps_location_out": {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "accuracy": 10.0
+      },
+      "notes": "Completed initial assessment",
+      "created_date": "2025-06-25T07:35:58.842000"
+    },
+    {
+      "_id": "685ba6e33bccff3b4d0d49ff",
+      "id": "02929f53-b84e-4d95-b64d-455cbc6fbe2f",
+      "worker_id": "c4c79af6-d470-4981-89e2-34a3776cd750",
+      "job_id": "8a7fad1f-843e-4dfb-8abf-cd7dbd61a15e",
+      "clock_in": "2025-06-25T07:36:03.982000",
+      "clock_out": "2025-06-25T07:36:07.046000",
+      "duration_minutes": 0,
+      "gps_location_in": {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "accuracy": 10.0
+      },
+      "gps_location_out": {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "accuracy": 10.0
+      },
+      "notes": "Completed initial measurements",
+      "created_date": "2025-06-25T07:36:03.982000"
+    },
+    {
+      "_id": "685ba91c1ee45b4fe965ce81",
+      "id": "b8ccfeee-88f7-47b9-81e5-3eabfe13bc87",
+      "worker_id": "66c84b90-70ff-4f1b-8a36-2d97bddb3384",
+      "job_id": "e3a2a92b-3938-4ccb-98ed-dc3c2b4fc31c",
+      "clock_in": "2025-06-25T07:45:32.883000",
+      "clock_out": "2025-06-25T14:22:56.960000",
+      "duration_minutes": 397,
+      "gps_location_in": null,
+      "gps_location_out": {
+        "latitude": 54.975471528719,
+        "longitude": -1.7154522817926512,
+        "accuracy": 84.0,
+        "address": "54.975472, -1.715452"
+      },
+      "notes": "",
+      "created_date": "2025-06-25T07:45:32.883000"
+    },
+    {
+      "_id": "685bac5eab9da8f22b0ef19c",
+      "id": "aa1ec55d-da43-446a-b7d7-cf18cd3c8517",
+      "worker_id": "ea447cd4-a414-46d2-bf99-80a318b2934a",
+      "job_id": "b7bed04d-1505-4829-bd11-161a3e213a8c",
+      "clock_in": "2025-06-25T07:59:26.582000",
+      "clock_out": null,
+      "duration_minutes": null,
+      "gps_location_in": {
+        "latitude": 54.9899467,
+        "longitude": -1.5987295,
+        "accuracy": 4.380000114440918
+      },
+      "gps_location_out": null,
+      "notes": "",
+      "created_date": "2025-06-25T07:59:26.582000"
+    },
+    {
+      "_id": "685bed54f822af4cf8333a15",
+      "id": "36921e57-8fa3-421c-abe7-96ec52de1032",
+      "worker_id": "c4c79af6-d470-4981-89e2-34a3776cd750",
+      "job_id": "83d68f94-d8b7-40ab-8df6-95f767e8778b",
+      "clock_in": "2025-06-25T12:36:36.933000",
+      "clock_out": "2025-06-25T12:37:15.679000",
+      "duration_minutes": 0,
+      "gps_location_in": {
+        "latitude": 54.97503288611525,
+        "longitude": -1.7157697768504,
+        "accuracy": 17.231141448641164
+      },
+      "gps_location_out": {
+        "latitude": 54.97507752638737,
+        "longitude": -1.715766321313611,
+        "accuracy": 15.951207544995633
+      },
+      "notes": "",
+      "created_date": "2025-06-25T12:36:36.933000"
+    },
+    {
+      "_id": "685beec6f822af4cf8333a18",
+      "id": "8aa810b3-3b4e-4e92-9963-d34308078fcd",
+      "worker_id": "c4c79af6-d470-4981-89e2-34a3776cd750",
+      "job_id": "43a6efd5-30c6-4538-80e3-fd5434667a77",
+      "clock_in": "2025-06-25T12:42:46.512000",
+      "clock_out": "2025-06-25T13:16:25.244000",
+      "duration_minutes": 33,
+      "gps_location_in": {
+        "latitude": 54.9751775,
+        "longitude": -1.715874,
+        "accuracy": 13.166000366210938
+      },
+      "gps_location_out": {
+        "latitude": 54.9751398,
+        "longitude": -1.7157476,
+        "accuracy": 24.68199920654297
+      },
+      "notes": "",
+      "created_date": "2025-06-25T12:42:46.512000"
+    },
+    {
+      "_id": "685c0062f02b7781a0593d18",
+      "id": "e238de30-5909-4e78-8409-954cdba5c993",
+      "worker_id": "1e0ccd21-8fd2-4949-aa47-167dada0948c",
+      "job_id": "43a6efd5-30c6-4538-80e3-fd5434667a77",
+      "clock_in": "2025-06-25T13:57:54.040000",
+      "clock_out": null,
+      "duration_minutes": null,
+      "gps_location_in": null,
+      "gps_location_out": null,
+      "notes": "",
+      "created_date": "2025-06-25T13:57:54.040000"
+    },
+    {
+      "_id": "685c2281e027b75c7969a2f8",
+      "id": "ce9a6ced-c1f6-49fb-8f0c-af2862bc3904",
+      "worker_id": "498107ed-5695-4e84-8b31-f51428695f0e",
+      "job_id": "2b86158b-f6f9-4ad2-b056-d0fd69ad2aaa",
+      "clock_in": "2025-06-25T16:23:29.981000",
+      "clock_out": null,
+      "duration_minutes": null,
+      "gps_location_in": {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "accuracy": 10.0,
+        "address": null
+      },
+      "gps_location_out": null,
+      "notes": "Test time entry",
+      "created_date": "2025-06-25T16:23:29.981000"
+    },
+    {
+      "_id": "685c2282e027b75c7969a2f9",
+      "id": "9e84f497-e4d5-4236-bda9-ee3db0e59031",
+      "worker_id": "debdd683-53bb-4174-90c7-6ea362d33b57",
+      "job_id": "2b86158b-f6f9-4ad2-b056-d0fd69ad2aaa",
+      "clock_in": "2025-06-25T16:23:30.007000",
+      "clock_out": null,
+      "duration_minutes": null,
+      "gps_location_in": {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "accuracy": 10.0,
+        "address": null
+      },
+      "gps_location_out": null,
+      "notes": "Test time entry",
+      "created_date": "2025-06-25T16:23:30.007000"
+    },
+    {
+      "_id": "685c22a43e5e80bd817bebf2",
+      "id": "0b37d060-4bbf-4742-a9cf-e95cdc4f524e",
+      "worker_id": "65cf38f0-9a0c-4982-b835-0c8efc083c0e",
+      "job_id": "59c7f77e-3dd4-43cc-ba9f-d4f5aa30e391",
+      "clock_in": "2025-06-25T16:24:04.024000",
+      "clock_out": "2025-06-25T16:38:09.963000",
+      "duration_minutes": 14,
+      "gps_location_in": {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "accuracy": 10.0,
+        "address": null
+      },
+      "gps_location_out": {
+        "latitude": 54.975471528719,
+        "longitude": -1.7154522817926512,
+        "accuracy": 84.0,
+        "address": "Lat: 54.975472, Lng: -1.715452"
+      },
+      "notes": "",
+      "created_date": "2025-06-25T16:24:04.024000"
+    },
+    {
+      "_id": "685c22a43e5e80bd817bebf3",
+      "id": "1018d9af-2c37-442d-83b3-c08542ef0e10",
+      "worker_id": "8e2cf9cc-fa2b-41a5-a718-e747120bbb23",
+      "job_id": "59c7f77e-3dd4-43cc-ba9f-d4f5aa30e391",
+      "clock_in": "2025-06-25T16:24:04.044000",
+      "clock_out": "2025-06-25T17:11:01.601000",
+      "duration_minutes": 46,
+      "gps_location_in": {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "accuracy": 10.0,
+        "address": null
+      },
+      "gps_location_out": null,
+      "notes": "Test time entry",
+      "created_date": "2025-06-25T16:24:04.044000"
+    },
+    {
+      "_id": "685c2616466c51d11d8f1aab",
+      "id": "260cc931-62d0-451b-97c2-29d81531485f",
+      "worker_id": "ce87cab7-5932-4fc2-b88a-0dab7b8a504b",
+      "job_id": "8d3365e5-d042-4094-924d-ac7f50f90b42",
+      "clock_in": "2025-06-25T16:38:46.815000",
+      "clock_out": "2025-06-25T16:39:24.721000",
+      "duration_minutes": 0,
+      "gps_location_in": {
+        "latitude": 54.975471528719,
+        "longitude": -1.7154522817926512,
+        "accuracy": 84.0,
+        "address": "Lat: 54.975472, Lng: -1.715452"
+      },
+      "gps_location_out": null,
+      "notes": "",
+      "created_date": "2025-06-25T16:38:46.815000"
+    },
+    {
+      "_id": "685c284f466c51d11d8f1aad",
+      "id": "08cc7849-7033-4de4-9d2c-88d7009967f0",
+      "worker_id": "65cf38f0-9a0c-4982-b835-0c8efc083c0e",
+      "job_id": "59c7f77e-3dd4-43cc-ba9f-d4f5aa30e391",
+      "clock_in": "2025-06-24T14:48:00",
+      "clock_out": "2025-06-24T14:48:00",
+      "duration_minutes": 0,
+      "gps_location_in": {
+        "latitude": 54.975471528719,
+        "longitude": -1.7154522817926512,
+        "accuracy": 84.0,
+        "address": "Lat: 54.975472, Lng: -1.715452"
+      },
+      "gps_location_out": {
+        "latitude": 54.975471528719,
+        "longitude": -1.7154522817926512,
+        "accuracy": 84.0,
+        "address": "Lat: 54.975472, Lng: -1.715452"
+      },
+      "notes": "",
+      "created_date": "2025-06-25T16:48:15.075000"
+    },
+    {
+      "_id": "685c2bbc990074da3a217d5b",
+      "id": "d61fea4d-5122-4928-bad8-57f809edaa50",
+      "worker_id": "39b2358d-7f9f-497a-9221-a275f6c7a4eb",
+      "job_id": "c5069665-e52a-42cd-be82-8ba4d50c2dd0",
+      "clock_in": "2025-06-25T17:02:52.971000",
+      "clock_out": "2025-06-25T17:02:58.054000",
+      "duration_minutes": 0,
+      "gps_location_in": {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "accuracy": 10.0,
+        "address": null
+      },
+      "gps_location_out": {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "accuracy": 10.0,
+        "address": null
+      },
+      "notes": "Completed initial assessment",
+      "created_date": "2025-06-25T17:02:52.971000"
+    },
+    {
+      "_id": "685c2bc2990074da3a217d5c",
+      "id": "2d0d14fb-bc43-454c-83f6-1e8da9615609",
+      "worker_id": "14658a3d-4ac7-4f74-9fde-a138e5ffcf0a",
+      "job_id": "098c4e6f-34ac-4002-b371-0ce59345377a",
+      "clock_in": "2025-06-25T17:02:58.152000",
+      "clock_out": "2025-06-25T17:03:01.214000",
+      "duration_minutes": 0,
+      "gps_location_in": {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "accuracy": 10.0,
+        "address": null
+      },
+      "gps_location_out": {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "accuracy": 10.0,
+        "address": null
+      },
+      "notes": "Completed initial measurements",
+      "created_date": "2025-06-25T17:02:58.152000"
+    },
+    {
+      "_id": "685c2d9de02b87ea6dc9943d",
+      "id": "7ca04058-3f5c-4c31-8bd0-95cdc11739a0",
+      "worker_id": "fecdd4c8-287f-4f59-8e86-5121eff9f49d",
+      "job_id": "a30249b4-0502-4189-a035-0de506983a6e",
+      "clock_in": "2025-06-25T17:10:53.898000",
+      "clock_out": "2025-06-25T17:10:59.027000",
+      "duration_minutes": 0,
+      "gps_location_in": {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "accuracy": 10.0,
+        "address": null
+      },
+      "gps_location_out": {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "accuracy": 10.0,
+        "address": null
+      },
+      "notes": "Completed initial assessment",
+      "created_date": "2025-06-25T17:10:53.898000"
+    },
+    {
+      "_id": "685c2da3e02b87ea6dc9943e",
+      "id": "e0816ed8-93fd-400a-b0f8-2aa0b368f313",
+      "worker_id": "91123377-8781-465a-bb1f-ad6ab0ccf9e4",
+      "job_id": "5d3d8839-0915-4da7-aa34-1c5002c21341",
+      "clock_in": "2025-06-25T17:10:59.094000",
+      "clock_out": "2025-06-25T17:11:02.119000",
+      "duration_minutes": 0,
+      "gps_location_in": {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "accuracy": 10.0,
+        "address": null
+      },
+      "gps_location_out": {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "accuracy": 10.0,
+        "address": null
+      },
+      "notes": "Completed initial measurements",
+      "created_date": "2025-06-25T17:10:59.094000"
+    },
+    {
+      "_id": "685c2da7e02b87ea6dc99447",
+      "id": "f5c413e4-19ec-4d57-b239-2fa7037b3c5e",
+      "worker_id": "d5d7303f-e891-4fe9-984c-444dd4454e00",
+      "job_id": "4385e6b3-5d9f-4fe7-b654-4fada1df8c4f",
+      "clock_in": "2025-06-24T10:15:00",
+      "clock_out": "2025-06-24T16:30:00",
+      "duration_minutes": 375,
+      "gps_location_in": {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "accuracy": 10.0,
+        "address": null
+      },
+      "gps_location_out": {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "accuracy": 10.0,
+        "address": null
+      },
+      "notes": "Normal clock-out",
+      "created_date": "2025-06-25T17:11:03.077000"
+    },
+    {
+      "_id": "685c2da7e02b87ea6dc99448",
+      "id": "3caef9f6-b9a4-4ea5-874c-0ac112db5c96",
+      "worker_id": "c3807bd6-286a-4950-b0a9-4a1e84c4d7ac",
+      "job_id": "4385e6b3-5d9f-4fe7-b654-4fada1df8c4f",
+      "clock_in": "2025-06-23T08:30:00",
+      "clock_out": "2025-06-23T18:45:00",
+      "duration_minutes": 615,
+      "gps_location_in": {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "accuracy": 10.0,
+        "address": null
+      },
+      "gps_location_out": {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "accuracy": 10.0,
+        "address": null
+      },
+      "notes": "Late clock-out",
+      "created_date": "2025-06-25T17:11:03.144000"
+    },
+    {
+      "_id": "685c2da7e02b87ea6dc99449",
+      "id": "6457e714-d549-4fb2-89ff-8537bf8290a3",
+      "worker_id": "d5d7303f-e891-4fe9-984c-444dd4454e00",
+      "job_id": "4385e6b3-5d9f-4fe7-b654-4fada1df8c4f",
+      "clock_in": "2025-06-20T10:15:00",
+      "clock_out": "2025-06-20T16:30:00",
+      "duration_minutes": 375,
+      "gps_location_in": {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "accuracy": 10.0,
+        "address": null
+      },
+      "gps_location_out": {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "accuracy": 10.0,
+        "address": null
+      },
+      "notes": "Normal clock-out",
+      "created_date": "2025-06-25T17:11:03.256000"
+    },
+    {
+      "_id": "685c2da7e02b87ea6dc9944a",
+      "id": "15fcd50b-48dd-4fc7-9de6-5f6c37a958fa",
+      "worker_id": "c3807bd6-286a-4950-b0a9-4a1e84c4d7ac",
+      "job_id": "4385e6b3-5d9f-4fe7-b654-4fada1df8c4f",
+      "clock_in": "2025-06-19T08:30:00",
+      "clock_out": "2025-06-19T18:45:00",
+      "duration_minutes": 615,
+      "gps_location_in": {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "accuracy": 10.0,
+        "address": null
+      },
+      "gps_location_out": {
+        "latitude": 51.5074,
+        "longitude": -0.1278,
+        "accuracy": 10.0,
+        "address": null
+      },
+      "notes": "Late clock-out",
+      "created_date": "2025-06-25T17:11:03.502000"
+    },
+    {
+      "_id": "685c2df5c4c41af27e1aecbc",
+      "id": "e7bf2c33-8469-4c73-bc18-a41ee99413b8",
+      "worker_id": "2ba0385c-e7ec-43d6-876a-ff7c24629e17",
+      "job_id": "8d3365e5-d042-4094-924d-ac7f50f90b42",
+      "clock_in": "2025-06-25T17:12:21.315000",
+      "clock_out": null,
+      "duration_minutes": null,
+      "gps_location_in": null,
+      "gps_location_out": null,
+      "notes": "",
+      "created_date": "2025-06-25T17:12:21.315000"
+    },
+    {
+      "_id": "685c2e19c4c41af27e1aecbd",
+      "id": "46430a61-b405-4154-a7c3-f2377a5db47c",
+      "worker_id": "66c84b90-70ff-4f1b-8a36-2d97bddb3384",
+      "job_id": "26f7d020-ba53-4854-95d9-d91b795d114c",
+      "clock_in": "2025-06-25T17:12:57.100000",
+      "clock_out": null,
+      "duration_minutes": null,
+      "gps_location_in": null,
+      "gps_location_out": null,
+      "notes": "",
+      "created_date": "2025-06-25T17:12:57.104000"
+    }
+  ],
+  "materials": [
+    {
+      "_id": "685ba68aea4d3f9c5508b626",
+      "id": "5291f509-2b08-4e0a-a48c-cac696682837",
+      "job_id": "e3a2a92b-3938-4ccb-98ed-dc3c2b4fc31c",
+      "name": "Kitchen Cabinets",
+      "cost": 3800.0,
+      "quantity": 1,
+      "purchase_date": "2025-06-25T07:34:34.888000",
+      "notes": "Premium oak cabinets with soft-close hinges",
+      "created_date": "2025-06-25T07:34:34.888000"
+    },
+    {
+      "_id": "685ba68aea4d3f9c5508b627",
+      "id": "4078b8b8-7af6-4511-8f5d-283968fb96ed",
+      "job_id": "b7bed04d-1505-4829-bd11-161a3e213a8c",
+      "name": "Granite Countertop",
+      "cost": 1200.0,
+      "quantity": 1,
+      "purchase_date": "2025-06-25T07:34:34.918000",
+      "notes": "Black granite, 3m length",
+      "created_date": "2025-06-25T07:34:34.918000"
+    },
+    {
+      "_id": "685ba68aea4d3f9c5508b628",
+      "id": "3c1d56e6-ecb4-48b8-a519-55234ff7a205",
+      "job_id": "83d68f94-d8b7-40ab-8df6-95f767e8778b",
+      "name": "Bathroom Tiles",
+      "cost": 45.0,
+      "quantity": 20,
+      "purchase_date": "2025-06-25T07:34:34.937000",
+      "notes": "Ceramic white tiles, 30x30cm",
+      "created_date": "2025-06-25T07:34:34.937000"
+    },
+    {
+      "_id": "685ba6e73bccff3b4d0d4a00",
+      "id": "2848d8b2-8c89-469c-8063-27914b6b8ecd",
+      "job_id": "c96f7752-884b-46d7-b4a0-8abceaa1eb46",
+      "name": "Kitchen Cabinets",
+      "cost": 3800.0,
+      "quantity": 1,
+      "purchase_date": "2025-06-25T07:36:07.084000",
+      "notes": "Premium oak cabinets with soft-close hinges",
+      "created_date": "2025-06-25T07:36:07.084000"
+    },
+    {
+      "_id": "685ba6e73bccff3b4d0d4a01",
+      "id": "907e92d3-90fd-4f06-9f6b-78955248fd09",
+      "job_id": "8a7fad1f-843e-4dfb-8abf-cd7dbd61a15e",
+      "name": "Granite Countertop",
+      "cost": 1200.0,
+      "quantity": 1,
+      "purchase_date": "2025-06-25T07:36:07.102000",
+      "notes": "Black granite, 3m length",
+      "created_date": "2025-06-25T07:36:07.102000"
+    },
+    {
+      "_id": "685ba6e73bccff3b4d0d4a02",
+      "id": "2ddfe745-4c33-4929-b64f-4fc43a46dc4c",
+      "job_id": "4c814087-c05d-4127-8c0c-4e8286132286",
+      "name": "Bathroom Tiles",
+      "cost": 45.0,
+      "quantity": 20,
+      "purchase_date": "2025-06-25T07:36:07.162000",
+      "notes": "Ceramic white tiles, 30x30cm",
+      "created_date": "2025-06-25T07:36:07.162000"
+    },
+    {
+      "_id": "685bac82ab9da8f22b0ef19d",
+      "id": "7582ec1a-2088-4a6a-9612-a64779f83b2c",
+      "job_id": "b7bed04d-1505-4829-bd11-161a3e213a8c",
+      "name": "Stuff",
+      "cost": 13.0,
+      "quantity": 1,
+      "purchase_date": "2025-06-25T08:00:02.539000",
+      "notes": "",
+      "created_date": "2025-06-25T08:00:02.539000"
+    },
+    {
+      "_id": "685bed71f822af4cf8333a16",
+      "id": "666ef8f6-e085-4bc7-b77f-f42469d01899",
+      "job_id": "83d68f94-d8b7-40ab-8df6-95f767e8778b",
+      "name": "Artidjdbeh",
+      "cost": 185.0,
+      "quantity": 1,
+      "purchase_date": "2025-06-25T12:37:05.849000",
+      "notes": "",
+      "created_date": "2025-06-25T12:37:05.849000"
+    },
+    {
+      "_id": "685bef33f822af4cf8333a19",
+      "id": "1b4effb8-8ee0-4c5c-8145-80d2ff748fcd",
+      "job_id": "43a6efd5-30c6-4538-80e3-fd5434667a77",
+      "name": "Sjbdfhfjf",
+      "cost": 1000.0,
+      "quantity": 1,
+      "purchase_date": "2025-06-25T12:44:35.623000",
+      "notes": "Tony sent is ",
+      "created_date": "2025-06-25T12:44:35.623000"
+    },
+    {
+      "_id": "685c061b9d156264507d3c26",
+      "id": "2315a924-ec53-4a0c-8531-b0d1737d9168",
+      "job_id": "e3a2a92b-3938-4ccb-98ed-dc3c2b4fc31c",
+      "name": "gfdgfdgfd",
+      "cost": 3000.0,
+      "quantity": 1,
+      "supplier": "Wickes",
+      "reference": "15848",
+      "purchase_date": "2025-06-25T14:22:19.376000",
+      "notes": "",
+      "created_date": "2025-06-25T14:22:19.377000"
+    },
+    {
+      "_id": "685c083e9d156264507d3c27",
+      "id": "714e8678-2195-41d2-b7fb-a82737bb5243",
+      "job_id": "e3a2a92b-3938-4ccb-98ed-dc3c2b4fc31c",
+      "name": "tiles",
+      "cost": 350.0,
+      "quantity": 1,
+      "supplier": "B&Q",
+      "reference": "8787",
+      "purchase_date": "2025-06-25T14:31:26.114000",
+      "notes": "",
+      "created_date": "2025-06-25T14:31:26.114000"
+    },
+    {
+      "_id": "685c2bc5990074da3a217d5d",
+      "id": "049caf48-2098-4338-ad65-679eddb1791d",
+      "job_id": "c5069665-e52a-42cd-be82-8ba4d50c2dd0",
+      "name": "Kitchen Cabinets",
+      "cost": 3800.0,
+      "quantity": 1,
+      "supplier": "",
+      "reference": "",
+      "purchase_date": "2025-06-25T17:03:01.237000",
+      "notes": "Premium oak cabinets with soft-close hinges",
+      "created_date": "2025-06-25T17:03:01.237000"
+    },
+    {
+      "_id": "685c2bc5990074da3a217d5e",
+      "id": "a3e9b416-b1ee-4ce6-a8db-f29ad844801f",
+      "job_id": "098c4e6f-34ac-4002-b371-0ce59345377a",
+      "name": "Granite Countertop",
+      "cost": 1200.0,
+      "quantity": 1,
+      "supplier": "",
+      "reference": "",
+      "purchase_date": "2025-06-25T17:03:01.263000",
+      "notes": "Black granite, 3m length",
+      "created_date": "2025-06-25T17:03:01.263000"
+    },
+    {
+      "_id": "685c2bc5990074da3a217d5f",
+      "id": "2bc0b4f6-58aa-495b-b35b-d1e78a8d6205",
+      "job_id": "88313d64-6f6b-47e6-bf31-df16296b57b4",
+      "name": "Bathroom Tiles",
+      "cost": 45.0,
+      "quantity": 20,
+      "supplier": "",
+      "reference": "",
+      "purchase_date": "2025-06-25T17:03:01.280000",
+      "notes": "Ceramic white tiles, 30x30cm",
+      "created_date": "2025-06-25T17:03:01.280000"
+    },
+    {
+      "_id": "685c2da6e02b87ea6dc9943f",
+      "id": "0fd24c8e-b4fa-4656-9cda-6f2edbf26195",
+      "job_id": "a30249b4-0502-4189-a035-0de506983a6e",
+      "name": "Kitchen Cabinets",
+      "cost": 3800.0,
+      "quantity": 1,
+      "supplier": "",
+      "reference": "",
+      "purchase_date": "2025-06-25T17:11:02.147000",
+      "notes": "Premium oak cabinets with soft-close hinges",
+      "created_date": "2025-06-25T17:11:02.147000"
+    },
+    {
+      "_id": "685c2da6e02b87ea6dc99440",
+      "id": "f35cacd3-3932-42d9-b615-2e17c4c766a4",
+      "job_id": "5d3d8839-0915-4da7-aa34-1c5002c21341",
+      "name": "Granite Countertop",
+      "cost": 1200.0,
+      "quantity": 1,
+      "supplier": "",
+      "reference": "",
+      "purchase_date": "2025-06-25T17:11:02.164000",
+      "notes": "Black granite, 3m length",
+      "created_date": "2025-06-25T17:11:02.164000"
+    },
+    {
+      "_id": "685c2da6e02b87ea6dc99441",
+      "id": "f2e9c1be-d410-4c57-b88d-833324842db4",
+      "job_id": "31fc76a6-b5bb-430c-a4ef-558423c30ffc",
+      "name": "Bathroom Tiles",
+      "cost": 45.0,
+      "quantity": 20,
+      "supplier": "",
+      "reference": "",
+      "purchase_date": "2025-06-25T17:11:02.186000",
+      "notes": "Ceramic white tiles, 30x30cm",
+      "created_date": "2025-06-25T17:11:02.186000"
+    }
+  ]
+}

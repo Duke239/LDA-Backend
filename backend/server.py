@@ -1088,16 +1088,18 @@ async def root():
 async def root():
     return {"message": "LDA Group Time Tracking API", "version": "2.0.0"}
 
-# Include the router in the main app
-app.include_router(api_router)
-
+# Configure CORS before including routes
 app.add_middleware(
     CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins
     allow_credentials=True,
-    allow_origins=["*"],
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["*"]
 )
+
+# Include the router in the main app
+app.include_router(api_router)
 
 # Configure logging
 logging.basicConfig(

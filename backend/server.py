@@ -1084,6 +1084,11 @@ async def root():
         "docs": "/docs"
     }
 
+# Handle OPTIONS requests for CORS preflight
+@app.options("/{path:path}")
+async def options_handler(path: str):
+    return {"message": "OK"}
+
 @api_router.get("/")
 async def root():
     return {"message": "LDA Group Time Tracking API", "version": "2.0.0"}

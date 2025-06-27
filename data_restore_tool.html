@@ -79,12 +79,15 @@
                 email: document.getElementById('adminEmail').value,
                 phone: document.getElementById('adminPhone').value,
                 role: 'admin',
-                password: document.getElementById('adminPassword').value
+                password: document.getElementById('adminPassword').value,
+                hourly_rate: 25.0
             };
             
             try {
+                console.log('Sending admin data:', adminData);
                 const response = await fetch(`${API_URL}/workers`, {
                     method: 'POST',
+                    mode: 'cors',
                     headers: {
                         'Content-Type': 'application/json',
                         'Authorization': AUTH_HEADER
@@ -92,10 +95,14 @@
                     body: JSON.stringify(adminData)
                 });
                 
+                console.log('Response status:', response.status);
                 const result = await response.json();
+                console.log('Response data:', result);
+                
                 document.getElementById('adminResult').innerHTML = 
-                    response.ok ? `✅ Admin created: ${result.name}` : `❌ Error: ${result.detail}`;
+                    response.ok ? `✅ Admin created: ${result.name}` : `❌ Error: ${result.detail || 'Unknown error'}`;
             } catch (error) {
+                console.error('Error creating admin:', error);
                 document.getElementById('adminResult').innerHTML = `❌ Error: ${error.message}`;
             }
         }
@@ -105,12 +112,15 @@
                 name: document.getElementById('workerName').value,
                 email: document.getElementById('workerEmail').value,
                 phone: document.getElementById('workerPhone').value,
-                role: 'worker'
+                role: 'worker',
+                hourly_rate: 15.0
             };
             
             try {
+                console.log('Sending worker data:', workerData);
                 const response = await fetch(`${API_URL}/workers`, {
                     method: 'POST',
+                    mode: 'cors',
                     headers: {
                         'Content-Type': 'application/json',
                         'Authorization': AUTH_HEADER
@@ -118,10 +128,14 @@
                     body: JSON.stringify(workerData)
                 });
                 
+                console.log('Response status:', response.status);
                 const result = await response.json();
+                console.log('Response data:', result);
+                
                 document.getElementById('workerResult').innerHTML = 
-                    response.ok ? `✅ Worker created: ${result.name}` : `❌ Error: ${result.detail}`;
+                    response.ok ? `✅ Worker created: ${result.name}` : `❌ Error: ${result.detail || 'Unknown error'}`;
             } catch (error) {
+                console.error('Error creating worker:', error);
                 document.getElementById('workerResult').innerHTML = `❌ Error: ${error.message}`;
             }
         }
@@ -136,8 +150,10 @@
             };
             
             try {
+                console.log('Sending job data:', jobData);
                 const response = await fetch(`${API_URL}/jobs`, {
                     method: 'POST',
+                    mode: 'cors',
                     headers: {
                         'Content-Type': 'application/json',
                         'Authorization': AUTH_HEADER
@@ -145,10 +161,14 @@
                     body: JSON.stringify(jobData)
                 });
                 
+                console.log('Response status:', response.status);
                 const result = await response.json();
+                console.log('Response data:', result);
+                
                 document.getElementById('jobResult').innerHTML = 
-                    response.ok ? `✅ Job created: ${result.name}` : `❌ Error: ${result.detail}`;
+                    response.ok ? `✅ Job created: ${result.name}` : `❌ Error: ${result.detail || 'Unknown error'}`;
             } catch (error) {
+                console.error('Error creating job:', error);
                 document.getElementById('jobResult').innerHTML = `❌ Error: ${error.message}`;
             }
         }

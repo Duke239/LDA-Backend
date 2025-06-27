@@ -1074,6 +1074,16 @@ async def export_attendance_alerts(admin: str = Depends(verify_admin)):
     )
 
 # Root endpoint
+# Root endpoint for the main app (redirects to API)
+@app.get("/")
+async def root():
+    return {
+        "message": "LDA Group Time Tracking System", 
+        "api_url": "/api/",
+        "status": "running",
+        "docs": "/docs"
+    }
+
 @api_router.get("/")
 async def root():
     return {"message": "LDA Group Time Tracking API", "version": "2.0.0"}

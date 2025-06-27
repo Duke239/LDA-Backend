@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>LDA Data Restore Tool</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .section { margin: 20px 0; padding: 20px; border: 1px solid #ccc; }
+        button { background: #d01f2f; color: white; padding: 10px 20px; border: none; cursor: pointer; margin: 10px 0; }
+        button:hover { opacity: 0.8; }
+        .result { background: #f0f0f0; padding: 10px; margin: 10px 0; }
+        input, textarea { width: 300px; padding: 5px; margin: 5px 0; }
+    </style>
+</head>
+<body>
+    <h1>LDA Group Data Restoration Tool</h1>
+    
+    <div class="section">
+        <h3>Step 1: Test Connection</h3>
+        <button onclick="testConnection()">Test Backend Connection</button>
+        <div id="connectionResult" class="result"></div>
+    </div>
+    
+    <div class="section">
+        <h3>Step 2: Create Admin User</h3>
+        <input type="text" id="adminName" placeholder="Admin Name" value="Duke McIntyre"><br>
+        <input type="email" id="adminEmail" placeholder="Admin Email" value="duke@ldagroup.co.uk"><br>
+        <input type="text" id="adminPhone" placeholder="Phone" value="07894792240"><br>
+        <input type="password" id="adminPassword" placeholder="Password" value="duke123"><br>
+        <button onclick="createAdmin()">Create Admin User</button>
+        <div id="adminResult" class="result"></div>
+    </div>
+    
+    <div class="section">
+        <h3>Step 3: Create Workers</h3>
+        <input type="text" id="workerName" placeholder="Worker Name" value="Mike Wilson"><br>
+        <input type="email" id="workerEmail" placeholder="Worker Email" value="mike@ldagroup.co.uk"><br>
+        <input type="text" id="workerPhone" placeholder="Phone" value="07700900789"><br>
+        <button onclick="createWorker()">Create Worker</button>
+        <div id="workerResult" class="result"></div>
+    </div>
+    
+    <div class="section">
+        <h3>Step 4: Create Jobs</h3>
+        <input type="text" id="jobName" placeholder="Job Name" value="Kitchen Renovation"><br>
+        <input type="text" id="jobClient" placeholder="Client" value="Smith Family"><br>
+        <input type="text" id="jobLocation" placeholder="Location" value="123 Main Street"><br>
+        <input type="number" id="jobCost" placeholder="Quoted Cost" value="15000"><br>
+        <textarea id="jobDescription" placeholder="Description">Complete kitchen renovation with new cabinets and appliances</textarea><br>
+        <button onclick="createJob()">Create Job</button>
+        <div id="jobResult" class="result"></div>
+    </div>
+    
+    <div class="section">
+        <h3>Step 5: Check Results</h3>
+        <button onclick="checkWorkers()">List All Workers</button>
+        <button onclick="checkJobs()">List All Jobs</button>
+        <div id="checkResult" class="result"></div>
+    </div>
+
+    <script>
+        const API_URL = 'https://lda-backend-eyn4.onrender.com/api';
+        const AUTH_HEADER = 'Basic YWRtaW46bGRhZ3JvdXAyMDI0'; // admin:ldagroup2024
+        
+        async function testConnection() {
+            try {
+                const response = await fetch(`${API_URL}/`);
+                const data = await response.json();
+                document.getElementById('connectionResult').innerHTML = 
+                    `✅ Connection successful: ${data.message}`;
+            } catch (error) {
+                document.getElementById('connectionResult').innerHTML = 
+                    `❌ Connection failed: ${error.message}`;
+            }
+        }
+        
+        async function createAdmin() {
+            const adminData = {
+                name: document.getElementById('adminName').value,
+                email: document.getElementById('adminEmail').value,
+                phone: document.getElementById('adminPhone').value,
+                role: 'admin',
+                password: document.getElementById('adminPassword').value
+            };
+            
+            try {
+                const response = await fetch(`${API_URL}/workers`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': AUTH_HEADER
+                    },
+                    body: JSON.stringify(adminData)
+                });
+                
+                const result = await response.json();
+                document.getElementById('adminResult').innerHTML = 
+                    response.ok ? `✅ Admin created: ${result.name}` : `❌ Error: ${result.detail}`;
+            } catch (error) {
+                document.getElementById('adminResult').innerHTML = `❌ Error: ${error.message}`;
+            }
+        }
+        
+        async function createWorker() {
+            const workerData = {
+                name: document.getElementById('workerName').value,
+                email: document.getElementById('workerEmail').value,
+                phone: document.getElementById('workerPhone').value,
+                role: 'worker'
+            };
+            
+            try {
+                const response = await fetch(`${API_URL}/workers`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': AUTH_HEADER
+                    },
+                    body: JSON.stringify(workerData)
+                });
+                
+                const result = await response.json();
+                document.getElementById('workerResult').innerHTML = 
+                    response.ok ? `✅ Worker created: ${result.name}` : `❌ Error: ${result.detail}`;
+            } catch (error) {
+                document.getElementById('workerResult').innerHTML = `❌ Error: ${error.message}`;
+            }
+        }
+        
+        async function createJob() {
+            const jobData = {
+                name: document.getElementById('jobName').value,
+                client: document.getElementById('jobClient').value,
+                location: document.getElementById('jobLocation').value,
+                quoted_cost: parseFloat(document.getElementById('jobCost').value),
+                description: document.getElementById('jobDescription').value
+            };
+            
+            try {
+                const response = await fetch(`${API_URL}/jobs`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': AUTH_HEADER
+                    },
+                    body: JSON.stringify(jobData)
+                });
+                
+                const result = await response.json();
+                document.getElementById('jobResult').innerHTML = 
+                    response.ok ? `✅ Job created: ${result.name}` : `❌ Error: ${result.detail}`;
+            } catch (error) {
+                document.getElementById('jobResult').innerHTML = `❌ Error: ${error.message}`;
+            }
+        }
+        
+        async function checkWorkers() {
+            try {
+                const response = await fetch(`${API_URL}/workers`);
+                const workers = await response.json();
+                document.getElementById('checkResult').innerHTML = 
+                    `✅ Found ${workers.length} workers: ${workers.map(w => w.name).join(', ')}`;
+            } catch (error) {
+                document.getElementById('checkResult').innerHTML = `❌ Error: ${error.message}`;
+            }
+        }
+        
+        async function checkJobs() {
+            try {
+                const response = await fetch(`${API_URL}/jobs`);
+                const jobs = await response.json();
+                document.getElementById('checkResult').innerHTML = 
+                    `✅ Found ${jobs.length} jobs: ${jobs.map(j => j.name).join(', ')}`;
+            } catch (error) {
+                document.getElementById('checkResult').innerHTML = `❌ Error: ${error.message}`;
+            }
+        }
+    </script>
+</body>
+</html>

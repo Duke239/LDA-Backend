@@ -69,7 +69,7 @@ app = FastAPI(title="LDA Group Time Tracking API")
 
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
-@app.get("/ping")
+@app.api_route("/ping", methods=["GET", "HEAD"])
 async def ping():
     print("Ping received")  # or use logging.info("Ping received")
     return {"status": "ok"}

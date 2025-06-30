@@ -18,7 +18,7 @@ import csv
 from decimal import Decimal
 import secrets
 import pytz
-from db import connect_to_mongo, close_mongo_connection, db
+from db import connect_to_mongo, close_mongo_connection
 
 
 ROOT_DIR = Path(__file__).parent

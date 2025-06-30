@@ -46,18 +46,6 @@ def uk_to_utc(uk_dt):
         uk_dt = UK_TZ.localize(uk_dt)
     return uk_dt.astimezone(pytz.utc)
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(
-    mongo_url,
-    serverSelectionTimeoutMS=5000,
-    connectTimeoutMS=10000,
-    socketTimeoutMS=10000,
-    maxPoolSize=10,
-    tlsInsecure=True  # Allow insecure TLS connections
-)
-db = client[os.environ.get('DB_NAME', 'lda_timetracking')]
-
 # Security
 security = HTTPBasic()
 

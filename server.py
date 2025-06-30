@@ -75,15 +75,17 @@ async def shutdown_event():
     print("❌ MongoDB connection closed")
 
 @app.get("/test-db")
-async def test_db():
-    # Try fetching one worker document, or return a test message
-    worker = await db["workers"].find_one()
-    if worker:
-        # Convert ObjectId to string if present
-        worker["_id"] = str(worker["_id"])
-        return {"status": "success", "worker": worker}
-    else:
-        return {"status": "success", "message": "No workers found yet"}
+async def test_db(request: Request):
+    db = request.app.state.db  # ✅ FIX: get the db from app state
+    try:
+        worker = await db["workers"].find_one()
+        if worker:
+            worker["_id"] = str(worker.get("_id", ""))
+            return {"status": "success", "worker": worker}
+        else:
+            return {"status": "success", "message": "No workers found yet"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 # Define Models
 class Worker(BaseModel):

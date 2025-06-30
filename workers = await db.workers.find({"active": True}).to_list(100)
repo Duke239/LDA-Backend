@@ -123,6 +123,16 @@ async def get_workers(request: Request):
     workers = await db.workers.find({"active": True}).to_list(100)
     return {"workers": workers}
 
+@app.get("/debug-db-info")
+async def debug_db_info(request: Request):
+    db = request.app.state.db
+    collections = await db.list_collection_names()
+    info = {}
+    for coll in collections:
+        count = await db[coll].count_documents({})
+        info[coll] = count
+    return {"collections": info}
+
 @app.post("/workers")
 async def add_worker(request: Request, worker: WorkerCreate):
     db = request.app.state.db

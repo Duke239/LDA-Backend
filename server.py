@@ -11,6 +11,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 from decimal import Decimal
 from db import connect_to_mongo, close_mongo_connection
+from fastapi.middleware.cors import CORSMiddleware
 import os
 import logging
 import uuid
@@ -315,7 +316,10 @@ async def add_worker(request: Request, worker: WorkerCreate):
     db = request.app.state.db
     result = await db.workers.insert_one(worker.dict())
     return {"inserted_id": str(result.inserted_id)}
-
+@api_router.get("/")
+async def root():
+    return {"message": "LDA Group Time Tracking API", "version": "2.0.0"}
+    
 @api_router.get("/workers")
 async def get_workers(request: Request):
     db = request.app.state.db
@@ -1398,11 +1402,13 @@ async def root():
 # Configure CORS before including routes
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins
+    allow_origins=[
+        "https://lda-group.vercel.app",
+        "https://lda-group-one.vercel.app",
+    ],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"]
 )
 
 # Include the router in the main app

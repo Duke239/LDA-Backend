@@ -1,6 +1,7 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Query, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, Query, Depends, Request
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from bson import ObjectId
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -62,10 +63,17 @@ api_router = APIRouter(prefix="/api")
 async def ping():
     print("Ping received")  # or use logging.info("Ping received")
     return {"status": "ok"}
+
 @app.on_event("startup")
 async def startup_event():
-    await connect_to_mongo()
+    await connect_to_mongo(app)
     print("✅ Connected to MongoDB")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    await close_mongo_connection(app)
+    print("❌ MongoDB connection closed")
+
 @app.get("/test-db")
 async def test_db():
     # Try fetching one worker document, or return a test message
@@ -76,11 +84,6 @@ async def test_db():
         return {"status": "success", "worker": worker}
     else:
         return {"status": "success", "message": "No workers found yet"}
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    await close_mongo_connection()
-    print("❌ MongoDB connection closed")
 
 # Define Models
 class Worker(BaseModel):

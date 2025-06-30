@@ -5,9 +5,8 @@ from bson import ObjectId
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import Field
-from pathlib import Path
 from pydantic import BaseModel, Field
+from pathlib import Path
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from decimal import Decimal
@@ -18,24 +17,20 @@ import uuid
 import json
 import io
 import csv
-import uuid
 import secrets
 import pytz
-
 
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# UK timezone handling
+# --- Timezone helpers for UK ---
 UK_TZ = pytz.timezone('Europe/London')
 
 def get_uk_time():
-    """Get current UK time (handles BST/GMT automatically)"""
     return datetime.now(UK_TZ)
 
 def utc_to_uk(utc_dt):
-    """Convert UTC datetime to UK time"""
     if utc_dt is None:
         return None
     if utc_dt.tzinfo is None:
@@ -43,80 +38,28 @@ def utc_to_uk(utc_dt):
     return utc_dt.astimezone(UK_TZ)
 
 def uk_to_utc(uk_dt):
-    """Convert UK time to UTC"""
     if uk_dt is None:
         return None
     if uk_dt.tzinfo is None:
         uk_dt = UK_TZ.localize(uk_dt)
     return uk_dt.astimezone(pytz.utc)
 
-# Security
-security = HTTPBasic()
 
-# Admin credentials (in production, store securely)
+# --- Security ---
+security = HTTPBasic()
 ADMIN_USERNAME = "admin"
 ADMIN_PASSWORD = "ldagroup2024"
 
-# Create the main app without a prefix
-app = FastAPI(title="LDA Group Time Tracking API")
 
-# Create a router with the /api prefix
-api_router = APIRouter(prefix="/api")
-@app.api_route("/ping", methods=["GET", "HEAD"])
-async def ping():
-    print("Ping received")  # or use logging.info("Ping received")
-    return {"status": "ok"}
-
-@app.on_event("startup")
-async def startup_event():
-    await connect_to_mongo(app)
-    print("✅ Connected to MongoDB")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    await close_mongo_connection(app)
-    print("❌ MongoDB connection closed")
-
-    
-@app.get("/test-db")
-async def test_db(request: Request):
-    db = request.app.state.db  # ✅ FIX: get the db from app state
-    try:
-        worker = await db["workers"].find_one()
-        if worker:
-            worker["_id"] = str(worker.get("_id", ""))
-            return {"status": "success", "worker": worker}
-        else:
-            return {"status": "success", "message": "No workers found yet"}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-@app.get("/workers")
-async def get_workers(request: Request):
-    db = request.app.state.db
-    workers = await db.workers.find({"active": True}).to_list(100)
-    return {"workers": workers}
-
-@app.post("/workers")
-async def add_worker(request: Request, worker: WorkerCreate):
-    db = request.app.state.db
-    result = await db.workers.insert_one(worker.dict())
-    return {"inserted_id": str(result.inserted_id)}
-
-@app.get("/dashboard-stats")
-async def get_dashboard_stats(request: Request):
-    db = request.app.state.db
-    total_workers = await db.workers.count_documents({"active": True, "archived": {"$ne": True}})
-    return {"total_workers": total_workers}
-    
-# Define Models
+# --- Pydantic models (define BEFORE routes) ---
 class Worker(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
     email: str
     phone: str
     role: str = "worker"  # worker, admin, supervisor
-    hourly_rate: float = 15.0  # Default £15/hour
-    password: Optional[str] = None  # For admin users
+    hourly_rate: float = 15.0
+    password: Optional[str] = None
     active: bool = True
     archived: bool = False
     created_date: datetime = Field(default_factory=datetime.utcnow)
@@ -138,6 +81,59 @@ class WorkerUpdate(BaseModel):
     password: Optional[str] = None
     active: Optional[bool] = None
     archived: Optional[bool] = None
+
+
+# --- FastAPI app & router ---
+app = FastAPI(title="LDA Group Time Tracking API")
+api_router = APIRouter(prefix="/api")
+
+@app.api_route("/ping", methods=["GET", "HEAD"])
+async def ping():
+    logging.info("Ping received")
+    return {"status": "ok"}
+
+@app.on_event("startup")
+async def startup_event():
+    await connect_to_mongo(app)
+    logging.info("✅ Connected to MongoDB")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    await close_mongo_connection(app)
+    logging.info("❌ MongoDB connection closed")
+
+
+# --- API Endpoints ---
+
+@app.get("/test-db")
+async def test_db(request: Request):
+    db = request.app.state.db
+    try:
+        worker = await db["workers"].find_one()
+        if worker:
+            worker["_id"] = str(worker.get("_id", ""))
+            return {"status": "success", "worker": worker}
+        return {"status": "success", "message": "No workers found yet"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.get("/workers")
+async def get_workers(request: Request):
+    db = request.app.state.db
+    workers = await db.workers.find({"active": True}).to_list(100)
+    return {"workers": workers}
+
+@app.post("/workers")
+async def add_worker(request: Request, worker: WorkerCreate):
+    db = request.app.state.db
+    result = await db.workers.insert_one(worker.dict())
+    return {"inserted_id": str(result.inserted_id)}
+
+@app.get("/dashboard-stats")
+async def get_dashboard_stats(request: Request):
+    db = request.app.state.db
+    total_workers = await db.workers.count_documents({"active": True, "archived": {"$ne": True}})
+    return {"total_workers": total_workers}
 
 class Job(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))

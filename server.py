@@ -11,10 +11,11 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 import json
 import io
 import csv
+import uuid
 from decimal import Decimal
 import secrets
 import pytz
@@ -74,6 +75,7 @@ async def shutdown_event():
     await close_mongo_connection(app)
     print("❌ MongoDB connection closed")
 
+    
 @app.get("/test-db")
 async def test_db(request: Request):
     db = request.app.state.db  # ✅ FIX: get the db from app state
@@ -86,7 +88,24 @@ async def test_db(request: Request):
             return {"status": "success", "message": "No workers found yet"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+@app.get("/workers")
+async def get_workers(request: Request):
+    db = request.app.state.db
+    workers = await db.workers.find({"active": True}).to_list(100)
+    return {"workers": workers}
 
+@app.post("/workers")
+async def add_worker(request: Request, worker: WorkerCreate):
+    db = request.app.state.db
+    result = await db.workers.insert_one(worker.dict())
+    return {"inserted_id": str(result.inserted_id)}
+
+@app.get("/dashboard-stats")
+async def get_dashboard_stats(request: Request):
+    db = request.app.state.db
+    total_workers = await db.workers.count_documents({"active": True, "archived": {"$ne": True}})
+    return {"total_workers": total_workers}
+    
 # Define Models
 class Worker(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -276,21 +295,23 @@ async def admin_login(login_data: AdminLogin):
     raise HTTPException(status_code=401, detail="Invalid admin credentials")
 
 # WORKER ENDPOINTS
-@api_router.post("/workers", response_model=Worker)
-async def create_worker(worker: WorkerCreate, admin: str = Depends(verify_admin)):
-    """Create a new worker (Admin only)"""
-    worker_dict = worker.dict()
-    worker_obj = Worker(**worker_dict)
-    await db.workers.insert_one(worker_obj.dict())
-    return worker_obj
+@api_router.post("/workers")
+async def add_worker(request: Request, worker: WorkerCreate):
+    db = request.app.state.db
+    result = await db.workers.insert_one(worker.dict())
+    return {"inserted_id": str(result.inserted_id)}
 
-@api_router.get("/workers", response_model=List[Worker])
-async def get_workers(active_only: bool = Query(True), include_archived: bool = Query(False)):
-    filter_dict = {"active": True} if active_only else {}
-    if not include_archived:
-        filter_dict["archived"] = {"$ne": True}
-    workers = await db.workers.find(filter_dict).to_list(1000)
-    return [Worker(**worker) for worker in workers]
+@api_router.get("/workers")
+async def get_workers(request: Request):
+    db = request.app.state.db
+    workers = await db.workers.find({"active": True}).to_list(100)
+    return {"workers": workers}
+
+@api_router.get("/dashboard-stats")
+async def get_dashboard_stats(request: Request):
+    db = request.app.state.db
+    total_workers = await db.workers.count_documents({"active": True, "archived": {"$ne": True}})
+    return {"total_workers": total_workers}
 
 @api_router.get("/workers/{worker_id}", response_model=Worker)
 async def get_worker(worker_id: str):

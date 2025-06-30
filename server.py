@@ -17,6 +17,7 @@ import csv
 from decimal import Decimal
 import secrets
 import pytz
+from db import connect_to_mongo, close_mongo_connection, db
 
 
 ROOT_DIR = Path(__file__).parent
@@ -73,6 +74,15 @@ api_router = APIRouter(prefix="/api")
 async def ping():
     print("Ping received")  # or use logging.info("Ping received")
     return {"status": "ok"}
+@app.on_event("startup")
+async def startup_event():
+    await connect_to_mongo()
+    print("✅ Connected to MongoDB")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    await close_mongo_connection()
+    print("❌ MongoDB connection closed")
 
 # Define Models
 class Worker(BaseModel):

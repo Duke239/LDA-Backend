@@ -1402,10 +1402,7 @@ async def root():
 # Configure CORS before including routes
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://lda-group.vercel.app",
-        "https://lda-group-one.vercel.app",
-    ],
+    allow_origins=["https://lda-group.vercel.app"],  # restrict to your frontend domain for security
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

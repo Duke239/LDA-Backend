@@ -86,7 +86,6 @@ class WorkerUpdate(BaseModel):
 
 # --- FastAPI app & router ---
 app = FastAPI(title="LDA Group Time Tracking API")
-api_router = APIRouter(prefix="/api")
 
 @app.api_route("/ping", methods=["GET", "HEAD"])
 async def ping():
@@ -291,6 +290,17 @@ def calculate_duration(clock_in: datetime, clock_out: datetime) -> int:
     """Calculate duration in minutes between two datetime objects"""
     delta = clock_out - clock_in
     return int(delta.total_seconds() / 60)
+    
+# Configure CORS before including routes
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://lda-group.vercel.app"],  # your frontend URL
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+api_router = APIRouter(prefix="/api")
 
 # AUTHENTICATION ENDPOINTS
 @api_router.post("/admin/login")
@@ -1401,15 +1411,6 @@ async def options_handler(path: str):
 @api_router.get("/")
 async def root():
     return {"message": "LDA Group Time Tracking API", "version": "2.0.0"}
-
-# Configure CORS before including routes
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["https://lda-group.vercel.app"],  # restrict to your frontend domain for security
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # Include the router in the main app
 app.include_router(api_router)

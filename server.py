@@ -94,13 +94,16 @@ async def ping():
     return {"status": "ok"}
 
 @app.on_event("startup")
-async def startup_event():
-    await connect_to_mongo(app)
+async def connect_to_mongo():
+    mongo_uri = "mongodb+srv://dukemcintyredm:wanxszN3gukWLU61@ldagroup.yhjwyg7.mongodb.net/lda_timetracking?retryWrites=true&w=majority&tlsInsecure=true"
+    app.state.mongodb_client = AsyncIOMotorClient(mongo_uri)
+    await app.state.mongodb_client.admin.command("ping")
     logging.info("✅ Connected to MongoDB")
 
 @app.on_event("shutdown")
-async def shutdown_event():
-    await close_mongo_connection(app)
+def shutdown_event():
+    logging.info("Closing MongoDB connection")
+    app.state.mongodb_client.close()
     logging.info("❌ MongoDB connection closed")
 
 

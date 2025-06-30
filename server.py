@@ -66,6 +66,16 @@ async def ping():
 async def startup_event():
     await connect_to_mongo()
     print("✅ Connected to MongoDB")
+@app.get("/test-db")
+async def test_db():
+    # Try fetching one worker document, or return a test message
+    worker = await db["workers"].find_one()
+    if worker:
+        # Convert ObjectId to string if present
+        worker["_id"] = str(worker["_id"])
+        return {"status": "success", "worker": worker}
+    else:
+        return {"status": "success", "message": "No workers found yet"}
 
 @app.on_event("shutdown")
 async def shutdown_event():

@@ -120,8 +120,15 @@ async def test_db(request: Request):
 @app.get("/workers")
 async def get_workers(request: Request):
     db = request.app.state.db
-    workers = await db.workers.find({"active": True}).to_list(100)
-    return {"workers": workers}
+    try:
+        workers_cursor = db.workers.find({"active": True})
+        workers = await workers_cursor.to_list(length=100)
+        # Convert ObjectId to str for each worker before returning
+        for worker in workers:
+            worker["_id"] = str(worker["_id"])
+        return {"workers": workers}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 @app.get("/debug-db-info")
 async def debug_db_info(request: Request):

@@ -573,6 +573,124 @@ async def delete_material(material_id: str, admin: str = Depends(verify_admin)):
     return {"message": "Material deleted successfully"}
 
 # REPORTING ENDPOINTS
+# Add this to your backend server.py
+@api_router.get("/time-entries", response_model=List[TimeEntry])
+async def get_time_entries(
+    worker_id: Optional[str] = Query(None),
+    job_id: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None)
+):
+    filter_dict = {}
+    
+    if worker_id:
+        filter_dict["worker_id"] = worker_id
+    if job_id:
+        filter_dict["job_id"] = job_id
+    
+    if start_date:
+        start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+        filter_dict["clock_in"] = {"$gte": start_dt}
+    
+    if end_date:
+        end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+        if "clock_in" in filter_dict:
+            filter_dict["clock_in"]["$lte"] = end_dt
+        else:
+            filter_dict["clock_in"] = {"$lte": end_dt}
+    
+    time_entries = await db.time_entries.find(filter_dict).to_list(1000)
+    
+    # Convert times to UK timezone for display
+    for entry in time_entries:
+        if entry.get("clock_in"):
+            entry["clock_in"] = utc_to_uk(entry["clock_in"])
+        if entry.get("clock_out"):
+            entry["clock_out"] = utc_to_uk(entry["clock_out"])
+    
+    return [TimeEntry(**entry) for entry in time_entries]
+    
+    @api_router.get("/reports/time-entries", response_model=List[Dict[str, Any]])
+async def get_time_entries_report(
+    worker_id: Optional[str] = Query(None),
+    job_id: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    admin: str = Depends(verify_admin)
+):
+    """Get time entries report with filters (Admin only)"""
+    # Build filter query
+    filter_query = {"archived": {"$ne": True}}
+    
+    if worker_id:
+        filter_query["worker_id"] = worker_id
+    if job_id:
+        filter_query["job_id"] = job_id
+    
+    if start_date:
+        start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+        filter_query["clock_in"] = {"$gte": start_dt}
+    
+    if end_date:
+        end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+        if "clock_in" in filter_query:
+            filter_query["clock_in"]["$lte"] = end_dt
+        else:
+            filter_query["clock_in"] = {"$lte": end_dt}
+    
+    # Get time entries
+    time_entries = await db.time_entries.find(filter_query).to_list(1000)
+    
+    # Get all jobs and workers for lookup
+    jobs = await db.jobs.find().to_list(1000)
+    workers = await db.workers.find().to_list(1000)
+    
+    # Create lookup dictionaries
+    job_lookup = {job["id"]: job for job in jobs if "id" in job}
+    worker_lookup = {worker["id"]: worker for worker in workers if "id" in worker}
+    
+    # Process time entries for report
+    result = []
+    for entry in time_entries:
+        worker = worker_lookup.get(entry["worker_id"])
+        job = job_lookup.get(entry["job_id"])
+        
+        if not worker or not job:
+            continue
+        
+        # Calculate labor cost
+        duration_hours = (entry.get("duration_minutes", 0) or 0) / 60
+        hourly_rate = worker.get("hourly_rate", 15.0)
+        labor_cost = duration_hours * hourly_rate
+        
+        # Convert times to UK timezone for consistent display
+        clock_in_uk = utc_to_uk(entry["clock_in"]) if entry.get("clock_in") else None
+        clock_out_uk = utc_to_uk(entry["clock_out"]) if entry.get("clock_out") else None
+        
+        # Format the time entry data for report
+        result.append({
+            "id": entry["id"],
+            "worker_id": entry["worker_id"],
+            "worker_name": worker["name"],
+            "job_id": entry["job_id"], 
+            "job_name": job["name"],
+            "job_client": job.get("client", ""),
+            "clock_in": clock_in_uk.isoformat() if clock_in_uk else None,
+            "clock_out": clock_out_uk.isoformat() if clock_out_uk else None,
+            "duration_minutes": entry.get("duration_minutes", 0),
+            "hourly_rate": hourly_rate,
+            "labor_cost": labor_cost,
+            "notes": entry.get("notes", ""),
+            "gps_address_in": entry.get("gps_location_in", {}).get("address", "") if entry.get("gps_location_in") else "",
+            "gps_address_out": entry.get("gps_location_out", {}).get("address", "") if entry.get("gps_location_out") else "",
+            "archived": entry.get("archived", False)
+        })
+    
+    # Sort by clock_in date (most recent first)
+    result.sort(key=lambda x: x["clock_in"] if x["clock_in"] else "1900-01-01", reverse=True)
+    
+    return result
+
 @api_router.get("/reports/dashboard")
 async def get_dashboard_stats(admin: str = Depends(verify_admin)):
     """Get dashboard statistics (Admin only)"""
@@ -591,11 +709,14 @@ async def get_dashboard_stats(admin: str = Depends(verify_admin)):
     total_minutes = sum(entry.get("duration_minutes", 0) or 0 for entry in week_entries)
     total_hours = round(total_minutes / 60, 1)
     
-    # Get total materials cost this month
-    month_start = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    month_materials = await db.materials.find({
-        "purchase_date": {"$gte": month_start}
-    }).to_list(1000)
+    # Get total materials cost this month (UK timezone)
+uk_now = get_uk_time()
+month_start_uk = uk_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+month_start_utc = uk_to_utc(month_start_uk)
+
+month_materials = await db.materials.find({
+    "purchase_date": {"$gte": month_start_utc}
+}).to_list(1000)
     
     total_materials_cost = sum(mat.get("cost", 0) * mat.get("quantity", 1) for mat in month_materials)
     
@@ -1059,9 +1180,17 @@ async def update_material(material_id: str, material_data: Dict[str, Any], admin
     # Update allowed fields
     allowed_fields = ["name", "cost", "quantity", "supplier", "reference", "notes", "purchase_date"]
     for field in allowed_fields:
-        if field in material_data:
+        if field in material_data and material_data[field] is not None:
             if field == "purchase_date" and material_data[field]:
-                update_dict[field] = datetime.fromisoformat(material_data[field].replace('Z', '+00:00'))
+                # Parse the date and convert to UTC for storage
+                try:
+                    # Assume input is in UK timezone
+                    uk_dt = datetime.fromisoformat(material_data[field].replace('Z', ''))
+                    uk_localized = UK_TZ.localize(uk_dt.replace(tzinfo=None))
+                    update_dict[field] = uk_localized.astimezone(pytz.utc).replace(tzinfo=None)
+                except:
+                    # Fallback to direct parsing
+                    update_dict[field] = datetime.fromisoformat(material_data[field].replace('Z', '+00:00'))
             else:
                 update_dict[field] = material_data[field]
     
@@ -1070,8 +1199,11 @@ async def update_material(material_id: str, material_data: Dict[str, Any], admin
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Material not found")
     
-    # Return updated material
+    # Return updated material with UK timezone
     updated_material = await db.materials.find_one({"id": material_id})
+    if updated_material and updated_material.get("purchase_date"):
+        updated_material["purchase_date"] = utc_to_uk(updated_material["purchase_date"])
+    
     return updated_material
 
 @api_router.delete("/materials/{material_id}")

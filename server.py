@@ -104,7 +104,6 @@ async def health_check():
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 
-
 # Define Models
 class Worker(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -524,6 +523,14 @@ async def get_time_entries(
             filter_dict["clock_in"] = {"$lte": end_dt}
     
     time_entries = await db.time_entries.find(filter_dict).to_list(1000)
+    
+    # Convert times to UK timezone for display
+    for entry in time_entries:
+        if entry.get("clock_in"):
+            entry["clock_in"] = utc_to_uk(entry["clock_in"])
+        if entry.get("clock_out"):
+            entry["clock_out"] = utc_to_uk(entry["clock_out"])
+    
     return [TimeEntry(**entry) for entry in time_entries]
 
 @api_router.get("/workers/{worker_id}/active-entry")
@@ -573,118 +580,6 @@ async def delete_material(material_id: str, admin: str = Depends(verify_admin)):
     return {"message": "Material deleted successfully"}
 
 # REPORTING ENDPOINTS
-# Add this to your backend server.py
-
-    filter_dict = {}
-    
-    if worker_id:
-        filter_dict["worker_id"] = worker_id
-    if job_id:
-        filter_dict["job_id"] = job_id
-    
-    if start_date:
-        start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
-        filter_dict["clock_in"] = {"$gte": start_dt}
-    
-    if end_date:
-        end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
-        if "clock_in" in filter_dict:
-            filter_dict["clock_in"]["$lte"] = end_dt
-        else:
-            filter_dict["clock_in"] = {"$lte": end_dt}
-    
-    time_entries = await db.time_entries.find(filter_dict).to_list(1000)
-    
-    # Convert times to UK timezone for display
-    for entry in time_entries:
-        if entry.get("clock_in"):
-            entry["clock_in"] = utc_to_uk(entry["clock_in"])
-        if entry.get("clock_out"):
-            entry["clock_out"] = utc_to_uk(entry["clock_out"])
-    
-    return [TimeEntry(**entry) for entry in time_entries]
-    
- @api_router.get("/reports/time-entries", response_model=List[Dict[str, Any]])
-async def get_time_entries_report(
-    worker_id: Optional[str] = Query(None),
-    job_id: Optional[str] = Query(None),
-    start_date: Optional[str] = Query(None),
-    end_date: Optional[str] = Query(None),
-    admin: str = Depends(verify_admin)
-):
-    """Get time entries report with filters (Admin only)"""
-    # Build filter query
-    filter_query = {"archived": {"$ne": True}}
-    
-    if worker_id:
-        filter_query["worker_id"] = worker_id
-    if job_id:
-        filter_query["job_id"] = job_id
-    
-    if start_date:
-        start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
-        filter_query["clock_in"] = {"$gte": start_dt}
-    
-    if end_date:
-        end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
-        if "clock_in" in filter_query:
-            filter_query["clock_in"]["$lte"] = end_dt
-        else:
-            filter_query["clock_in"] = {"$lte": end_dt}
-    
-    # Get time entries
-    time_entries = await db.time_entries.find(filter_query).to_list(1000)
-    
-    # Get all jobs and workers for lookup
-    jobs = await db.jobs.find().to_list(1000)
-    workers = await db.workers.find().to_list(1000)
-    
-    # Create lookup dictionaries
-    job_lookup = {job["id"]: job for job in jobs if "id" in job}
-    worker_lookup = {worker["id"]: worker for worker in workers if "id" in worker}
-    
-    # Process time entries for report
-    result = []
-    for entry in time_entries:
-        worker = worker_lookup.get(entry["worker_id"])
-        job = job_lookup.get(entry["job_id"])
-        
-        if not worker or not job:
-            continue
-        
-        # Calculate labor cost
-        duration_hours = (entry.get("duration_minutes", 0) or 0) / 60
-        hourly_rate = worker.get("hourly_rate", 15.0)
-        labor_cost = duration_hours * hourly_rate
-        
-        # Convert times to UK timezone for consistent display
-        clock_in_uk = utc_to_uk(entry["clock_in"]) if entry.get("clock_in") else None
-        clock_out_uk = utc_to_uk(entry["clock_out"]) if entry.get("clock_out") else None
-        
-        # Format the time entry data for report
-        result.append({
-            "id": entry["id"],
-            "worker_id": entry["worker_id"],
-            "worker_name": worker["name"],
-            "job_id": entry["job_id"], 
-            "job_name": job["name"],
-            "job_client": job.get("client", ""),
-            "clock_in": clock_in_uk.isoformat() if clock_in_uk else None,
-            "clock_out": clock_out_uk.isoformat() if clock_out_uk else None,
-            "duration_minutes": entry.get("duration_minutes", 0),
-            "hourly_rate": hourly_rate,
-            "labor_cost": labor_cost,
-            "notes": entry.get("notes", ""),
-            "gps_address_in": entry.get("gps_location_in", {}).get("address", "") if entry.get("gps_location_in") else "",
-            "gps_address_out": entry.get("gps_location_out", {}).get("address", "") if entry.get("gps_location_out") else "",
-            "archived": entry.get("archived", False)
-        })
-    
-    # Sort by clock_in date (most recent first)
-    result.sort(key=lambda x: x["clock_in"] if x["clock_in"] else "1900-01-01", reverse=True)
-    
-    return result
-    
 @api_router.get("/reports/dashboard")
 async def get_dashboard_stats(admin: str = Depends(verify_admin)):
     """Get dashboard statistics (Admin only)"""
@@ -703,7 +598,7 @@ async def get_dashboard_stats(admin: str = Depends(verify_admin)):
     total_minutes = sum(entry.get("duration_minutes", 0) or 0 for entry in week_entries)
     total_hours = round(total_minutes / 60, 1)
     
- # Get total materials cost this month (UK timezone)
+    # Get total materials cost this month (UK timezone)
     uk_now = get_uk_time()
     month_start_uk = uk_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     month_start_utc = uk_to_utc(month_start_uk)
@@ -797,6 +692,164 @@ async def get_dashboard_stats(admin: str = Depends(verify_admin)):
         "total_materials_cost_this_month": total_materials_cost,
         "attendance_alerts": attendance_alerts
     }
+
+@api_router.get("/reports/materials", response_model=List[Dict[str, Any]])
+async def get_materials_report(
+    worker_id: Optional[str] = Query(None),
+    supplier: Optional[str] = Query(None),
+    client: Optional[str] = Query(None),
+    job_id: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    admin: str = Depends(verify_admin)
+):
+    """Get materials report with filters (Admin only)"""
+    # Build filter query
+    filter_query = {"archived": {"$ne": True}}
+    
+    if start_date and end_date:
+        start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+        end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+        filter_query["purchase_date"] = {"$gte": start_dt, "$lte": end_dt}
+    
+    if supplier:
+        filter_query["supplier"] = {"$regex": supplier, "$options": "i"}
+    
+    # Get materials
+    materials = await db.materials.find(filter_query).to_list(1000)
+    
+    # Get all jobs and workers for lookup
+    jobs = await db.jobs.find().to_list(1000)
+    workers = await db.workers.find().to_list(1000)
+    
+    # Create lookup dictionaries
+    job_lookup = {job["id"]: job for job in jobs if "id" in job}
+    worker_lookup = {worker["id"]: worker for worker in workers if "id" in worker}
+    
+    # Process materials with additional filters
+    result = []
+    for material in materials:
+        job = job_lookup.get(material["job_id"])
+        if not job:
+            continue
+            
+        # Apply additional filters
+        if client and client.lower() not in job.get("client", "").lower():
+            continue
+            
+        if job_id and job["id"] != job_id:
+            continue
+            
+        # If worker_id filter is provided, check if any time entries for this job match the worker
+        if worker_id:
+            job_time_entries = await db.time_entries.find({
+                "job_id": material["job_id"],
+                "worker_id": worker_id
+            }).to_list(100)
+            if not job_time_entries:
+                continue
+        
+        # Format the material data for report
+        result.append({
+            "id": material["id"],
+            "date": material["purchase_date"],
+            "job_name": job["name"],
+            "job_client": job.get("client", ""),
+            "material_name": material["name"],
+            "supplier": material.get("supplier", ""),
+            "reference": material.get("reference", ""),
+            "quantity": material["quantity"],
+            "cost": material["cost"],
+            "total_value": material["cost"] * material["quantity"],
+            "notes": material.get("notes", ""),
+            "archived": material.get("archived", False)
+        })
+    
+    # Sort by date (most recent first)
+    result.sort(key=lambda x: x["date"] if x["date"] else datetime.min, reverse=True)
+    
+    return result
+
+@api_router.get("/reports/time-entries", response_model=List[Dict[str, Any]])
+async def get_time_entries_report(
+    worker_id: Optional[str] = Query(None),
+    job_id: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    admin: str = Depends(verify_admin)
+):
+    """Get time entries report with filters (Admin only)"""
+    # Build filter query
+    filter_query = {"archived": {"$ne": True}}
+    
+    if worker_id:
+        filter_query["worker_id"] = worker_id
+    if job_id:
+        filter_query["job_id"] = job_id
+    
+    if start_date:
+        start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+        filter_query["clock_in"] = {"$gte": start_dt}
+    
+    if end_date:
+        end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+        if "clock_in" in filter_query:
+            filter_query["clock_in"]["$lte"] = end_dt
+        else:
+            filter_query["clock_in"] = {"$lte": end_dt}
+    
+    # Get time entries
+    time_entries = await db.time_entries.find(filter_query).to_list(1000)
+    
+    # Get all jobs and workers for lookup
+    jobs = await db.jobs.find().to_list(1000)
+    workers = await db.workers.find().to_list(1000)
+    
+    # Create lookup dictionaries
+    job_lookup = {job["id"]: job for job in jobs if "id" in job}
+    worker_lookup = {worker["id"]: worker for worker in workers if "id" in worker}
+    
+    # Process time entries for report
+    result = []
+    for entry in time_entries:
+        worker = worker_lookup.get(entry["worker_id"])
+        job = job_lookup.get(entry["job_id"])
+        
+        if not worker or not job:
+            continue
+        
+        # Calculate labor cost
+        duration_hours = (entry.get("duration_minutes", 0) or 0) / 60
+        hourly_rate = worker.get("hourly_rate", 15.0)
+        labor_cost = duration_hours * hourly_rate
+        
+        # Convert times to UK timezone for consistent display
+        clock_in_uk = utc_to_uk(entry["clock_in"]) if entry.get("clock_in") else None
+        clock_out_uk = utc_to_uk(entry["clock_out"]) if entry.get("clock_out") else None
+        
+        # Format the time entry data for report
+        result.append({
+            "id": entry["id"],
+            "worker_id": entry["worker_id"],
+            "worker_name": worker["name"],
+            "job_id": entry["job_id"], 
+            "job_name": job["name"],
+            "job_client": job.get("client", ""),
+            "clock_in": clock_in_uk.isoformat() if clock_in_uk else None,
+            "clock_out": clock_out_uk.isoformat() if clock_out_uk else None,
+            "duration_minutes": entry.get("duration_minutes", 0),
+            "hourly_rate": hourly_rate,
+            "labor_cost": labor_cost,
+            "notes": entry.get("notes", ""),
+            "gps_address_in": entry.get("gps_location_in", {}).get("address", "") if entry.get("gps_location_in") else "",
+            "gps_address_out": entry.get("gps_location_out", {}).get("address", "") if entry.get("gps_location_out") else "",
+            "archived": entry.get("archived", False)
+        })
+    
+    # Sort by clock_in date (most recent first)
+    result.sort(key=lambda x: x["clock_in"] if x["clock_in"] else "1900-01-01", reverse=True)
+    
+    return result
 
 @api_router.get("/reports/job-costs/{job_id}")
 async def get_job_cost_report(job_id: str, admin: str = Depends(verify_admin)):
@@ -1083,86 +1136,9 @@ async def export_time_entries(
         headers={"Content-Disposition": "attachment; filename=time_entries.csv"}
     )
 
-@api_router.get("/reports/materials", response_model=List[Dict[str, Any]])
-async def get_materials_report(
-    worker_id: Optional[str] = Query(None),
-    supplier: Optional[str] = Query(None),
-    client: Optional[str] = Query(None),
-    job_id: Optional[str] = Query(None),
-    start_date: Optional[str] = Query(None),
-    end_date: Optional[str] = Query(None),
-    admin: str = Depends(verify_admin)
-):
-    """Get materials report with filters (Admin only)"""
-    # Build filter query
-    filter_query = {"archived": {"$ne": True}}
-    
-    if start_date and end_date:
-        start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
-        end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
-        filter_query["purchase_date"] = {"$gte": start_dt, "$lte": end_dt}
-    
-    if supplier:
-        filter_query["supplier"] = {"$regex": supplier, "$options": "i"}
-    
-    # Get materials
-    materials = await db.materials.find(filter_query).to_list(1000)
-    
-    # Get all jobs and workers for lookup
-    jobs = await db.jobs.find().to_list(1000)
-    workers = await db.workers.find().to_list(1000)
-    
-    # Create lookup dictionaries
-    job_lookup = {job["id"]: job for job in jobs if "id" in job}
-    worker_lookup = {worker["id"]: worker for worker in workers if "id" in worker}
-    
-    # Process materials with additional filters
-    result = []
-    for material in materials:
-        job = job_lookup.get(material["job_id"])
-        if not job:
-            continue
-            
-        # Apply additional filters
-        if client and client.lower() not in job.get("client", "").lower():
-            continue
-            
-        if job_id and job["id"] != job_id:
-            continue
-            
-        # If worker_id filter is provided, check if any time entries for this job match the worker
-        if worker_id:
-            job_time_entries = await db.time_entries.find({
-                "job_id": material["job_id"],
-                "worker_id": worker_id
-            }).to_list(100)
-            if not job_time_entries:
-                continue
-        
-        # Format the material data for report
-        result.append({
-            "id": material["id"],
-            "date": material["purchase_date"],
-            "job_name": job["name"],
-            "job_client": job.get("client", ""),
-            "material_name": material["name"],
-            "supplier": material.get("supplier", ""),
-            "reference": material.get("reference", ""),
-            "quantity": material["quantity"],
-            "cost": material["cost"],
-            "total_value": material["cost"] * material["quantity"],
-            "notes": material.get("notes", ""),
-            "archived": material.get("archived", False)
-        })
-    
-    # Sort by date (most recent first)
-    result.sort(key=lambda x: x["date"] if x["date"] else datetime.min, reverse=True)
-    
-    return result
-
 @api_router.put("/materials/{material_id}", response_model=Dict[str, Any])
-async def update_material(material_id: str, material_data: Dict[str, Any], admin: str = Depends(verify_admin)):
-    """Update material (Admin only)"""
+async def update_material_advanced(material_id: str, material_data: Dict[str, Any], admin: str = Depends(verify_admin)):
+    """Update material with timezone handling (Admin only)"""
     # Find the existing material
     existing_material = await db.materials.find_one({"id": material_id})
     if not existing_material:
@@ -1199,14 +1175,6 @@ async def update_material(material_id: str, material_data: Dict[str, Any], admin
         updated_material["purchase_date"] = utc_to_uk(updated_material["purchase_date"])
     
     return updated_material
-
-@api_router.delete("/materials/{material_id}")
-async def delete_material(material_id: str, admin: str = Depends(verify_admin)):
-    """Delete material (Admin only)"""
-    result = await db.materials.delete_one({"id": material_id})
-    if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Material not found")
-    return {"message": "Material deleted successfully"}
 
 @api_router.put("/materials/{material_id}/archive")
 async def archive_material(material_id: str, admin: str = Depends(verify_admin)):
@@ -1483,7 +1451,6 @@ async def export_attendance_alerts(admin: str = Depends(verify_admin)):
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
 
-# Root endpoint
 # Root endpoint for the main app (redirects to API)
 @app.get("/")
 async def root():
@@ -1500,18 +1467,8 @@ async def options_handler(path: str):
     return {"message": "OK"}
 
 @api_router.get("/")
-async def root():
+async def api_root():
     return {"message": "LDA Group Time Tracking API", "version": "2.0.0"}
-
-# Configure CORS before including routes
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
-    expose_headers=["*"]
-)
 
 # Include the router in the main app
 app.include_router(api_router)

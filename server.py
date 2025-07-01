@@ -978,7 +978,7 @@ async def get_materials_report(
     end_date: Optional[str] = Query(None),
     admin: str = Depends(verify_admin)
 ):
-    """Get materials report with filters (Admin only)"""
+       """Get materials report with filters (Admin only)"""
     # Build filter query
     filter_query = {"archived": {"$ne": True}}
     
@@ -994,17 +994,17 @@ async def get_materials_report(
     materials = await db.materials.find(filter_query).to_list(1000)
     
     # Get all jobs and workers for lookup
-jobs = await db.jobs.find().to_list(1000)
-workers = await db.workers.find().to_list(1000
+    jobs = await db.jobs.find().to_list(1000)
+    workers = await db.workers.find().to_list(1000)
     
     # Create lookup dictionaries
-job_lookup = {job["id"]: job for job in jobs if "id" in job}
-worker_lookup = {worker["id"]: worker for worker in workers if "id" in worker}
+    job_lookup = {job["id"]: job for job in jobs if "id" in job}
+    worker_lookup = {worker["id"]: worker for worker in workers if "id" in worker}
     
     # Process materials with additional filters
     result = []
     for material in materials:
-        job = job_lookup = {job.get("id", job.get("_id")): job for job in jobs}
+        job = job_lookup.get(material["job_id"])
         if not job:
             continue
             
@@ -1040,7 +1040,7 @@ worker_lookup = {worker["id"]: worker for worker in workers if "id" in worker}
             "archived": material.get("archived", False)
         })
     
-    # Sort by date (most recent first)
+   # Sort by date (most recent first)
     result.sort(key=lambda x: x["date"] if x["date"] else datetime.min, reverse=True)
     
     return result

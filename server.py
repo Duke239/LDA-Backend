@@ -574,13 +574,7 @@ async def delete_material(material_id: str, admin: str = Depends(verify_admin)):
 
 # REPORTING ENDPOINTS
 # Add this to your backend server.py
-@api_router.get("/time-entries", response_model=List[TimeEntry])
-async def get_time_entries(
-    worker_id: Optional[str] = Query(None),
-    job_id: Optional[str] = Query(None),
-    start_date: Optional[str] = Query(None),
-    end_date: Optional[str] = Query(None)
-):
+
     filter_dict = {}
     
     if worker_id:
@@ -709,14 +703,14 @@ async def get_dashboard_stats(admin: str = Depends(verify_admin)):
     total_minutes = sum(entry.get("duration_minutes", 0) or 0 for entry in week_entries)
     total_hours = round(total_minutes / 60, 1)
     
-    # Get total materials cost this month (UK timezone)
-uk_now = get_uk_time()
-month_start_uk = uk_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-month_start_utc = uk_to_utc(month_start_uk)
+ # Get total materials cost this month (UK timezone)
+    uk_now = get_uk_time()
+    month_start_uk = uk_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    month_start_utc = uk_to_utc(month_start_uk)
 
-month_materials = await db.materials.find({
-    "purchase_date": {"$gte": month_start_utc}
-}).to_list(1000)
+    month_materials = await db.materials.find({
+        "purchase_date": {"$gte": month_start_utc}
+    }).to_list(1000)
     
     total_materials_cost = sum(mat.get("cost", 0) * mat.get("quantity", 1) for mat in month_materials)
     

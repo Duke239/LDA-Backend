@@ -479,10 +479,37 @@ async def update_time_entry(entry_id: str, entry_update: TimeEntryUpdate, admin:
     if entry_update.job_id:
         update_dict["job_id"] = entry_update.job_id
     if entry_update.clock_in:
-        update_dict["clock_in"] = datetime.fromisoformat(entry_update.clock_in.replace('Z', '+00:00'))
+        # Handle timezone conversion properly for clock_in
+        try:
+            clock_in_str = entry_update.clock_in.replace('Z', '+00:00')
+            parsed_date = datetime.fromisoformat(clock_in_str)
+            
+            # If no timezone info, assume it's already UTC from frontend conversion
+            if parsed_date.tzinfo is None:
+                update_dict["clock_in"] = parsed_date
+            else:
+                # Convert to UTC for storage
+                update_dict["clock_in"] = parsed_date.astimezone(pytz.utc).replace(tzinfo=None)
+        except Exception as e:
+            logger.error(f"Error parsing clock_in: {e}")
+            update_dict["clock_in"] = datetime.fromisoformat(entry_update.clock_in.replace('Z', '+00:00'))
+            
     if entry_update.clock_out is not None:
         if entry_update.clock_out:
-            update_dict["clock_out"] = datetime.fromisoformat(entry_update.clock_out.replace('Z', '+00:00'))
+            # Handle timezone conversion properly for clock_out
+            try:
+                clock_out_str = entry_update.clock_out.replace('Z', '+00:00')
+                parsed_date = datetime.fromisoformat(clock_out_str)
+                
+                # If no timezone info, assume it's already UTC from frontend conversion
+                if parsed_date.tzinfo is None:
+                    update_dict["clock_out"] = parsed_date
+                else:
+                    # Convert to UTC for storage
+                    update_dict["clock_out"] = parsed_date.astimezone(pytz.utc).replace(tzinfo=None)
+            except Exception as e:
+                logger.error(f"Error parsing clock_out: {e}")
+                update_dict["clock_out"] = datetime.fromisoformat(entry_update.clock_out.replace('Z', '+00:00'))
         else:
             update_dict["clock_out"] = None
             update_dict["duration_minutes"] = None

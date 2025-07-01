@@ -610,7 +610,7 @@ async def get_time_entries(
     
     return [TimeEntry(**entry) for entry in time_entries]
     
-    @api_router.get("/reports/time-entries", response_model=List[Dict[str, Any]])
+ @api_router.get("/reports/time-entries", response_model=List[Dict[str, Any]])
 async def get_time_entries_report(
     worker_id: Optional[str] = Query(None),
     job_id: Optional[str] = Query(None),
@@ -690,7 +690,7 @@ async def get_time_entries_report(
     result.sort(key=lambda x: x["clock_in"] if x["clock_in"] else "1900-01-01", reverse=True)
     
     return result
-
+    
 @api_router.get("/reports/dashboard")
 async def get_dashboard_stats(admin: str = Depends(verify_admin)):
     """Get dashboard statistics (Admin only)"""

@@ -978,7 +978,7 @@ async def get_materials_report(
     end_date: Optional[str] = Query(None),
     admin: str = Depends(verify_admin)
 ):
-       """Get materials report with filters (Admin only)"""
+    """Get materials report with filters (Admin only)"""
     # Build filter query
     filter_query = {"archived": {"$ne": True}}
     
@@ -1040,7 +1040,7 @@ async def get_materials_report(
             "archived": material.get("archived", False)
         })
     
-   # Sort by date (most recent first)
+    # Sort by date (most recent first)
     result.sort(key=lambda x: x["date"] if x["date"] else datetime.min, reverse=True)
     
     return result

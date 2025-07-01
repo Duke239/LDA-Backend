@@ -994,12 +994,12 @@ async def get_materials_report(
     materials = await db.materials.find(filter_query).to_list(1000)
     
     # Get all jobs and workers for lookup
-    jobs = await db.jobs.find().to_list(1000)
-    workers = await db.workers.find().to_list(1000)
+jobs = await db.jobs.find().to_list(1000)
+workers = await db.workers.find().to_list(1000
     
     # Create lookup dictionaries
-    job_lookup = {job["id"]: job for job in jobs}
-    worker_lookup = {worker.get("id", worker.get("_id")): worker for worker in workers}
+job_lookup = {job["id"]: job for job in jobs if "id" in job}
+worker_lookup = {worker["id"]: worker for worker in workers if "id" in worker}
     
     # Process materials with additional filters
     result = []
@@ -1147,7 +1147,7 @@ async def export_materials_report(
     
     materials = await db.materials.find(filter_query).to_list(1000)
     jobs = await db.jobs.find().to_list(1000)
-    job_lookup = {job["id"]: job for job in jobs}
+    job_lookup = {job["id"]: job for job in jobs if "id" in job}
     
     # Process materials for export
     export_data = []

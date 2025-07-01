@@ -999,12 +999,12 @@ async def get_materials_report(
     
     # Create lookup dictionaries
     job_lookup = {job["id"]: job for job in jobs}
-    worker_lookup = {worker["id"]: worker for worker in workers}
+    worker_lookup = {worker.get("id", worker.get("_id")): worker for worker in workers}
     
     # Process materials with additional filters
     result = []
     for material in materials:
-        job = job_lookup.get(material["job_id"])
+        job = job_lookup = {job.get("id", job.get("_id")): job for job in jobs}
         if not job:
             continue
             

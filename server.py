@@ -1117,8 +1117,8 @@ async def get_materials_report(
     workers = await db.workers.find().to_list(1000)
     
     # Create lookup dictionaries
-    job_lookup = {job["id"]: job for job in jobs}
-    worker_lookup = {worker["id"]: worker for worker in workers}
+    job_lookup = {job["id"]: job for job in jobs if "id" in job}
+    worker_lookup = {worker["id"]: worker for worker in workers if "id" in worker}
     
     # Process materials with additional filters
     result = []

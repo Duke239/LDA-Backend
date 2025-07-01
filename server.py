@@ -95,18 +95,14 @@ app.add_middleware(
 
 # Health check endpoint
 @app.get("/ping")
+@app.post("/ping")
+@app.head("/ping")
 async def health_check():
     """Health check endpoint for monitoring"""
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
-
-# Health check endpoint
-@app.get("/ping")
-async def health_check():
-    """Health check endpoint for monitoring"""
-    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
 
 # Define Models

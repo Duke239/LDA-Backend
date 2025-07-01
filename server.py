@@ -1123,6 +1123,10 @@ async def get_materials_report(
     # Process materials with additional filters
     result = []
     for material in materials:
+        # Skip materials without job_id
+        if not material.get("job_id"):
+            continue
+            
         job = job_lookup.get(material["job_id"])
         if not job:
             continue
@@ -1145,22 +1149,22 @@ async def get_materials_report(
         
         # Format the material data for report
         result.append({
-            "id": material["id"],
-            "date": material["purchase_date"],
-            "job_name": job["name"],
+            "id": material.get("id"),
+            "date": material.get("purchase_date"),
+            "job_name": job.get("name", "Unknown"),
             "job_client": job.get("client", ""),
-            "material_name": material["name"],
+            "material_name": material.get("name", "Unknown"),
             "supplier": material.get("supplier", ""),
             "reference": material.get("reference", ""),
-            "quantity": material["quantity"],
-            "cost": material["cost"],
-            "total_value": material["cost"] * material["quantity"],
+            "quantity": material.get("quantity", 0),
+            "cost": material.get("cost", 0),
+            "total_value": material.get("cost", 0) * material.get("quantity", 0),
             "notes": material.get("notes", ""),
             "archived": material.get("archived", False)
         })
     
-    # Sort by date (most recent first)
-    result.sort(key=lambda x: x["date"] if x["date"] else datetime.min, reverse=True)
+    # Sort by date (most recent first) - handle None dates safely
+    result.sort(key=lambda x: x["date"] if x["date"] is not None else datetime.min.replace(tzinfo=None), reverse=True)
     
     return result
 

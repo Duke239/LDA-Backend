@@ -107,9 +107,9 @@ db = None
 # Security
 security = HTTPBasic()
 
-# Admin credentials (in production, store securely)
-ADMIN_USERNAME = "admin"
-ADMIN_PASSWORD = "ldagroup2024"
+# Admin credentials (read from environment variables)
+ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME', 'admin')
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'ldagroup2024')
 
 # Create the main app
 app = FastAPI(title="LDA Group Time Tracking API - Production")

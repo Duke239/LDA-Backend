@@ -1,6 +1,6 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Query, Depends, File, UploadFile
 from fastapi.responses import StreamingResponse, JSONResponse, Response
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.security import HTTPBasic, HTTPBasicCredentials, HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
@@ -24,6 +24,7 @@ import logging
 import base64
 import hashlib
 import asyncio
+from decimal import Decimal
 from dotenv import load_dotenv
 
 # Configure logging
@@ -106,6 +107,7 @@ db = None
 
 # Security
 security = HTTPBasic()
+bearer_scheme = HTTPBearer(auto_error=False)  # auto_error=False to handle missing tokens gracefully
 
 # Admin credentials (read from environment variables)
 ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME', 'admin')
@@ -1562,13 +1564,17 @@ def verify_surveyor_token(token: str) -> str:
     except:
         raise HTTPException(status_code=401, detail="Invalid surveyor token")
 
-async def get_current_surveyor(token: str = Depends(lambda: None)) -> str:
+async def get_current_surveyor(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> str:
     """Dependency to get current surveyor from token"""
-    if not token:
+    if not credentials:
         # For now, allow access without token for testing
         # In production, make this required
         return "test_surveyor_id"
-    return verify_surveyor_token(token)
+    
+    if credentials.scheme != "Bearer":
+        raise HTTPException(status_code=401, detail="Invalid authentication scheme")
+    
+    return verify_surveyor_token(credentials.credentials)
 
 # ==================== QUOTE SYSTEM ENDPOINTS ====================
 
@@ -1647,6 +1653,20 @@ async def get_quotes(
     quotes = await db.quotes.find(filter_query).to_list(1000)
     return quotes
 
+def convert_decimals_to_float(obj):
+    """Convert Decimal objects to float and date objects to datetime for MongoDB serialization"""
+    if isinstance(obj, dict):
+        return {key: convert_decimals_to_float(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_decimals_to_float(item) for item in obj]
+    elif isinstance(obj, Decimal):
+        return float(obj)
+    elif isinstance(obj, date) and not isinstance(obj, datetime):
+        # Convert date to datetime for MongoDB compatibility
+        return datetime.combine(obj, datetime.min.time())
+    else:
+        return obj
+
 @api_router.post("/quotes")
 async def create_quote(
     quote_data: QuoteCreate if QuoteCreate else dict,
@@ -1672,11 +1692,18 @@ async def create_quote(
         **quote_data.dict()
     )
     
-    # Convert to dict for MongoDB
+    # Convert to dict for MongoDB and handle Decimal serialization
     quote_dict = quote.dict()
     quote_dict["created_at"] = datetime.utcnow()
     
-    await db.quotes.insert_one(quote_dict)
+    # Convert Decimal objects to float for MongoDB
+    quote_dict = convert_decimals_to_float(quote_dict)
+    
+    # Insert into MongoDB
+    result = await db.quotes.insert_one(quote_dict)
+    
+    # Return the quote without the MongoDB ObjectId
+    quote_dict.pop("_id", None)  # Remove _id if it exists
     return quote_dict
 
 @api_router.get("/quotes/{quote_id}")

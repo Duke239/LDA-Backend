@@ -6,7 +6,6 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta, date
-from decimal import Decimal
 import os
 import sys
 

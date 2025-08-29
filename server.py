@@ -498,14 +498,13 @@ async def clock_out(entry_id: str, clock_out_data: TimeEntryClockOut):
 async def update_time_entry(entry_id: str, entry_update: TimeEntryUpdate, admin: str = Depends(verify_admin)):
     """Update time entry (Admin only)"""
     # Find the existing time entry
-
-existing_entry = await db.time_entries.find_one({"id": entry_id})
+    existing_entry = await db.time_entries.find_one({"id": entry_id})
     if not existing_entry:
         raise HTTPException(status_code=404, detail="Time entry not found")
-    
+
     # Prepare update dictionary
     update_dict = {}
-    
+
     # Update allowed fields
     if entry_update.worker_id:
         update_dict["worker_id"] = entry_update.worker_id
@@ -516,7 +515,7 @@ existing_entry = await db.time_entries.find_one({"id": entry_id})
         try:
             clock_in_str = entry_update.clock_in.replace('Z', '+00:00')
             parsed_date = datetime.fromisoformat(clock_in_str)
-            
+
             # If no timezone info, assume it's already UTC from frontend conversion
             if parsed_date.tzinfo is None:
                 update_dict["clock_in"] = parsed_date
@@ -526,14 +525,14 @@ existing_entry = await db.time_entries.find_one({"id": entry_id})
         except Exception as e:
             logger.error(f"Error parsing clock_in: {e}")
             update_dict["clock_in"] = datetime.fromisoformat(entry_update.clock_in.replace('Z', '+00:00'))
-            
+
     if entry_update.clock_out is not None:
         if entry_update.clock_out:
             # Handle timezone conversion properly for clock_out
             try:
                 clock_out_str = entry_update.clock_out.replace('Z', '+00:00')
                 parsed_date = datetime.fromisoformat(clock_out_str)
-                
+
                 # If no timezone info, assume it's already UTC from frontend conversion
                 if parsed_date.tzinfo is None:
                     update_dict["clock_out"] = parsed_date
@@ -548,7 +547,7 @@ existing_entry = await db.time_entries.find_one({"id": entry_id})
             update_dict["duration_minutes"] = None
     if entry_update.notes is not None:
         update_dict["notes"] = entry_update.notes
-    
+
     # Recalculate duration if both clock_in and clock_out are present
     if entry_update.duration_minutes is not None:
         update_dict["duration_minutes"] = entry_update.duration_minutes
@@ -556,12 +555,12 @@ existing_entry = await db.time_entries.find_one({"id": entry_id})
         clock_in = update_dict["clock_in"] if "clock_in" in update_dict else existing_entry["clock_in"]
         clock_out = update_dict["clock_out"]
         update_dict["duration_minutes"] = calculate_duration(clock_in, clock_out)
-    
+
     # Update the time entry
     result = await db.time_entries.update_one({"id": entry_id}, {"$set": update_dict})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Time entry not found")
-    
+
     # Return updated entry
     updated_entry = await db.time_entries.find_one({"id": entry_id})
     return TimeEntry(**updated_entry)
@@ -999,9 +998,9 @@ async def export_time_entries(
         gps_in_address = ""
         if entry.get("gps_location_in"):
             gps_in_lat = entry["gps_location_in"].get("latitude", "")
-           gps_in_lng = entry["gps_location_in"].get("longitude", "")
+            gps_in_lng = entry["gps_location_in"].get("longitude", "")
             gps_in_address = entry["gps_location_in"].get("address", "")
-        
+
         # GPS Out location
         gps_out_lat = ""
         gps_out_lng = ""
@@ -1010,7 +1009,7 @@ async def export_time_entries(
             gps_out_lat = entry["gps_location_out"].get("latitude", "")
             gps_out_lng = entry["gps_location_out"].get("longitude", "")
             gps_out_address = entry["gps_location_out"].get("address", "")
-        
+
         writer.writerow([
             worker_names.get(entry["worker_id"], "Unknown"),
             job_names.get(entry["job_id"], "Unknown"),
@@ -1966,3 +1965,4 @@ async def shutdown_event():
 
 if __name__ == "__main__":
     import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=PORT)

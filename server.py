@@ -1103,8 +1103,6 @@ async def options_handler(path: str):
 async def root():
     return {"message": "LDA Group Time Tracking API", "version": "2.0.0"}
 
-# Include the router in the main app
-app.include_router(api_router)
 
 # Initialize services
 email_service = None
@@ -1319,16 +1317,6 @@ async def shutdown_db_client():
     except Exception as e:
         logger.error(f"Error closing database connection: {e}")
 
-# Run the application
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(
-        "server:app",
-        host="0.0.0.0",
-        port=PORT,
-        reload=False,
-        access_log=True
-    )
 @api_router.get("/reports/job-costs/{job_id}")
 async def get_job_cost_report(job_id: str, admin: str = Depends(verify_admin)):
     """Get detailed job cost report (Admin only)"""
@@ -1910,3 +1898,18 @@ async def api_info_endpoint():
         },
         "total_endpoints": 50
     }
+
+# Include the router in the main app after all routes have been registered.
+# Important: FastAPI copies the APIRouter routes at include time, so this must stay at the end.
+app.include_router(api_router)
+
+# Run the application
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "server:app",
+        host="0.0.0.0",
+        port=PORT,
+        reload=False,
+        access_log=True
+    )

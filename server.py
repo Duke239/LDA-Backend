@@ -230,6 +230,30 @@ class MaterialUpdate(BaseModel):
     reference: Optional[str] = None
     notes: Optional[str] = None
 
+class ScheduleEntry(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    worker_id: str
+    job_id: str
+    scheduled_date: str  # YYYY-MM-DD
+    notes: str = ""
+    status: str = "scheduled"
+    created_date: datetime = Field(default_factory=datetime.utcnow)
+    updated_date: Optional[datetime] = None
+
+class ScheduleEntryCreate(BaseModel):
+    worker_id: str
+    job_id: str
+    scheduled_date: str  # YYYY-MM-DD
+    notes: str = ""
+    status: str = "scheduled"
+
+class ScheduleEntryUpdate(BaseModel):
+    worker_id: Optional[str] = None
+    job_id: Optional[str] = None
+    scheduled_date: Optional[str] = None
+    notes: Optional[str] = None
+    status: Optional[str] = None
+
 class AdminLogin(BaseModel):
     username: str
     password: str
@@ -1904,6 +1928,128 @@ async def archive_time_entry_endpoint(entry_id: str, admin: str = Depends(verify
         raise HTTPException(status_code=404, detail="Time entry not found")
     return {"message": "Time entry archived successfully"}
 
+# ==================== SCHEDULING ENDPOINTS ====================
+
+@api_router.get("/schedule", response_model=List[Dict[str, Any]])
+async def get_schedule_entries(
+    start_date: str = Query(...),
+    end_date: str = Query(...),
+    admin: str = Depends(verify_admin)
+):
+    """Get schedule entries between two dates inclusive (Admin only)."""
+    try:
+        datetime.fromisoformat(start_date)
+        datetime.fromisoformat(end_date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Dates must be in YYYY-MM-DD format")
+
+    filter_query = {
+        "scheduled_date": {"$gte": start_date, "$lte": end_date},
+        "archived": {"$ne": True}
+    }
+
+    entries = await db.schedule_entries.find(filter_query).to_list(1000)
+
+    worker_ids = list({entry.get("worker_id") for entry in entries if entry.get("worker_id")})
+    job_ids = list({entry.get("job_id") for entry in entries if entry.get("job_id")})
+
+    workers = await db.workers.find({"id": {"$in": worker_ids}}).to_list(1000) if worker_ids else []
+    jobs = await db.jobs.find({"id": {"$in": job_ids}}).to_list(1000) if job_ids else []
+
+    worker_lookup = {worker["id"]: worker for worker in workers if "id" in worker}
+    job_lookup = {job["id"]: job for job in jobs if "id" in job}
+
+    result = []
+    for entry in entries:
+        entry.pop("_id", None)
+        worker = worker_lookup.get(entry.get("worker_id"), {})
+        job = job_lookup.get(entry.get("job_id"), {})
+        entry["worker_name"] = worker.get("name", "Unknown")
+        entry["job_name"] = job.get("name", "Unknown")
+        entry["job_client"] = job.get("client", "")
+        entry["job_location"] = job.get("location", "")
+        result.append(entry)
+
+    result.sort(key=lambda x: (x.get("scheduled_date", ""), x.get("worker_name", "")))
+    return result
+
+@api_router.post("/schedule", response_model=ScheduleEntry)
+async def create_schedule_entry(schedule_entry: ScheduleEntryCreate, admin: str = Depends(verify_admin)):
+    """Allocate a worker to an active job on a specific date (Admin only)."""
+    try:
+        datetime.fromisoformat(schedule_entry.scheduled_date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="scheduled_date must be in YYYY-MM-DD format")
+
+    worker = await db.workers.find_one({"id": schedule_entry.worker_id, "active": True, "archived": {"$ne": True}})
+    if not worker:
+        raise HTTPException(status_code=404, detail="Active worker not found")
+
+    job = await db.jobs.find_one({"id": schedule_entry.job_id, "status": "active", "archived": {"$ne": True}})
+    if not job:
+        raise HTTPException(status_code=404, detail="Active job not found")
+
+    existing = await db.schedule_entries.find_one({"worker_id": schedule_entry.worker_id, "scheduled_date": schedule_entry.scheduled_date, "archived": {"$ne": True}})
+    if existing:
+        raise HTTPException(status_code=400, detail="This worker already has a scheduled job on this date")
+
+    entry_obj = ScheduleEntry(**schedule_entry.dict())
+    await db.schedule_entries.insert_one(entry_obj.dict())
+    return entry_obj
+
+@api_router.put("/schedule/{schedule_id}", response_model=ScheduleEntry)
+async def update_schedule_entry(schedule_id: str, schedule_update: ScheduleEntryUpdate, admin: str = Depends(verify_admin)):
+    """Update a schedule allocation (Admin only)."""
+    existing_entry = await db.schedule_entries.find_one({"id": schedule_id, "archived": {"$ne": True}})
+    if not existing_entry:
+        raise HTTPException(status_code=404, detail="Schedule entry not found")
+
+    update_dict = {k: v for k, v in schedule_update.dict().items() if v is not None}
+    if not update_dict:
+        existing_entry.pop("_id", None)
+        return ScheduleEntry(**existing_entry)
+
+    new_worker_id = update_dict.get("worker_id", existing_entry.get("worker_id"))
+    new_job_id = update_dict.get("job_id", existing_entry.get("job_id"))
+    new_date = update_dict.get("scheduled_date", existing_entry.get("scheduled_date"))
+
+    if "scheduled_date" in update_dict:
+        try:
+            datetime.fromisoformat(update_dict["scheduled_date"])
+        except ValueError:
+            raise HTTPException(status_code=400, detail="scheduled_date must be in YYYY-MM-DD format")
+
+    if "worker_id" in update_dict:
+        worker = await db.workers.find_one({"id": new_worker_id, "active": True, "archived": {"$ne": True}})
+        if not worker:
+            raise HTTPException(status_code=404, detail="Active worker not found")
+
+    if "job_id" in update_dict:
+        job = await db.jobs.find_one({"id": new_job_id, "status": "active", "archived": {"$ne": True}})
+        if not job:
+            raise HTTPException(status_code=404, detail="Active job not found")
+
+    duplicate = await db.schedule_entries.find_one({"id": {"$ne": schedule_id}, "worker_id": new_worker_id, "scheduled_date": new_date, "archived": {"$ne": True}})
+    if duplicate:
+        raise HTTPException(status_code=400, detail="This worker already has a scheduled job on this date")
+
+    update_dict["updated_date"] = datetime.utcnow()
+    result = await db.schedule_entries.update_one({"id": schedule_id}, {"$set": update_dict})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Schedule entry not found")
+
+    updated_entry = await db.schedule_entries.find_one({"id": schedule_id})
+    updated_entry.pop("_id", None)
+    return ScheduleEntry(**updated_entry)
+
+@api_router.delete("/schedule/{schedule_id}")
+async def delete_schedule_entry(schedule_id: str, admin: str = Depends(verify_admin)):
+    """Delete a schedule allocation (Admin only)."""
+    result = await db.schedule_entries.delete_one({"id": schedule_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Schedule entry not found")
+    return {"message": "Schedule entry deleted successfully"}
+
 # ==================== SYSTEM STATUS & API INFO ====================
 
 @api_router.get("/system/status")
@@ -1949,7 +2095,8 @@ async def api_info_endpoint():
             "Quote System with PDF Generation",
             "Surveyor Authentication",
             "UK Timezone Support",
-            "Real-time Dashboard Statistics"
+            "Real-time Dashboard Statistics",
+            "Worker Scheduling Board"
         ],
         "main_endpoints": {
             "authentication": ["/api/admin/login", "/api/surveyors/login", "/api/surveyors/register"],
@@ -1959,6 +2106,7 @@ async def api_info_endpoint():
             "materials": ["/api/materials", "/api/materials/{id}", "/api/materials/{id}/archive"],
             "quotes": ["/api/quotes", "/api/quotes/{id}", "/api/quotes/{id}/photos", "/api/quotes/{id}/download-pdf"],
             "reports": ["/api/reports/dashboard", "/api/reports/time-entries", "/api/reports/materials", "/api/reports/job-costs/{id}"],
+            "schedule": ["/api/schedule", "/api/schedule/{id}"],
             "exports": ["/api/reports/export/job/{id}", "/api/reports/export/time-entries", "/api/reports/export/materials", "/api/reports/export/attendance-alerts"],
             "system": ["/api/system/status", "/api/api-info"]
         },

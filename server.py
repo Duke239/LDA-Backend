@@ -1317,6 +1317,72 @@ async def shutdown_db_client():
     except Exception as e:
         logger.error(f"Error closing database connection: {e}")
 
+@api_router.get("/reports/materials", response_model=List[Dict[str, Any]])
+async def get_materials_report(
+    worker_id: Optional[str] = Query(None),
+    supplier: Optional[str] = Query(None),
+    client: Optional[str] = Query(None),
+    job_id: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    admin: str = Depends(verify_admin)
+):
+    """Get materials report with job/client details and filters (Admin only)"""
+    filter_query = {"archived": {"$ne": True}}
+
+    if job_id:
+        filter_query["job_id"] = job_id
+    if supplier:
+        filter_query["supplier"] = {"$regex": supplier, "$options": "i"}
+    if worker_id:
+        filter_query["worker_id"] = worker_id
+    if start_date:
+        start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+        filter_query["purchase_date"] = {"$gte": start_dt}
+    if end_date:
+        end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+        if "purchase_date" in filter_query:
+            filter_query["purchase_date"]["$lte"] = end_dt
+        else:
+            filter_query["purchase_date"] = {"$lte": end_dt}
+
+    materials = await db.materials.find(filter_query).to_list(1000)
+    jobs = await db.jobs.find().to_list(1000)
+    job_lookup = {job["id"]: job for job in jobs if "id" in job}
+
+    result = []
+    for material in materials:
+        job = job_lookup.get(material.get("job_id"))
+        if not job:
+            continue
+        if client and client.lower() not in job.get("client", "").lower():
+            continue
+
+        purchase_date = utc_to_uk(material.get("purchase_date")) if material.get("purchase_date") else None
+        cost = material.get("cost", 0) or 0
+        quantity = material.get("quantity", 1) or 1
+
+        result.append({
+            "id": material.get("id"),
+            "job_id": material.get("job_id"),
+            "job_name": job.get("name", "Unknown"),
+            "job_client": job.get("client", ""),
+            "material_name": material.get("name", ""),
+            "name": material.get("name", ""),
+            "cost": cost,
+            "quantity": quantity,
+            "supplier": material.get("supplier", ""),
+            "reference": material.get("reference", ""),
+            "date": purchase_date.isoformat() if purchase_date else None,
+            "purchase_date": purchase_date.isoformat() if purchase_date else None,
+            "notes": material.get("notes", ""),
+            "total_value": cost * quantity,
+            "archived": material.get("archived", False)
+        })
+
+    result.sort(key=lambda x: x["date"] if x["date"] else "1900-01-01", reverse=True)
+    return result
+
 @api_router.get("/reports/job-costs/{job_id}")
 async def get_job_cost_report(job_id: str, admin: str = Depends(verify_admin)):
     """Get detailed job cost report (Admin only)"""

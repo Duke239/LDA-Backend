@@ -17,6 +17,7 @@ import pytz
 import logging
 import hashlib
 import base64
+import math
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -116,7 +117,7 @@ class Worker(BaseModel):
     role: str = "worker"  # worker, admin, supervisor
     worker_type: str = "worker"  # worker or contractor
     division: str = ""  # LDA FM, LDA Building Services, LDA Construction, etc.
-    trade: str = ""  # Joiner, Electrician, Multi-trade, Groundworker, etc.
+    trades: List[str] = []  # Multiple trades: Roofer, Plasterer, Plumber, Builder, etc.
     hourly_rate: float = 15.0  # Default £15/hour
     password: Optional[str] = None  # For admin users
     active: bool = True
@@ -130,7 +131,7 @@ class WorkerCreate(BaseModel):
     role: str = "worker"
     worker_type: str = "worker"
     division: str = ""
-    trade: str = ""
+    trades: List[str] = []
     hourly_rate: float = 15.0
     password: Optional[str] = None
 
@@ -141,7 +142,7 @@ class WorkerUpdate(BaseModel):
     role: Optional[str] = None
     worker_type: Optional[str] = None
     division: Optional[str] = None
-    trade: Optional[str] = None
+    trades: Optional[List[str]] = None
     hourly_rate: Optional[float] = None
     password: Optional[str] = None
     active: Optional[bool] = None
@@ -154,10 +155,13 @@ class Job(BaseModel):
     location: str
     client: str
     quoted_cost: float
-    status: str = "active"  # inactive, active, completed, cancelled
-    gps_required: bool = True
+    status: str = "active"  # active, completed, cancelled
     archived: bool = False
     created_date: datetime = Field(default_factory=datetime.utcnow)
+    include_in_gantt: bool = False
+    planned_start_date: Optional[str] = None
+    planned_end_date: Optional[str] = None
+    gantt_sections: List[Dict[str, Any]] = []
 
 class JobCreate(BaseModel):
     name: str
@@ -165,8 +169,10 @@ class JobCreate(BaseModel):
     location: str
     client: str
     quoted_cost: float
-    status: str = "active"
-    gps_required: bool = True
+    include_in_gantt: bool = False
+    planned_start_date: Optional[str] = None
+    planned_end_date: Optional[str] = None
+    gantt_sections: List[Dict[str, Any]] = []
 
 class JobUpdate(BaseModel):
     name: Optional[str] = None
@@ -175,8 +181,11 @@ class JobUpdate(BaseModel):
     client: Optional[str] = None
     quoted_cost: Optional[float] = None
     status: Optional[str] = None
-    gps_required: Optional[bool] = None
     archived: Optional[bool] = None
+    include_in_gantt: Optional[bool] = None
+    planned_start_date: Optional[str] = None
+    planned_end_date: Optional[str] = None
+    gantt_sections: Optional[List[Dict[str, Any]]] = None
 
 class GPSLocation(BaseModel):
     latitude: float
@@ -193,17 +202,26 @@ class TimeEntry(BaseModel):
     duration_minutes: Optional[int] = None
     gps_location_in: Optional[GPSLocation] = None
     gps_location_out: Optional[GPSLocation] = None
+    device_id_in: Optional[str] = None
+    device_id_out: Optional[str] = None
+    suspicious_flags: List[str] = []
     notes: str = ""
     created_date: datetime = Field(default_factory=datetime.utcnow)
+    worker_name: Optional[str] = None
+    job_name: Optional[str] = None
+    job_client: Optional[str] = None
+    cost: Optional[float] = 0
 
 class TimeEntryClockIn(BaseModel):
     worker_id: str
     job_id: str
     gps_location: Optional[GPSLocation] = None
+    device_id: Optional[str] = None
     notes: str = ""
 
 class TimeEntryClockOut(BaseModel):
     gps_location: Optional[GPSLocation] = None
+    device_id: Optional[str] = None
     notes: str = ""
 
 class TimeEntryUpdate(BaseModel):
@@ -266,6 +284,16 @@ class ScheduleEntryUpdate(BaseModel):
     scheduled_date: Optional[str] = None
     notes: Optional[str] = None
     status: Optional[str] = None
+
+class GanttPushToScheduleRequest(BaseModel):
+    job_id: str
+    section_id: str
+    worker_ids: List[str]
+    start_date: str
+    end_date: str
+    section_name: str = ""
+    replace_existing_for_section: bool = True
+
 
 class AdminLogin(BaseModel):
     username: str
@@ -430,6 +458,97 @@ def calculate_duration(clock_in: datetime, clock_out: datetime) -> int:
     """Calculate duration in minutes between two datetime objects"""
     delta = clock_out - clock_in
     return int(delta.total_seconds() / 60)
+
+
+def haversine_metres(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Distance between two GPS co-ordinates in metres."""
+    radius = 6371000
+    phi1 = math.radians(float(lat1))
+    phi2 = math.radians(float(lat2))
+    d_phi = math.radians(float(lat2) - float(lat1))
+    d_lambda = math.radians(float(lon2) - float(lon1))
+    a = math.sin(d_phi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2) ** 2
+    return radius * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+def is_gps_exempt_job(job: Dict[str, Any]) -> bool:
+    """Jobs like Runner/mobile jobs are allowed to clock anywhere."""
+    if not job:
+        return False
+    if job.get("gps_exempt") or job.get("location_exempt") or job.get("allow_remote_clocking"):
+        return True
+    searchable = " ".join([str(job.get("name", "")), str(job.get("location", "")), str(job.get("description", ""))]).lower()
+    exempt_terms = ["runner", "mobile", "roaming", "anywhere", "various", "multiple sites"]
+    return any(term in searchable for term in exempt_terms)
+
+def get_job_coordinates(job: Dict[str, Any]):
+    """Return job GPS co-ordinates if the job record has them stored."""
+    if not job:
+        return None
+    pairs = [(job.get("latitude"), job.get("longitude")), (job.get("lat"), job.get("lng")), (job.get("job_latitude"), job.get("job_longitude"))]
+    gps = job.get("gps_location") or job.get("location_gps") or {}
+    if isinstance(gps, dict):
+        pairs.append((gps.get("latitude"), gps.get("longitude")))
+        pairs.append((gps.get("lat"), gps.get("lng")))
+    for lat, lng in pairs:
+        try:
+            if lat is not None and lng is not None:
+                return float(lat), float(lng)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+async def build_suspicious_flags(worker_id: Optional[str], job_id: Optional[str], device_id: Optional[str], gps_location: Optional[GPSLocation], existing_flags: Optional[List[str]] = None) -> List[str]:
+    """Build fraud/protection flags without blocking clock in/out."""
+    flags = set(existing_flags or [])
+
+    if not gps_location:
+        flags.add("MISSING_GPS")
+    elif gps_location.accuracy is not None and gps_location.accuracy > 100:
+        flags.add("POOR_GPS_ACCURACY")
+
+    if device_id:
+        since = datetime.utcnow() - timedelta(days=60)
+        shared_device = await db.time_entries.find_one({
+            "worker_id": {"$ne": worker_id},
+            "clock_in": {"$gte": since},
+            "$or": [{"device_id_in": device_id}, {"device_id_out": device_id}],
+        })
+        if shared_device:
+            flags.add("SHARED_DEVICE_MULTIPLE_WORKERS")
+    else:
+        flags.add("MISSING_DEVICE_ID")
+
+    if gps_location:
+        day_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = day_start + timedelta(days=1)
+        same_position = await db.time_entries.find_one({
+            "worker_id": {"$ne": worker_id},
+            "clock_in": {"$gte": day_start, "$lt": day_end},
+            "$or": [
+                {"gps_location_in.latitude": gps_location.latitude, "gps_location_in.longitude": gps_location.longitude},
+                {"gps_location_out.latitude": gps_location.latitude, "gps_location_out.longitude": gps_location.longitude},
+            ],
+        })
+        if same_position:
+            flags.add("IDENTICAL_GPS_MULTIPLE_WORKERS")
+
+    if gps_location and job_id:
+        job = await db.jobs.find_one({"id": job_id}) or {}
+        if not is_gps_exempt_job(job):
+            job_coords = get_job_coordinates(job)
+            if job_coords:
+                distance = haversine_metres(gps_location.latitude, gps_location.longitude, job_coords[0], job_coords[1])
+                if distance > 1609:
+                    flags.add("FAR_FROM_JOB_LOCATION")
+
+    if worker_id:
+        recent_cutoff = datetime.utcnow() - timedelta(minutes=5)
+        recent_count = await db.time_entries.count_documents({"worker_id": worker_id, "clock_in": {"$gte": recent_cutoff}})
+        if recent_count >= 2:
+            flags.add("UNUSUAL_RAPID_CLOCK_ACTIVITY")
+
+    return sorted(flags)
+
 # AUTHENTICATION ENDPOINTS
 @api_router.post("/admin/login")
 async def admin_login(login_data: AdminLogin):
@@ -646,6 +765,11 @@ async def update_quote(
 async def create_worker(worker: WorkerCreate, admin: str = Depends(verify_admin)):
     """Create a new worker (Admin only)"""
     worker_dict = worker.dict()
+    if worker_dict.get("role") == "contractor":
+        worker_dict["role"] = "worker"
+        worker_dict["worker_type"] = "contractor"
+    elif worker_dict.get("role") == "worker":
+        worker_dict.setdefault("worker_type", "worker")
     worker_obj = Worker(**worker_dict)
     await db.workers.insert_one(worker_obj.dict())
     return worker_obj
@@ -671,7 +795,7 @@ async def get_workers(
         filter_dict["division"] = division
 
     if trade and trade != "all":
-        filter_dict["trade"] = trade
+        filter_dict["$or"] = [{"trades": trade}, {"trade": trade}]
 
     if not include_admins:
         filter_dict["role"] = {"$ne": "admin"}
@@ -680,9 +804,14 @@ async def get_workers(
 
     # Backfill defaults for older workers that were created before these fields existed.
     for worker in workers:
+        if worker.get("role") == "contractor":
+            worker["role"] = "worker"
+            worker["worker_type"] = "contractor"
         worker.setdefault("worker_type", "worker")
         worker.setdefault("division", "")
-        worker.setdefault("trade", "")
+        if "trades" not in worker:
+            old_trade = worker.get("trade", "")
+            worker["trades"] = [item.strip() for item in old_trade.split(",") if item.strip()] if old_trade else []
 
     return [Worker(**worker) for worker in workers]
 
@@ -697,6 +826,11 @@ async def get_worker(worker_id: str):
 async def update_worker(worker_id: str, worker_update: WorkerUpdate, admin: str = Depends(verify_admin)):
     """Update worker (Admin only)"""
     update_dict = {k: v for k, v in worker_update.dict().items() if v is not None}
+    if update_dict.get("role") == "contractor":
+        update_dict["role"] = "worker"
+        update_dict["worker_type"] = "contractor"
+    elif update_dict.get("role") == "worker" and update_dict.get("worker_type") is None:
+        update_dict["worker_type"] = "worker"
 
     result = await db.workers.update_one({"id": worker_id}, {"$set": update_dict})
     if result.matched_count == 0:
@@ -740,7 +874,7 @@ async def get_jobs(active_only: bool = Query(False), include_archived: bool = Qu
     elif not include_archived:
         filter_dict["archived"] = {"$ne": True}
 
-    jobs = await db.jobs.find(filter_dict).to_list(1000)
+    jobs = await db.jobs.find(filter_dict).sort("name", 1).to_list(1000)
     return [Job(**job) for job in jobs]
 
 @api_router.get("/jobs/{job_id}", response_model=Job)
@@ -786,6 +920,7 @@ async def unarchive_job(job_id: str, admin: str = Depends(verify_admin)):
         raise HTTPException(status_code=404, detail="Job not found")
     return {"message": "Job unarchived successfully"}
 # TIME ENTRY ENDPOINTS
+# GPS is optional: missing GPS must not block clock in/out.
 @api_router.post("/time-entries/clock-in", response_model=TimeEntry)
 async def clock_in(entry: TimeEntryClockIn):
     # Check if worker has any active (not clocked out) time entries
@@ -797,17 +932,13 @@ async def clock_in(entry: TimeEntryClockIn):
     if active_entry:
         raise HTTPException(status_code=400, detail="Worker already clocked in. Must clock out first.")
 
-    job = await db.jobs.find_one({"id": entry.job_id})
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-
-    if job.get("gps_required", True) and not entry.gps_location:
-        raise HTTPException(status_code=400, detail="Location permission is required to clock in for this job. Please enable location services and try again.")
-
     time_entry_dict = entry.dict()
     time_entry_dict["clock_in"] = datetime.utcnow()
-    time_entry_dict["gps_location_in"] = entry.gps_location
+    time_entry_dict["gps_location_in"] = entry.gps_location.dict() if entry.gps_location else None
+    time_entry_dict["device_id_in"] = entry.device_id
+    time_entry_dict["suspicious_flags"] = await build_suspicious_flags(entry.worker_id, entry.job_id, entry.device_id, entry.gps_location)
     time_entry_dict.pop("gps_location", None)
+    time_entry_dict.pop("device_id", None)
 
     time_entry_obj = TimeEntry(**time_entry_dict)
     await db.time_entries.insert_one(time_entry_obj.dict())
@@ -820,10 +951,6 @@ async def clock_out(entry_id: str, clock_out_data: TimeEntryClockOut):
     if not time_entry:
         raise HTTPException(status_code=404, detail="Active time entry not found")
 
-    job = await db.jobs.find_one({"id": time_entry.get("job_id")})
-    if job and job.get("gps_required", True) and not clock_out_data.gps_location:
-        raise HTTPException(status_code=400, detail="Location permission is required to clock out for this job. Please enable location services and try again.")
-
     clock_out_time = datetime.utcnow()
     clock_in_time = time_entry["clock_in"]
     duration = calculate_duration(clock_in_time, clock_out_time)
@@ -832,6 +959,14 @@ async def clock_out(entry_id: str, clock_out_data: TimeEntryClockOut):
         "clock_out": clock_out_time,
         "duration_minutes": duration,
         "gps_location_out": clock_out_data.gps_location.dict() if clock_out_data.gps_location else None,
+        "device_id_out": clock_out_data.device_id,
+        "suspicious_flags": await build_suspicious_flags(
+            time_entry.get("worker_id"),
+            time_entry.get("job_id"),
+            clock_out_data.device_id,
+            clock_out_data.gps_location,
+            time_entry.get("suspicious_flags", [])
+        ),
         "notes": clock_out_data.notes
     }
 
@@ -911,14 +1046,16 @@ async def get_time_entries(
 
     time_entries = await db.time_entries.find(filter_dict).to_list(1000)
 
-    # Convert times to UK timezone for display
+    enriched_entries = []
     for entry in time_entries:
         if entry.get("clock_in"):
             entry["clock_in"] = utc_to_uk(entry["clock_in"])
         if entry.get("clock_out"):
             entry["clock_out"] = utc_to_uk(entry["clock_out"])
+        enriched_entries.append(await enrich_time_entry(entry))
 
-    return [TimeEntry(**entry) for entry in time_entries]
+    enriched_entries.sort(key=lambda x: x["clock_in"] if x.get("clock_in") else datetime.min, reverse=True)
+    return [TimeEntry(**entry) for entry in enriched_entries]
 
 @api_router.get("/workers/{worker_id}/active-entry")
 async def get_active_time_entry(worker_id: str):
@@ -1048,57 +1185,6 @@ async def get_time_entries_report(
 
     return result
 
-@api_router.get("/reports/live-map")
-async def get_live_worker_map(admin: str = Depends(verify_admin)):
-    """Get currently clocked-in workers with GPS locations for dashboard map."""
-    active_entries = await db.time_entries.find({
-        "clock_out": None,
-        "gps_location_in": {"$ne": None}
-    }).to_list(1000)
-
-    worker_ids = list({entry.get("worker_id") for entry in active_entries if entry.get("worker_id")})
-    job_ids = list({entry.get("job_id") for entry in active_entries if entry.get("job_id")})
-
-    workers = await db.workers.find({"id": {"$in": worker_ids}}).to_list(1000) if worker_ids else []
-    jobs = await db.jobs.find({"id": {"$in": job_ids}}).to_list(1000) if job_ids else []
-
-    worker_lookup = {worker.get("id"): worker for worker in workers}
-    job_lookup = {job.get("id"): job for job in jobs}
-
-    result = []
-    for entry in active_entries:
-        gps = entry.get("gps_location_in") or {}
-        latitude = gps.get("latitude")
-        longitude = gps.get("longitude")
-
-        if latitude is None or longitude is None:
-            continue
-
-        worker = worker_lookup.get(entry.get("worker_id"), {})
-        job = job_lookup.get(entry.get("job_id"), {})
-        clock_in_uk = utc_to_uk(entry.get("clock_in")) if entry.get("clock_in") else None
-
-        result.append({
-            "entry_id": entry.get("id"),
-            "worker_id": entry.get("worker_id"),
-            "worker_name": worker.get("name", "Unknown"),
-            "worker_phone": worker.get("phone", ""),
-            "worker_role": worker.get("role", "worker"),
-            "job_id": entry.get("job_id"),
-            "job_name": job.get("name", "Unknown"),
-            "job_client": job.get("client", ""),
-            "job_location": job.get("location", ""),
-            "latitude": latitude,
-            "longitude": longitude,
-            "accuracy": gps.get("accuracy"),
-            "address": gps.get("address", ""),
-            "clock_in": clock_in_uk.isoformat() if clock_in_uk else None,
-            "notes": entry.get("notes", "")
-        })
-
-    result.sort(key=lambda item: item.get("worker_name", ""))
-    return result
-
 @api_router.get("/reports/dashboard")
 async def get_dashboard_stats(admin: str = Depends(verify_admin)):
     """Get dashboard statistics (Admin only)"""
@@ -1211,6 +1297,87 @@ async def get_dashboard_stats(admin: str = Depends(verify_admin)):
         "total_materials_cost_this_month": total_materials_cost,
         "attendance_alerts": attendance_alerts
     }
+@api_router.get("/reports/live-map")
+async def get_live_worker_map(admin: str = Depends(verify_admin)):
+    """Return currently clocked-in workers with captured GPS locations for the dashboard map."""
+    return await get_activity_map(active_only=True, admin=admin)
+
+@api_router.get("/reports/activity-map")
+async def get_activity_map(
+    active_only: bool = Query(False),
+    worker_id: Optional[str] = Query(None),
+    job_id: Optional[str] = Query(None),
+    date: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    admin: str = Depends(verify_admin)
+):
+    """Return clock-in/out map markers with date, worker and job filters."""
+    filter_dict = {}
+    if active_only:
+        filter_dict["clock_out"] = None
+    if worker_id:
+        filter_dict["worker_id"] = worker_id
+    if job_id:
+        filter_dict["job_id"] = job_id
+
+    if date:
+        start_dt = datetime.fromisoformat(date).replace(hour=0, minute=0, second=0, microsecond=0)
+        end_dt = start_dt + timedelta(days=1)
+        filter_dict["clock_in"] = {"$gte": start_dt, "$lt": end_dt}
+    else:
+        if start_date:
+            start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+            filter_dict["clock_in"] = {"$gte": start_dt}
+        if end_date:
+            end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+            if "clock_in" in filter_dict:
+                filter_dict["clock_in"]["$lte"] = end_dt
+            else:
+                filter_dict["clock_in"] = {"$lte": end_dt}
+
+    entries = await db.time_entries.find(filter_dict).to_list(1000)
+    markers = []
+
+    for entry in entries:
+        worker = await db.workers.find_one({"id": entry.get("worker_id")}) or {}
+        job = await db.jobs.find_one({"id": entry.get("job_id")}) or {}
+
+        def append_marker(gps, marker_type):
+            if not gps:
+                return
+            latitude = gps.get("latitude")
+            longitude = gps.get("longitude")
+            if latitude is None or longitude is None:
+                return
+            markers.append({
+                "entry_id": entry.get("id"),
+                "worker_id": entry.get("worker_id"),
+                "worker_name": worker.get("name", "Unknown worker"),
+                "worker_type": worker.get("worker_type", worker.get("role", "worker")),
+                "job_id": entry.get("job_id"),
+                "job_name": job.get("name", "Unknown job"),
+                "job_client": job.get("client", ""),
+                "job_location": job.get("location", ""),
+                "clock_in": entry.get("clock_in"),
+                "clock_out": entry.get("clock_out"),
+                "marker_type": marker_type,
+                "latitude": latitude,
+                "longitude": longitude,
+                "accuracy": gps.get("accuracy"),
+                "address": gps.get("address", ""),
+                "device_id_in": entry.get("device_id_in"),
+                "device_id_out": entry.get("device_id_out"),
+                "suspicious_flags": entry.get("suspicious_flags", []) or [],
+            })
+
+        append_marker(entry.get("gps_location_in") or entry.get("gps_location"), "clock_in")
+        if not active_only:
+            append_marker(entry.get("gps_location_out"), "clock_out")
+
+    markers.sort(key=lambda item: (item.get("worker_name", "").lower(), item.get("marker_type", "")))
+    return markers
+
 # Root endpoint for the main app (redirects to API)
 @app.get("/")
 async def root():
@@ -1676,8 +1843,8 @@ async def export_job_report(job_id: str, admin: str = Depends(verify_admin)):
     filename = f"job_report_{job.get('name', 'unknown').replace(' ', '_')}.csv"
 
     return StreamingResponse(
-        io.BytesIO(output.getvalue().encode()),
-        media_type="text/csv",
+        io.BytesIO(("\ufeff" + output.getvalue()).encode("utf-8")),
+        media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
 
@@ -1735,8 +1902,9 @@ async def export_time_entries_csv(
     writer.writerow([
         "Worker Name", "Job Name", "Clock In", "Clock Out",
         "Duration (hours)", "Hourly Rate", "Labor Cost", "Notes",
-        "GPS In Lat", "GPS In Lng", "GPS In Address",
-        "GPS Out Lat", "GPS Out Lng", "GPS Out Address"
+        "GPS In Lat", "GPS In Lng", "GPS In Accuracy", "GPS In Address",
+        "GPS Out Lat", "GPS Out Lng", "GPS Out Accuracy", "GPS Out Address",
+        "Device ID In", "Device ID Out", "Suspicious Flags"
     ])
 
     # Data rows
@@ -1748,16 +1916,18 @@ async def export_time_entries_csv(
         labor_cost = duration_hours * hourly_rate if duration_hours else 0
 
         # GPS locations
-        gps_in_lat = gps_in_lng = gps_in_address = ""
+        gps_in_lat = gps_in_lng = gps_in_accuracy = gps_in_address = ""
         if entry.get("gps_location_in"):
             gps_in_lat = entry["gps_location_in"].get("latitude", "")
             gps_in_lng = entry["gps_location_in"].get("longitude", "")
+            gps_in_accuracy = entry["gps_location_in"].get("accuracy", "")
             gps_in_address = entry["gps_location_in"].get("address", "")
 
-        gps_out_lat = gps_out_lng = gps_out_address = ""
+        gps_out_lat = gps_out_lng = gps_out_accuracy = gps_out_address = ""
         if entry.get("gps_location_out"):
             gps_out_lat = entry["gps_location_out"].get("latitude", "")
             gps_out_lng = entry["gps_location_out"].get("longitude", "")
+            gps_out_accuracy = entry["gps_location_out"].get("accuracy", "")
             gps_out_address = entry["gps_location_out"].get("address", "")
 
         writer.writerow([
@@ -1769,8 +1939,11 @@ async def export_time_entries_csv(
             f"£{hourly_rate:.2f}",
             f"£{labor_cost:.2f}",
             entry.get("notes", ""),
-            gps_in_lat, gps_in_lng, gps_in_address,
-            gps_out_lat, gps_out_lng, gps_out_address
+            gps_in_lat, gps_in_lng, gps_in_accuracy, gps_in_address,
+            gps_out_lat, gps_out_lng, gps_out_accuracy, gps_out_address,
+            entry.get("device_id_in", ""),
+            entry.get("device_id_out", ""),
+            "; ".join(entry.get("suspicious_flags", []) or [])
         ])
 
     output.seek(0)
@@ -2064,7 +2237,7 @@ async def get_schedule_entries(
     if division and division != "all":
         worker_filter["division"] = division
     if trade and trade != "all":
-        worker_filter["trade"] = trade
+        worker_filter["$or"] = [{"trades": trade}, {"trade": trade}]
 
     worker_filters_applied = any([
         worker_type and worker_type != "all",
@@ -2097,7 +2270,7 @@ async def get_schedule_entries(
         entry["worker_name"] = worker.get("name", "Unknown")
         entry["worker_type"] = worker.get("worker_type", "worker")
         entry["worker_division"] = worker.get("division", "")
-        entry["worker_trade"] = worker.get("trade", "")
+        entry["worker_trades"] = worker.get("trades", [worker.get("trade", "")] if worker.get("trade") else [])
         entry["job_name"] = job.get("name", "Unknown")
         entry["job_client"] = job.get("client", "")
         entry["job_location"] = job.get("location", "")
@@ -2143,6 +2316,100 @@ async def get_schedule_by_job(
     result.sort(key=lambda item: item.get("job_name", ""))
     return result
 
+async def _push_gantt_section_to_schedule(request: GanttPushToScheduleRequest):
+    """Create schedule entries from a Gantt section. Skips weekends and protects existing allocations."""
+    if not request.worker_ids:
+        raise HTTPException(status_code=400, detail="Select at least one worker")
+
+    try:
+        start = datetime.fromisoformat(request.start_date).date()
+        end = datetime.fromisoformat(request.end_date).date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="start_date and end_date must be YYYY-MM-DD")
+
+    if end < start:
+        raise HTTPException(status_code=400, detail="End date cannot be before start date")
+
+    job = await db.jobs.find_one({"id": request.job_id, "archived": {"$ne": True}})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    workers = await db.workers.find({"id": {"$in": request.worker_ids}, "active": True, "archived": {"$ne": True}}).to_list(1000)
+    found_worker_ids = {worker.get("id") for worker in workers}
+    missing_worker_ids = [worker_id for worker_id in request.worker_ids if worker_id not in found_worker_ids]
+    if missing_worker_ids:
+        raise HTTPException(status_code=404, detail=f"Worker(s) not found or inactive: {', '.join(missing_worker_ids)}")
+
+    section_note = request.section_name or "Section"
+
+    dates = []
+    current = start
+    while current <= end:
+        if current.weekday() < 5:
+            dates.append(current.isoformat())
+        current = current + timedelta(days=1)
+
+    if request.replace_existing_for_section and dates:
+        await db.schedule_entries.update_many(
+            {
+                "job_id": request.job_id,
+                "worker_id": {"$in": request.worker_ids},
+                "scheduled_date": {"$in": dates},
+                "notes": section_note,
+                "archived": {"$ne": True},
+            },
+            {"$set": {"archived": True, "updated_date": datetime.utcnow()}},
+        )
+
+    created = []
+    skipped = []
+    clashes = []
+    worker_lookup = {worker.get("id"): worker for worker in workers}
+
+    for worker_id in request.worker_ids:
+        worker = worker_lookup.get(worker_id, {})
+        for scheduled_date in dates:
+            existing = await db.schedule_entries.find_one({
+                "worker_id": worker_id,
+                "scheduled_date": scheduled_date,
+                "archived": {"$ne": True},
+            })
+            if existing:
+                clashes.append({
+                    "worker_id": worker_id,
+                    "worker_name": worker.get("name", "Unknown"),
+                    "scheduled_date": scheduled_date,
+                    "existing_job_id": existing.get("job_id"),
+                })
+                continue
+
+            entry_obj = ScheduleEntry(
+                worker_id=worker_id,
+                job_id=request.job_id,
+                scheduled_date=scheduled_date,
+                notes=section_note,
+                status="scheduled",
+            )
+            await db.schedule_entries.insert_one(entry_obj.dict())
+            created.append(entry_obj.dict())
+
+    return {
+        "message": "Gantt section pushed to schedule",
+        "created_count": len(created),
+        "skipped_weekend_count": max(0, ((end - start).days + 1) - len(dates)),
+        "clash_count": len(clashes),
+        "created": created,
+        "clashes": clashes,
+    }
+
+@api_router.post("/gantt/push-to-schedule")
+async def push_gantt_to_schedule(request: GanttPushToScheduleRequest, admin: str = Depends(verify_admin)):
+    return await _push_gantt_section_to_schedule(request)
+
+@api_router.post("/schedule/from-gantt")
+async def schedule_from_gantt(request: GanttPushToScheduleRequest, admin: str = Depends(verify_admin)):
+    return await _push_gantt_section_to_schedule(request)
+
 @api_router.post("/schedule", response_model=ScheduleEntry)
 async def create_schedule_entry(schedule_entry: ScheduleEntryCreate, admin: str = Depends(verify_admin)):
     """Allocate a worker to an active job on a specific date (Admin only)."""
@@ -2155,9 +2422,9 @@ async def create_schedule_entry(schedule_entry: ScheduleEntryCreate, admin: str 
     if not worker:
         raise HTTPException(status_code=404, detail="Active worker not found")
 
-    job = await db.jobs.find_one({"id": schedule_entry.job_id, "status": {"$in": ["active", "inactive"]}, "archived": {"$ne": True}})
+    job = await db.jobs.find_one({"id": schedule_entry.job_id, "status": "active", "archived": {"$ne": True}})
     if not job:
-        raise HTTPException(status_code=404, detail="Active or inactive job not found")
+        raise HTTPException(status_code=404, detail="Active job not found")
 
     existing = await db.schedule_entries.find_one({"worker_id": schedule_entry.worker_id, "scheduled_date": schedule_entry.scheduled_date, "archived": {"$ne": True}})
     if existing:
@@ -2195,9 +2462,9 @@ async def update_schedule_entry(schedule_id: str, schedule_update: ScheduleEntry
             raise HTTPException(status_code=404, detail="Active worker not found")
 
     if "job_id" in update_dict:
-        job = await db.jobs.find_one({"id": new_job_id, "status": {"$in": ["active", "inactive"]}, "archived": {"$ne": True}})
+        job = await db.jobs.find_one({"id": new_job_id, "status": "active", "archived": {"$ne": True}})
         if not job:
-            raise HTTPException(status_code=404, detail="Active or inactive job not found")
+            raise HTTPException(status_code=404, detail="Active job not found")
 
     duplicate = await db.schedule_entries.find_one({"id": {"$ne": schedule_id}, "worker_id": new_worker_id, "scheduled_date": new_date, "archived": {"$ne": True}})
     if duplicate:
@@ -2228,7 +2495,7 @@ async def build_schedule_export_data(
     worker_ids: Optional[str] = None,
     worker_type: Optional[str] = None,
     division: Optional[str] = None,
-    trade: Optional[str] = None
+    trades: Optional[List[str]] = None
 ):
     """Build schedule rows for CSV/PDF export and worker schedule views."""
     try:
@@ -2243,7 +2510,7 @@ async def build_schedule_export_data(
     if division and division != "all":
         worker_filter["division"] = division
     if trade and trade != "all":
-        worker_filter["trade"] = trade
+        worker_filter["$or"] = [{"trades": trade}, {"trade": trade}]
 
     selected_worker_ids = []
     if worker_ids:
@@ -2275,7 +2542,7 @@ async def build_schedule_export_data(
         entry["worker_name"] = worker_match.get("name", "")
         entry["worker_type"] = worker_match.get("worker_type", "worker")
         entry["worker_division"] = worker_match.get("division", "")
-        entry["worker_trade"] = worker_match.get("trade", "")
+        entry["worker_trades"] = worker_match.get("trades", [worker_match.get("trade", "")] if worker_match.get("trade") else [])
         enriched_entries.append(entry)
         entry_lookup[(entry.get("worker_id"), entry.get("scheduled_date"))] = entry
 

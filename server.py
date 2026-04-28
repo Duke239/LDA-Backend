@@ -938,8 +938,32 @@ async def unarchive_job(job_id: str, admin: str = Depends(verify_admin)):
     return {"message": "Job unarchived successfully"}
 # TIME ENTRY ENDPOINTS
 # GPS is optional: missing GPS must not block clock in/out.
-@api_router.post("/time-entries/clock-in", response_model=TimeEntry)
-async def clock_in(entry: TimeEntryClockIn):
+@api_router.get("/time-entries")
+async def get_time_entries():
+    entries = await db.time_entries.find({}, {"_id": 0}).sort("clock_in", -1).to_list(1000)
+
+    workers = await db.workers.find({}, {"_id": 0}).to_list(1000)
+    jobs = await db.jobs.find({}, {"_id": 0}).to_list(1000)
+
+    worker_lookup = {w.get("id"): w for w in workers}
+    job_lookup = {j.get("id"): j for j in jobs}
+
+    result = []
+
+    for entry in entries:
+        worker = worker_lookup.get(entry.get("worker_id"), {})
+        job = job_lookup.get(entry.get("job_id"), {})
+
+        result.append({
+            **entry,
+            "worker_name": worker.get("name", "Unknown Worker"),
+            "worker_type": worker.get("worker_type") or worker.get("role") or "worker",
+            "job_name": job.get("name", "Unknown Job"),
+            "job_client": job.get("client", ""),
+            "job_location": job.get("location", ""),
+        })
+
+    return result
     # Check if worker has any active (not clocked out) time entries
     active_entry = await db.time_entries.find_one({
         "worker_id": entry.worker_id,

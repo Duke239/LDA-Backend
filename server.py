@@ -174,6 +174,7 @@ class Job(BaseModel):
     quoted_cost: float
     status: str = "active"  # active, completed, cancelled
     archived: bool = False
+    gps_required: bool = False  # If true, location is mandatory for clock in/out
     created_date: datetime = Field(default_factory=datetime.utcnow)
     include_in_gantt: bool = False
     planned_start_date: Optional[str] = None
@@ -186,6 +187,7 @@ class JobCreate(BaseModel):
     location: str
     client: str
     quoted_cost: float
+    gps_required: bool = True
     include_in_gantt: bool = False
     planned_start_date: Optional[str] = None
     planned_end_date: Optional[str] = None
@@ -199,6 +201,7 @@ class JobUpdate(BaseModel):
     quoted_cost: Optional[float] = None
     status: Optional[str] = None
     archived: Optional[bool] = None
+    gps_required: Optional[bool] = None
     include_in_gantt: Optional[bool] = None
     planned_start_date: Optional[str] = None
     planned_end_date: Optional[str] = None
@@ -496,6 +499,17 @@ def is_gps_exempt_job(job: Dict[str, Any]) -> bool:
     searchable = " ".join([str(job.get("name", "")), str(job.get("location", "")), str(job.get("description", ""))]).lower()
     exempt_terms = ["runner", "mobile", "roaming", "anywhere", "various", "multiple sites"]
     return any(term in searchable for term in exempt_terms)
+
+def job_requires_gps(job: Dict[str, Any]) -> bool:
+    """Return True only when the job has GPS explicitly required and is not exempt."""
+    if not job or is_gps_exempt_job(job):
+        return False
+    return bool(
+        job.get("gps_required") is True
+        or job.get("require_gps") is True
+        or job.get("requires_gps") is True
+        or job.get("location_required") is True
+    )
 
 def get_job_coordinates(job: Dict[str, Any]):
     """Return job GPS co-ordinates if the job record has them stored."""
@@ -937,34 +951,23 @@ async def unarchive_job(job_id: str, admin: str = Depends(verify_admin)):
         raise HTTPException(status_code=404, detail="Job not found")
     return {"message": "Job unarchived successfully"}
 # TIME ENTRY ENDPOINTS
-# GPS is optional: missing GPS must not block clock in/out.
-@api_router.get("/time-entries")
-async def get_time_entries():
-    entries = await db.time_entries.find({}, {"_id": 0}).sort("clock_in", -1).to_list(1000)
+@api_router.post("/time-entries/clock-in", response_model=TimeEntry)
+async def clock_in(entry: TimeEntryClockIn):
+    """Clock a worker into a job. GPS is mandatory only when the job has gps_required=true."""
+    worker = await db.workers.find_one({"id": entry.worker_id, "active": True, "archived": {"$ne": True}})
+    if not worker:
+        raise HTTPException(status_code=404, detail="Worker not found or inactive")
 
-    workers = await db.workers.find({}, {"_id": 0}).to_list(1000)
-    jobs = await db.jobs.find({}, {"_id": 0}).to_list(1000)
+    job = await db.jobs.find_one({"id": entry.job_id, "archived": {"$ne": True}})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
 
-    worker_lookup = {w.get("id"): w for w in workers}
-    job_lookup = {j.get("id"): j for j in jobs}
+    if job_requires_gps(job) and entry.gps_location is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Location is required for this job. Please allow location access and try again."
+        )
 
-    result = []
-
-    for entry in entries:
-        worker = worker_lookup.get(entry.get("worker_id"), {})
-        job = job_lookup.get(entry.get("job_id"), {})
-
-        result.append({
-            **entry,
-            "worker_name": worker.get("name", "Unknown Worker"),
-            "worker_type": worker.get("worker_type") or worker.get("role") or "worker",
-            "job_name": job.get("name", "Unknown Job"),
-            "job_client": job.get("client", ""),
-            "job_location": job.get("location", ""),
-        })
-
-    return result
-    # Check if worker has any active (not clocked out) time entries
     active_entry = await db.time_entries.find_one({
         "worker_id": entry.worker_id,
         "clock_out": None
@@ -985,12 +988,77 @@ async def get_time_entries():
     await db.time_entries.insert_one(time_entry_obj.dict())
     return time_entry_obj
 
+@api_router.get("/time-entries")
+async def get_time_entries(
+    worker_id: Optional[str] = Query(None),
+    job_id: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None)
+):
+    """Return time entries, enriched defensively so missing worker/job records do not crash the app."""
+    filter_dict = {}
+
+    if worker_id:
+        filter_dict["worker_id"] = worker_id
+    if job_id:
+        filter_dict["job_id"] = job_id
+
+    if start_date:
+        start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+        filter_dict["clock_in"] = {"$gte": start_dt}
+
+    if end_date:
+        end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+        if "clock_in" in filter_dict:
+            filter_dict["clock_in"]["$lte"] = end_dt
+        else:
+            filter_dict["clock_in"] = {"$lte": end_dt}
+
+    entries = await db.time_entries.find(filter_dict, {"_id": 0}).sort("clock_in", -1).to_list(1000)
+    workers = await db.workers.find({}, {"_id": 0}).to_list(1000)
+    jobs = await db.jobs.find({}, {"_id": 0}).to_list(1000)
+
+    worker_lookup = {w.get("id"): w for w in workers if w.get("id")}
+    job_lookup = {j.get("id"): j for j in jobs if j.get("id")}
+
+    result = []
+    for entry_doc in entries:
+        worker = worker_lookup.get(entry_doc.get("worker_id"), {})
+        job = job_lookup.get(entry_doc.get("job_id"), {})
+
+        if entry_doc.get("clock_in"):
+            entry_doc["clock_in"] = utc_to_uk(entry_doc["clock_in"])
+        if entry_doc.get("clock_out"):
+            entry_doc["clock_out"] = utc_to_uk(entry_doc["clock_out"])
+
+        duration_hours = (entry_doc.get("duration_minutes", 0) or 0) / 60
+        hourly_rate = worker.get("hourly_rate", 15.0) or 15.0
+
+        result.append({
+            **entry_doc,
+            "worker_name": worker.get("name", "Unknown Worker"),
+            "worker_type": worker.get("worker_type") or worker.get("role") or "worker",
+            "job_name": job.get("name", "Unknown Job"),
+            "job_client": job.get("client", ""),
+            "job_location": job.get("location", ""),
+            "cost": round(duration_hours * hourly_rate, 2),
+        })
+
+    return result
+
 @api_router.put("/time-entries/{entry_id}/clock-out", response_model=TimeEntry)
 async def clock_out(entry_id: str, clock_out_data: TimeEntryClockOut):
     # Find the active time entry
     time_entry = await db.time_entries.find_one({"id": entry_id, "clock_out": None})
     if not time_entry:
         raise HTTPException(status_code=404, detail="Active time entry not found")
+
+    job = await db.jobs.find_one({"id": time_entry.get("job_id"), "archived": {"$ne": True}}) or {}
+    if job_requires_gps(job) and clock_out_data.gps_location is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Location is required to clock out for this job. Please allow location access and try again."
+        )
 
     clock_out_time = datetime.utcnow()
     clock_in_time = time_entry["clock_in"]
@@ -1059,44 +1127,6 @@ async def update_time_entry(entry_id: str, entry_update: TimeEntryUpdate, admin:
     # Return updated entry
     updated_entry = await db.time_entries.find_one({"id": entry_id})
     return TimeEntry(**updated_entry)
-
-@api_router.get("/time-entries", response_model=List[TimeEntry])
-async def get_time_entries(
-    worker_id: Optional[str] = Query(None),
-    job_id: Optional[str] = Query(None),
-    start_date: Optional[str] = Query(None),
-    end_date: Optional[str] = Query(None)
-):
-    filter_dict = {}
-
-    if worker_id:
-        filter_dict["worker_id"] = worker_id
-    if job_id:
-        filter_dict["job_id"] = job_id
-
-    if start_date:
-        start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
-        filter_dict["clock_in"] = {"$gte": start_dt}
-
-    if end_date:
-        end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
-        if "clock_in" in filter_dict:
-            filter_dict["clock_in"]["$lte"] = end_dt
-        else:
-            filter_dict["clock_in"] = {"$lte": end_dt}
-
-    time_entries = await db.time_entries.find(filter_dict).to_list(1000)
-
-    enriched_entries = []
-    for entry in time_entries:
-        if entry.get("clock_in"):
-            entry["clock_in"] = utc_to_uk(entry["clock_in"])
-        if entry.get("clock_out"):
-            entry["clock_out"] = utc_to_uk(entry["clock_out"])
-        enriched_entries.append(await enrich_time_entry(entry))
-
-    enriched_entries.sort(key=lambda x: x["clock_in"] if x.get("clock_in") else datetime.min, reverse=True)
-    return [TimeEntry(**entry) for entry in enriched_entries]
 
 @api_router.get("/workers/{worker_id}/active-entry")
 async def get_active_time_entry(worker_id: str):
@@ -1412,9 +1442,34 @@ async def get_activity_map(
                 "suspicious_flags": entry.get("suspicious_flags", []) or [],
             })
 
+        before_count = len(markers)
         append_marker(entry.get("gps_location_in") or entry.get("gps_location"), "clock_in")
         if not active_only:
             append_marker(entry.get("gps_location_out"), "clock_out")
+
+        # Still return a list record when no GPS exists so the dashboard can show
+        # "No GPS recorded" rather than appearing empty. These records are not mapped as pins.
+        if len(markers) == before_count:
+            markers.append({
+                "entry_id": entry.get("id"),
+                "worker_id": entry.get("worker_id"),
+                "worker_name": worker.get("name", "Unknown worker"),
+                "worker_type": worker.get("worker_type", worker.get("role", "worker")),
+                "job_id": entry.get("job_id"),
+                "job_name": job.get("name", "Unknown job"),
+                "job_client": job.get("client", ""),
+                "job_location": job.get("location", ""),
+                "clock_in": entry.get("clock_in"),
+                "clock_out": entry.get("clock_out"),
+                "marker_type": "no_gps",
+                "latitude": None,
+                "longitude": None,
+                "accuracy": None,
+                "address": "",
+                "device_id_in": entry.get("device_id_in"),
+                "device_id_out": entry.get("device_id_out"),
+                "suspicious_flags": entry.get("suspicious_flags", []) or [],
+            })
 
     markers.sort(key=lambda item: (item.get("worker_name", "").lower(), item.get("marker_type", "")))
     return markers

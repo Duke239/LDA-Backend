@@ -244,6 +244,13 @@ class TimeEntryClockOut(BaseModel):
     device_id: Optional[str] = None
     notes: str = ""
 
+
+class DeviceUnlockCreate(BaseModel):
+    device_id: str
+    unlock_type: str = "temporary_2h"  # temporary_2h or full_day
+    worker_id: Optional[str] = None
+    reason: str = ""
+
 class TimeEntryUpdate(BaseModel):
     worker_id: Optional[str] = None
     job_id: Optional[str] = None
@@ -579,6 +586,104 @@ async def build_suspicious_flags(worker_id: Optional[str], job_id: Optional[str]
             flags.add("UNUSUAL_RAPID_CLOCK_ACTIVITY")
 
     return sorted(flags)
+
+
+def get_uk_working_day_bounds(now_utc: Optional[datetime] = None):
+    """Return current UK working day as (YYYY-MM-DD, UTC start, UTC end)."""
+    now_utc = now_utc or datetime.utcnow()
+    if now_utc.tzinfo is None:
+        now_utc = pytz.utc.localize(now_utc)
+    uk_now = now_utc.astimezone(UK_TZ)
+    uk_start = uk_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    uk_end = uk_start + timedelta(days=1)
+    return uk_start.date().isoformat(), uk_start.astimezone(pytz.utc).replace(tzinfo=None), uk_end.astimezone(pytz.utc).replace(tzinfo=None)
+
+async def get_device_day_owner(device_id: Optional[str], worker_id: Optional[str] = None):
+    """Find the first worker who used this device today, if any."""
+    if not device_id:
+        return None
+    working_day, day_start, day_end = get_uk_working_day_bounds()
+    return await db.time_entries.find_one(
+        {
+            "clock_in": {"$gte": day_start, "$lt": day_end},
+            "$or": [{"device_id_in": device_id}, {"device_id_out": device_id}],
+        },
+        sort=[("clock_in", 1)]
+    )
+
+async def get_active_device_unlock(device_id: Optional[str]):
+    if not device_id:
+        return None
+    working_day, _, _ = get_uk_working_day_bounds()
+    now = datetime.utcnow()
+    return await db.device_unlocks.find_one({
+        "device_id": device_id,
+        "working_day": working_day,
+        "unlock_expires": {"$gt": now},
+        "active": True,
+    }, sort=[("unlock_expires", -1)])
+
+async def log_blocked_device_attempt(worker_id: str, job_id: Optional[str], device_id: str, action_type: str, owner_entry: Dict[str, Any]):
+    working_day, _, _ = get_uk_working_day_bounds()
+    existing = await db.device_unlock_requests.find_one({
+        "device_id": device_id,
+        "worker_id": worker_id,
+        "working_day": working_day,
+        "status": "pending",
+    })
+    if existing:
+        await db.device_unlock_requests.update_one(
+            {"id": existing.get("id")},
+            {"$set": {"last_seen_at": datetime.utcnow(), "action_type": action_type, "job_id": job_id}}
+        )
+        return existing
+
+    request = {
+        "id": str(uuid.uuid4()),
+        "device_id": device_id,
+        "worker_id": worker_id,
+        "job_id": job_id,
+        "owner_worker_id": owner_entry.get("worker_id") if owner_entry else None,
+        "action_type": action_type,
+        "working_day": working_day,
+        "status": "pending",
+        "created_at": datetime.utcnow(),
+        "last_seen_at": datetime.utcnow(),
+    }
+    await db.device_unlock_requests.insert_one(request)
+    return request
+
+async def check_device_worker_allowed(worker_id: str, job_id: Optional[str], device_id: Optional[str], action_type: str):
+    """Enforce one-device/one-worker per UK working day unless an admin unlock is active."""
+    extra_flags = []
+    if not device_id:
+        return extra_flags
+
+    owner_entry = await get_device_day_owner(device_id, worker_id)
+    if not owner_entry or owner_entry.get("worker_id") == worker_id:
+        return extra_flags
+
+    unlock = await get_active_device_unlock(device_id)
+    if unlock:
+        extra_flags.extend(["SHARED_DEVICE_MULTIPLE_WORKERS", "DEVICE_UNLOCK_USED"])
+        if unlock.get("unlock_type") == "full_day":
+            extra_flags.append("DEVICE_FULL_DAY_UNLOCK")
+        else:
+            extra_flags.append("DEVICE_TEMPORARY_UNLOCK_ACTIVE")
+        return extra_flags
+
+    await log_blocked_device_attempt(worker_id, job_id, device_id, action_type, owner_entry)
+    owner_worker = await db.workers.find_one({"id": owner_entry.get("worker_id")}) or {}
+    raise HTTPException(
+        status_code=423,
+        detail={
+            "code": "DEVICE_LOCKED_TO_ANOTHER_WORKER",
+            "message": "This device has already been used by another worker today. Please use your own phone or contact admin.",
+            "device_id": device_id,
+            "locked_to_worker_id": owner_entry.get("worker_id"),
+            "locked_to_worker_name": owner_worker.get("name", "another worker"),
+        }
+    )
 
 # AUTHENTICATION ENDPOINTS
 @api_router.post("/admin/login")
@@ -950,6 +1055,94 @@ async def unarchive_job(job_id: str, admin: str = Depends(verify_admin)):
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Job not found")
     return {"message": "Job unarchived successfully"}
+
+# DEVICE UNLOCK ENDPOINTS
+@api_router.get("/device-unlock-requests")
+async def get_device_unlock_requests(admin: str = Depends(verify_admin)):
+    """Pending device lock requests for admin action."""
+    working_day, _, _ = get_uk_working_day_bounds()
+    requests = await db.device_unlock_requests.find({
+        "working_day": working_day,
+        "status": "pending"
+    }, {"_id": 0}).sort("last_seen_at", -1).to_list(1000)
+
+    worker_ids = list({r.get("worker_id") for r in requests if r.get("worker_id")} | {r.get("owner_worker_id") for r in requests if r.get("owner_worker_id")})
+    job_ids = list({r.get("job_id") for r in requests if r.get("job_id")})
+    workers = await db.workers.find({"id": {"$in": worker_ids}}, {"_id": 0}).to_list(1000) if worker_ids else []
+    jobs = await db.jobs.find({"id": {"$in": job_ids}}, {"_id": 0}).to_list(1000) if job_ids else []
+    worker_lookup = {w.get("id"): w for w in workers}
+    job_lookup = {j.get("id"): j for j in jobs}
+
+    result = []
+    for r in requests:
+        result.append({
+            **r,
+            "worker_name": worker_lookup.get(r.get("worker_id"), {}).get("name", "Unknown worker"),
+            "owner_worker_name": worker_lookup.get(r.get("owner_worker_id"), {}).get("name", "Unknown worker"),
+            "job_name": job_lookup.get(r.get("job_id"), {}).get("name", "Unknown job"),
+        })
+    return result
+
+@api_router.post("/device-unlocks")
+async def create_device_unlock(unlock: DeviceUnlockCreate, admin: str = Depends(verify_admin)):
+    """Unlock a blocked device for 2 hours or the rest of the UK working day."""
+    if unlock.unlock_type not in ["temporary_2h", "full_day"]:
+        raise HTTPException(status_code=400, detail="unlock_type must be temporary_2h or full_day")
+
+    working_day, day_start, day_end = get_uk_working_day_bounds()
+    now = datetime.utcnow()
+
+    if unlock.unlock_type == "temporary_2h":
+        count = await db.device_unlocks.count_documents({
+            "device_id": unlock.device_id,
+            "working_day": working_day,
+            "unlock_type": "temporary_2h",
+        })
+        if count >= 2:
+            raise HTTPException(status_code=400, detail="This device has already used the maximum 2 temporary unlocks today.")
+        unlock_expires = min(now + timedelta(hours=2), day_end)
+    else:
+        count = await db.device_unlocks.count_documents({
+            "device_id": unlock.device_id,
+            "working_day": working_day,
+            "unlock_type": "full_day",
+        })
+        if count >= 1:
+            raise HTTPException(status_code=400, detail="This device has already used the full-day unlock today.")
+        unlock_expires = day_end
+
+    unlock_doc = {
+        "id": str(uuid.uuid4()),
+        "device_id": unlock.device_id,
+        "unlock_type": unlock.unlock_type,
+        "worker_id": unlock.worker_id,
+        "reason": unlock.reason or "Admin override",
+        "working_day": working_day,
+        "unlock_start": now,
+        "unlock_expires": unlock_expires,
+        "created_by": admin,
+        "created_at": now,
+        "active": True,
+    }
+    await db.device_unlocks.insert_one(unlock_doc)
+    await db.device_unlock_requests.update_many(
+        {"device_id": unlock.device_id, "working_day": working_day, "status": "pending"},
+        {"$set": {"status": "unlocked", "resolved_at": now, "unlock_id": unlock_doc["id"]}}
+    )
+    unlock_doc.pop("_id", None)
+    return unlock_doc
+
+@api_router.get("/device-unlocks/active")
+async def get_active_device_unlocks(admin: str = Depends(verify_admin)):
+    working_day, _, _ = get_uk_working_day_bounds()
+    now = datetime.utcnow()
+    unlocks = await db.device_unlocks.find({
+        "working_day": working_day,
+        "active": True,
+        "unlock_expires": {"$gt": now},
+    }, {"_id": 0}).sort("unlock_expires", 1).to_list(1000)
+    return unlocks
+
 # TIME ENTRY ENDPOINTS
 @api_router.post("/time-entries/clock-in", response_model=TimeEntry)
 async def clock_in(entry: TimeEntryClockIn):
@@ -976,11 +1169,14 @@ async def clock_in(entry: TimeEntryClockIn):
     if active_entry:
         raise HTTPException(status_code=400, detail="Worker already clocked in. Must clock out first.")
 
+    device_extra_flags = await check_device_worker_allowed(entry.worker_id, entry.job_id, entry.device_id, "clock_in")
+
     time_entry_dict = entry.dict()
     time_entry_dict["clock_in"] = datetime.utcnow()
     time_entry_dict["gps_location_in"] = entry.gps_location.dict() if entry.gps_location else None
     time_entry_dict["device_id_in"] = entry.device_id
-    time_entry_dict["suspicious_flags"] = await build_suspicious_flags(entry.worker_id, entry.job_id, entry.device_id, entry.gps_location)
+    base_flags = await build_suspicious_flags(entry.worker_id, entry.job_id, entry.device_id, entry.gps_location)
+    time_entry_dict["suspicious_flags"] = sorted(set(base_flags + device_extra_flags))
     time_entry_dict.pop("gps_location", None)
     time_entry_dict.pop("device_id", None)
 
@@ -1064,18 +1260,26 @@ async def clock_out(entry_id: str, clock_out_data: TimeEntryClockOut):
     clock_in_time = time_entry["clock_in"]
     duration = calculate_duration(clock_in_time, clock_out_time)
 
+    device_extra_flags = await check_device_worker_allowed(
+        time_entry.get("worker_id"),
+        time_entry.get("job_id"),
+        clock_out_data.device_id,
+        "clock_out"
+    )
+    base_flags = await build_suspicious_flags(
+        time_entry.get("worker_id"),
+        time_entry.get("job_id"),
+        clock_out_data.device_id,
+        clock_out_data.gps_location,
+        time_entry.get("suspicious_flags", [])
+    )
+
     update_dict = {
         "clock_out": clock_out_time,
         "duration_minutes": duration,
         "gps_location_out": clock_out_data.gps_location.dict() if clock_out_data.gps_location else None,
         "device_id_out": clock_out_data.device_id,
-        "suspicious_flags": await build_suspicious_flags(
-            time_entry.get("worker_id"),
-            time_entry.get("job_id"),
-            clock_out_data.device_id,
-            clock_out_data.gps_location,
-            time_entry.get("suspicious_flags", [])
-        ),
+        "suspicious_flags": sorted(set(base_flags + device_extra_flags)),
         "notes": clock_out_data.notes
     }
 
@@ -1461,7 +1665,7 @@ async def get_activity_map(
                 "job_location": job.get("location", ""),
                 "clock_in": entry.get("clock_in"),
                 "clock_out": entry.get("clock_out"),
-                "marker_type": "clock_in",
+                "marker_type": "no_gps",
                 "latitude": None,
                 "longitude": None,
                 "accuracy": None,

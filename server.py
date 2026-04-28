@@ -1461,7 +1461,7 @@ async def get_activity_map(
                 "job_location": job.get("location", ""),
                 "clock_in": entry.get("clock_in"),
                 "clock_out": entry.get("clock_out"),
-                "marker_type": "no_gps",
+                "marker_type": "clock_in",
                 "latitude": None,
                 "longitude": None,
                 "accuracy": None,

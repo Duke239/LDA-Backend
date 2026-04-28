@@ -51,6 +51,23 @@ def uk_to_utc(uk_dt):
         uk_dt = UK_TZ.localize(uk_dt)
     return uk_dt.astimezone(pytz.utc)
 
+
+def format_uk_datetime_for_export(value):
+    """Format datetimes for CSV exports in UK local time (handles BST/GMT)."""
+    if not value:
+        return ""
+
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return value
+
+    if value.tzinfo is None:
+        value = pytz.utc.localize(value)
+
+    return value.astimezone(UK_TZ).strftime("%d/%m/%Y %H:%M")
+
 # MongoDB connection with retry logic
 async def get_database():
     """Get database connection with retry logic"""
@@ -1808,8 +1825,8 @@ async def export_job_report(job_id: str, admin: str = Depends(verify_admin)):
 
         writer.writerow([
             worker_name,
-            clock_in.strftime("%Y-%m-%d %H:%M:%S") if clock_in else "",
-            clock_out.strftime("%Y-%m-%d %H:%M:%S") if clock_out else "Active",
+            format_uk_datetime_for_export(clock_in),
+            format_uk_datetime_for_export(clock_out) if clock_out else "Active",
             duration_hours,
             f"£{entry_labor_cost:.2f}",
             entry.get("notes", "")
@@ -1933,8 +1950,8 @@ async def export_time_entries_csv(
         writer.writerow([
             worker_names.get(entry["worker_id"], "Unknown"),
             job_names.get(entry["job_id"], "Unknown"),
-            clock_in.strftime("%Y-%m-%d %H:%M:%S") if clock_in else "",
-            clock_out.strftime("%Y-%m-%d %H:%M:%S") if clock_out else "",
+            format_uk_datetime_for_export(clock_in),
+            format_uk_datetime_for_export(clock_out),
             duration_hours,
             f"£{hourly_rate:.2f}",
             f"£{labor_cost:.2f}",
@@ -1948,9 +1965,11 @@ async def export_time_entries_csv(
 
     output.seek(0)
 
+    csv_bytes = ("\ufeff" + output.getvalue()).encode("utf-8")
+
     return StreamingResponse(
-        io.BytesIO(output.getvalue().encode()),
-        media_type="text/csv",
+        io.BytesIO(csv_bytes),
+        media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": "attachment; filename=time_entries.csv"}
     )
 

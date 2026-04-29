@@ -175,8 +175,6 @@ class Job(BaseModel):
     location: str
     client: str
     quoted_cost: float
-    division: str = ""
-    job_division: str = ""
     status: str = "active"  # active, completed, cancelled
     archived: bool = False
     gps_required: bool = False  # If true, location is mandatory for clock in/out
@@ -192,8 +190,6 @@ class JobCreate(BaseModel):
     location: str
     client: str
     quoted_cost: float
-    division: str = ""
-    job_division: str = ""
     gps_required: bool = True
     include_in_gantt: bool = False
     planned_start_date: Optional[str] = None
@@ -206,8 +202,6 @@ class JobUpdate(BaseModel):
     location: Optional[str] = None
     client: Optional[str] = None
     quoted_cost: Optional[float] = None
-    division: Optional[str] = None
-    job_division: Optional[str] = None
     status: Optional[str] = None
     archived: Optional[bool] = None
     gps_required: Optional[bool] = None
@@ -1456,12 +1450,9 @@ async def get_time_entries_report(
             "id": entry["id"],
             "worker_id": entry["worker_id"],
             "worker_name": worker["name"],
-            "worker_type": worker.get("worker_type", worker.get("role", "worker")),
-            "worker_division": worker.get("division", ""),
             "job_id": entry["job_id"],
             "job_name": job["name"],
             "job_client": job.get("client", ""),
-            "job_division": job.get("division") or job.get("job_division", ""),
             "clock_in": clock_in_uk.isoformat() if clock_in_uk else None,
             "clock_out": clock_out_uk.isoformat() if clock_out_uk else None,
             "duration_minutes": entry.get("duration_minutes", 0),
@@ -1477,281 +1468,6 @@ async def get_time_entries_report(
     result.sort(key=lambda x: x["clock_in"] if x["clock_in"] else "1900-01-01", reverse=True)
 
     return result
-
-
-def _pdf_money(value: Any) -> str:
-    try:
-        return f"£{float(value or 0):,.2f}"
-    except Exception:
-        return "£0.00"
-
-
-def _pdf_escape(value: Any) -> str:
-    if value is None:
-        return ""
-    return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-def _pdf_dt(value: Any) -> Optional[datetime]:
-    if not value:
-        return None
-    if isinstance(value, str):
-        try:
-            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-    if value.tzinfo is None:
-        value = pytz.utc.localize(value)
-    return value.astimezone(UK_TZ)
-
-
-def _pdf_date(value: Any) -> str:
-    dt = _pdf_dt(value)
-    return dt.strftime("%d/%m/%Y") if dt else ""
-
-
-def _pdf_time(value: Any) -> str:
-    dt = _pdf_dt(value)
-    return dt.strftime("%H:%M") if dt else "Active"
-
-
-async def _get_timesheet_pdf_rows(
-    worker_id: Optional[str],
-    job_id: Optional[str],
-    worker_type: Optional[str],
-    worker_division: Optional[str],
-    job_division: Optional[str],
-    start_date: Optional[str],
-    end_date: Optional[str],
-) -> List[Dict[str, Any]]:
-    filter_query = {"archived": {"$ne": True}}
-
-    if worker_id and worker_id != "all":
-        filter_query["worker_id"] = worker_id
-    if job_id and job_id != "all":
-        filter_query["job_id"] = job_id
-
-    if start_date:
-        filter_query["clock_in"] = {"$gte": datetime.fromisoformat(start_date.replace("Z", "+00:00"))}
-    if end_date:
-        end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
-        if len(end_date) == 10:
-            end_dt = end_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
-        filter_query.setdefault("clock_in", {})
-        filter_query["clock_in"]["$lte"] = end_dt
-
-    entries = await db.time_entries.find(filter_query, {"_id": 0}).sort("clock_in", 1).to_list(5000)
-    worker_ids = list({e.get("worker_id") for e in entries if e.get("worker_id")})
-    job_ids = list({e.get("job_id") for e in entries if e.get("job_id")})
-    workers = await db.workers.find({"id": {"$in": worker_ids}}, {"_id": 0}).to_list(5000) if worker_ids else []
-    jobs = await db.jobs.find({"id": {"$in": job_ids}}, {"_id": 0}).to_list(5000) if job_ids else []
-    worker_lookup = {w.get("id"): w for w in workers}
-    job_lookup = {j.get("id"): j for j in jobs}
-
-    rows = []
-    for entry in entries:
-        worker = worker_lookup.get(entry.get("worker_id"), {})
-        job = job_lookup.get(entry.get("job_id"), {})
-        if not worker or not job:
-            continue
-
-        wt = worker.get("worker_type") or worker.get("role") or "worker"
-        wd = worker.get("division") or "Unassigned"
-        jd = job.get("division") or job.get("job_division") or "Unassigned"
-
-        if worker_type and worker_type != "all" and wt != worker_type:
-            continue
-        if worker_division and worker_division != "all" and wd != worker_division:
-            continue
-        if job_division and job_division != "all" and jd != job_division:
-            continue
-
-        hours = round((entry.get("duration_minutes") or 0) / 60, 2)
-        rate = float(worker.get("hourly_rate", 15.0) or 15.0)
-        cost = round(hours * rate, 2)
-        flags = list(entry.get("suspicious_flags", []) or [])
-        if wd != jd:
-            flags.append("Cross-division labour")
-
-        rows.append({
-            "date": _pdf_date(entry.get("clock_in")),
-            "sort_dt": _pdf_dt(entry.get("clock_in")) or datetime.min,
-            "worker_id": entry.get("worker_id"),
-            "worker": worker.get("name", "Unknown Worker"),
-            "worker_type": wt,
-            "worker_division": wd,
-            "job_id": entry.get("job_id"),
-            "job": job.get("name", "Unknown Job"),
-            "job_division": jd,
-            "clock_in": _pdf_time(entry.get("clock_in")),
-            "clock_out": _pdf_time(entry.get("clock_out")) if entry.get("clock_out") else "Active",
-            "hours": hours,
-            "rate": rate,
-            "cost": cost,
-            "flags": flags,
-        })
-
-    rows.sort(key=lambda r: (r["sort_dt"], r["worker"]))
-    return rows
-
-
-@api_router.get("/reports/export/timesheet-pdf")
-async def export_timesheet_pdf(
-    worker_id: Optional[str] = Query(None),
-    job_id: Optional[str] = Query(None),
-    worker_type: Optional[str] = Query(None),
-    worker_division: Optional[str] = Query(None),
-    job_division: Optional[str] = Query(None),
-    start_date: Optional[str] = Query(None),
-    end_date: Optional[str] = Query(None),
-    admin: str = Depends(verify_admin)
-):
-    """Export a detailed LDA Group timesheet PDF."""
-    try:
-        from reportlab.lib import colors
-        from reportlab.lib.pagesizes import landscape, A4
-        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-        from reportlab.lib.units import cm
-        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
-    except Exception as e:
-        logger.error(f"Timesheet PDF dependency error: {e}")
-        raise HTTPException(status_code=500, detail="PDF export is not available. Add reportlab==4.2.5 to requirements.txt.")
-
-    rows = await _get_timesheet_pdf_rows(worker_id, job_id, worker_type, worker_division, job_division, start_date, end_date)
-
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), rightMargin=0.8*cm, leftMargin=0.8*cm, topMargin=0.8*cm, bottomMargin=0.8*cm)
-    styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(name="SmallPDF", parent=styles["BodyText"], fontSize=7, leading=8))
-    styles.add(ParagraphStyle(name="SectionPDF", parent=styles["Heading2"], fontSize=12, leading=14, spaceAfter=6))
-
-    total_workers = len({r["worker_id"] for r in rows})
-    total_shifts = len(rows)
-    total_hours = round(sum(r["hours"] for r in rows), 2)
-    total_cost = round(sum(r["cost"] for r in rows), 2)
-
-    story = [
-        Paragraph("LDA Group", styles["Title"]),
-        Paragraph("Timesheet Export Report", styles["Heading2"]),
-        Paragraph(f"Report Period: {start_date or 'All'} to {end_date or 'All'}", styles["Normal"]),
-        Paragraph(f"Generated On: {get_uk_time().strftime('%d/%m/%Y %H:%M')}", styles["Normal"]),
-        Paragraph(f"Generated By: {admin}", styles["Normal"]),
-        Spacer(1, 0.3*cm),
-    ]
-
-    def apply_table_style(table, header="#111827"):
-        table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(header)),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, -1), 7),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ]))
-        return table
-
-    filters = Table([
-        ["Filter", "Selection"],
-        ["Job Division", job_division or "All"],
-        ["Worker Division", worker_division or "All"],
-        ["Worker Type", worker_type or "All"],
-        ["Worker", worker_id or "All"],
-        ["Job", job_id or "All"],
-    ], colWidths=[4*cm, 12*cm])
-    story.append(apply_table_style(filters))
-    story.append(Spacer(1, 0.35*cm))
-
-    by_division = {}
-    for r in rows:
-        item = by_division.setdefault(r["job_division"], {"workers": set(), "shifts": 0, "hours": 0.0, "cost": 0.0})
-        item["workers"].add(r["worker_id"])
-        item["shifts"] += 1
-        item["hours"] += r["hours"]
-        item["cost"] += r["cost"]
-
-    summary = [["Division", "Total Workers", "Total Shifts", "Total Hours", "Labour Cost"]]
-    for div, item in sorted(by_division.items()):
-        summary.append([div, len(item["workers"]), item["shifts"], f"{item['hours']:.2f}", _pdf_money(item["cost"])])
-    summary.append(["Total", total_workers, total_shifts, f"{total_hours:.2f}", _pdf_money(total_cost)])
-    story.append(Paragraph("Summary", styles["SectionPDF"]))
-    story.append(apply_table_style(Table(summary, colWidths=[7*cm, 3*cm, 3*cm, 3*cm, 4*cm]), "#d01f2f"))
-    story.append(PageBreak())
-
-    detail = [["Date", "Worker", "Worker Division", "Job", "Job Division", "Type", "In", "Out", "Hours", "Rate", "Cost", "Flags"]]
-    for r in rows:
-        detail.append([
-            r["date"],
-            Paragraph(_pdf_escape(r["worker"]), styles["SmallPDF"]),
-            Paragraph(_pdf_escape(r["worker_division"]), styles["SmallPDF"]),
-            Paragraph(_pdf_escape(r["job"]), styles["SmallPDF"]),
-            Paragraph(_pdf_escape(r["job_division"]), styles["SmallPDF"]),
-            r["worker_type"],
-            r["clock_in"],
-            r["clock_out"],
-            f"{r['hours']:.2f}",
-            _pdf_money(r["rate"]),
-            _pdf_money(r["cost"]),
-            Paragraph(_pdf_escape(", ".join(r["flags"]) if r["flags"] else "OK"), styles["SmallPDF"]),
-        ])
-    if len(detail) == 1:
-        detail.append(["No entries found", "", "", "", "", "", "", "", "", "", "", ""])
-
-    story.append(Paragraph("Timesheet Detail", styles["SectionPDF"]))
-    story.append(apply_table_style(Table(detail, colWidths=[1.9*cm, 3.0*cm, 2.6*cm, 3.2*cm, 2.5*cm, 1.7*cm, 1.2*cm, 1.3*cm, 1.3*cm, 1.5*cm, 1.7*cm, 3.0*cm], repeatRows=1)))
-    story.append(PageBreak())
-
-    worker_summary = {}
-    job_summary = {}
-    exceptions = []
-    for r in rows:
-        w = worker_summary.setdefault(r["worker_id"], {"name": r["worker"], "division": r["worker_division"], "shifts": 0, "hours": 0.0, "cost": 0.0})
-        w["shifts"] += 1; w["hours"] += r["hours"]; w["cost"] += r["cost"]
-        j = job_summary.setdefault(r["job_id"], {"name": r["job"], "division": r["job_division"], "workers": set(), "hours": 0.0, "cost": 0.0})
-        j["workers"].add(r["worker_id"]); j["hours"] += r["hours"]; j["cost"] += r["cost"]
-        if r["flags"]:
-            exceptions.append([r["date"], r["worker"], r["job"], ", ".join(r["flags"])])
-
-    worker_table = [["Worker", "Worker Division", "Shifts", "Total Hours", "Total Cost"]]
-    for w in sorted(worker_summary.values(), key=lambda x: x["name"]):
-        worker_table.append([w["name"], w["division"], w["shifts"], f"{w['hours']:.2f}", _pdf_money(w["cost"])])
-    if len(worker_table) == 1:
-        worker_table.append(["No entries found", "", "", "", ""])
-    story.append(Paragraph("Worker Summary", styles["SectionPDF"]))
-    story.append(apply_table_style(Table(worker_table, colWidths=[6*cm, 5*cm, 3*cm, 3*cm, 4*cm]), "#d01f2f"))
-    story.append(Spacer(1, 0.35*cm))
-
-    job_table = [["Job", "Job Division", "Workers Used", "Total Hours", "Total Cost"]]
-    for j in sorted(job_summary.values(), key=lambda x: x["name"]):
-        job_table.append([j["name"], j["division"], len(j["workers"]), f"{j['hours']:.2f}", _pdf_money(j["cost"])])
-    if len(job_table) == 1:
-        job_table.append(["No entries found", "", "", "", ""])
-    story.append(Paragraph("Job Summary", styles["SectionPDF"]))
-    story.append(apply_table_style(Table(job_table, colWidths=[8*cm, 5*cm, 3*cm, 3*cm, 4*cm])))
-    story.append(PageBreak())
-
-    exception_table = [["Date", "Worker", "Job", "Issue"]] + (exceptions or [["No exceptions", "", "", ""]])
-    story.append(Paragraph("Exception / Flag Section", styles["SectionPDF"]))
-    story.append(apply_table_style(Table(exception_table, colWidths=[3*cm, 5*cm, 6*cm, 11*cm], repeatRows=1), "#f97316"))
-    story.append(Spacer(1, 0.8*cm))
-
-    approval = Table([
-        ["Prepared By", "____________________________", "Date", "________________"],
-        ["Reviewed By", "____________________________", "Date", "________________"],
-        ["Approved By", "____________________________", "Date", "________________"],
-    ], colWidths=[4*cm, 8*cm, 3*cm, 6*cm])
-    approval.setStyle(TableStyle([
-        ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-        ("FONTSIZE", (0, 0), (-1, -1), 9),
-        ("TOPPADDING", (0, 0), (-1, -1), 8),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-    ]))
-    story.append(Paragraph("Approval", styles["SectionPDF"]))
-    story.append(approval)
-
-    doc.build(story)
-    buffer.seek(0)
-    filename = f"lda_group_timesheet_{start_date or 'all'}_to_{end_date or 'all'}.pdf"
-    return StreamingResponse(buffer, media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename={filename}"})
 
 @api_router.get("/reports/dashboard")
 async def get_dashboard_stats(admin: str = Depends(verify_admin)):
@@ -3106,8 +2822,8 @@ async def build_schedule_export_data(
         worker_filter["worker_type"] = worker_type
     if division and division != "all":
         worker_filter["division"] = division
-    if trades:
-        worker_filter["$or"] = [{"trades": {"$in": trades}}, {"trade": {"$in": trades}}]
+    if trade and trade != "all":
+        worker_filter["$or"] = [{"trades": trade}, {"trade": trade}]
 
     selected_worker_ids = []
     if worker_ids:

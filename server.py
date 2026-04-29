@@ -139,6 +139,7 @@ class Worker(BaseModel):
     password: Optional[str] = None  # For admin users
     active: bool = True
     archived: bool = False
+    gps_exempt: bool = False
     created_date: datetime = Field(default_factory=datetime.utcnow)
 
 class WorkerCreate(BaseModel):
@@ -150,6 +151,7 @@ class WorkerCreate(BaseModel):
     division: str = ""
     trades: List[str] = []
     hourly_rate: float = 15.0
+    gps_exempt: bool = False
     password: Optional[str] = None
 
 class WorkerUpdate(BaseModel):
@@ -164,6 +166,7 @@ class WorkerUpdate(BaseModel):
     password: Optional[str] = None
     active: Optional[bool] = None
     archived: Optional[bool] = None
+    gps_exempt: Optional[bool] = None
 
 class Job(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -538,6 +541,10 @@ def get_job_coordinates(job: Dict[str, Any]):
 async def build_suspicious_flags(worker_id: Optional[str], job_id: Optional[str], device_id: Optional[str], gps_location: Optional[GPSLocation], existing_flags: Optional[List[str]] = None) -> List[str]:
     """Build fraud/protection flags without blocking clock in/out."""
     flags = set(existing_flags or [])
+
+    worker = await db.workers.find_one({"id": worker_id}) if worker_id else None
+    if worker and worker.get("gps_exempt", False):
+        flags.add("WORKER_GPS_EXEMPT")
 
     if not gps_location:
         flags.add("MISSING_GPS")
@@ -945,6 +952,7 @@ async def get_workers(
             worker["worker_type"] = "contractor"
         worker.setdefault("worker_type", "worker")
         worker.setdefault("division", "")
+        worker.setdefault("gps_exempt", False)
         if "trades" not in worker:
             old_trade = worker.get("trade", "")
             worker["trades"] = [item.strip() for item in old_trade.split(",") if item.strip()] if old_trade else []
@@ -1155,7 +1163,7 @@ async def clock_in(entry: TimeEntryClockIn):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    if job_requires_gps(job) and entry.gps_location is None:
+    if job_requires_gps(job) and not worker.get("gps_exempt", False) and entry.gps_location is None:
         raise HTTPException(
             status_code=400,
             detail="Location is required for this job. Please allow location access and try again."
@@ -1250,7 +1258,8 @@ async def clock_out(entry_id: str, clock_out_data: TimeEntryClockOut):
         raise HTTPException(status_code=404, detail="Active time entry not found")
 
     job = await db.jobs.find_one({"id": time_entry.get("job_id"), "archived": {"$ne": True}}) or {}
-    if job_requires_gps(job) and clock_out_data.gps_location is None:
+    worker = await db.workers.find_one({"id": time_entry.get("worker_id")}) or {}
+    if job_requires_gps(job) and not worker.get("gps_exempt", False) and clock_out_data.gps_location is None:
         raise HTTPException(
             status_code=400,
             detail="Location is required to clock out for this job. Please allow location access and try again."
@@ -1630,6 +1639,7 @@ async def get_activity_map(
                 "worker_id": entry.get("worker_id"),
                 "worker_name": worker.get("name", "Unknown worker"),
                 "worker_type": worker.get("worker_type", worker.get("role", "worker")),
+                "worker_gps_exempt": worker.get("gps_exempt", False),
                 "job_id": entry.get("job_id"),
                 "job_name": job.get("name", "Unknown job"),
                 "job_client": job.get("client", ""),
@@ -1659,6 +1669,7 @@ async def get_activity_map(
                 "worker_id": entry.get("worker_id"),
                 "worker_name": worker.get("name", "Unknown worker"),
                 "worker_type": worker.get("worker_type", worker.get("role", "worker")),
+                "worker_gps_exempt": worker.get("gps_exempt", False),
                 "job_id": entry.get("job_id"),
                 "job_name": job.get("name", "Unknown job"),
                 "job_client": job.get("client", ""),

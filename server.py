@@ -22,9 +22,12 @@ import math
 try:
     from google.oauth2 import service_account
     from googleapiclient.discovery import build
+    from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 except Exception:
     service_account = None
     build = None
+    MediaIoBaseDownload = None
+    MediaIoBaseUpload = None
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -1102,7 +1105,7 @@ def list_drive_folder_children(service, folder_id: str) -> List[Dict[str, Any]]:
     while True:
         response = service.files().list(
             q=f"'{folder_id}' in parents and trashed = false",
-            fields="nextPageToken, files(id,name,mimeType,shortcutDetails)",
+            fields="nextPageToken, files(id,name,mimeType,shortcutDetails,exportLinks)",
             pageSize=1000,
             pageToken=page_token,
             includeItemsFromAllDrives=True,
@@ -1114,6 +1117,51 @@ def list_drive_folder_children(service, folder_id: str) -> List[Dict[str, Any]]:
             break
     children.sort(key=lambda item: item.get("name", "").lower())
     return children
+
+
+def copy_drive_file_with_download_fallback(
+    service,
+    item_id: str,
+    item_name: str,
+    destination_folder_id: str,
+    mime_type: str,
+) -> None:
+    """Copy one Drive file. If Drive copy is blocked for a binary file, download and re-upload it."""
+    metadata = {"name": item_name, "parents": [destination_folder_id]}
+
+    try:
+        service.files().copy(
+            fileId=item_id,
+            body=metadata,
+            fields="id,name",
+            supportsAllDrives=True,
+        ).execute()
+        return
+    except Exception as copy_exc:
+        # Some externally-owned files in shared folders fail with files.copy even when the
+        # folder itself can be read. For normal binary files such as .docx/.xlsx, fall back
+        # to download + upload so the new job folder still receives a real copy.
+        if mime_type.startswith("application/vnd.google-apps"):
+            raise copy_exc
+        if MediaIoBaseDownload is None or MediaIoBaseUpload is None:
+            raise copy_exc
+
+        logger.warning("Drive files.copy failed for %s; trying download/upload fallback: %s", item_name, copy_exc)
+        buffer = io.BytesIO()
+        request = service.files().get_media(fileId=item_id, supportsAllDrives=True)
+        downloader = MediaIoBaseDownload(buffer, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        buffer.seek(0)
+
+        media = MediaIoBaseUpload(buffer, mimetype=mime_type or "application/octet-stream", resumable=False)
+        service.files().create(
+            body=metadata,
+            media_body=media,
+            fields="id,name",
+            supportsAllDrives=True,
+        ).execute()
 
 
 def copy_drive_template_contents_recursive(
@@ -1130,7 +1178,13 @@ def copy_drive_template_contents_recursive(
     their children are copied one level at a time. Skipped items are recorded in stats/logs.
     """
     if stats is None:
-        stats = {"folders_created": 0, "files_copied": 0, "shortcuts_created": 0, "skipped": []}
+        stats = {
+            "folders_created": 0,
+            "files_copied": 0,
+            "shortcuts_created": 0,
+            "skipped": [],
+            "paths_seen": [],
+        }
 
     children = list_drive_folder_children(service, source_folder_id)
     logger.info("Copying %s Drive item(s) from %s", len(children), current_path)
@@ -1140,6 +1194,7 @@ def copy_drive_template_contents_recursive(
         item_name = item.get("name", "Untitled")
         mime_type = item.get("mimeType", "")
         item_path = f"{current_path}/{item_name}"
+        stats["paths_seen"].append(item_path)
 
         try:
             if mime_type == "application/vnd.google-apps.folder":
@@ -1173,13 +1228,13 @@ def copy_drive_template_contents_recursive(
                 ).execute()
                 stats["shortcuts_created"] += 1
             else:
-                metadata = {"name": item_name, "parents": [destination_folder_id]}
-                service.files().copy(
-                    fileId=item_id,
-                    body=metadata,
-                    fields="id,name",
-                    supportsAllDrives=True,
-                ).execute()
+                copy_drive_file_with_download_fallback(
+                    service,
+                    item_id=item_id,
+                    item_name=item_name,
+                    destination_folder_id=destination_folder_id,
+                    mime_type=mime_type,
+                )
                 stats["files_copied"] += 1
         except Exception as exc:
             error_message = f"{item_path}: {exc}"

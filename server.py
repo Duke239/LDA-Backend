@@ -140,6 +140,13 @@ async def health_check():
     """Health check endpoint for monitoring"""
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
+@app.get("/health")
+@app.post("/health")
+@app.head("/health")
+async def health():
+    """Simple health check endpoint for browser/monitoring checks"""
+    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 # Define Models
@@ -3008,13 +3015,11 @@ async def get_schedule_entries(
         worker_filter["worker_type"] = worker_type
     if division and division != "all":
         worker_filter["division"] = division
-    if trades:
-        cleaned_trades = [trade_value for trade_value in trades if trade_value and trade_value != "all"]
-        if trade and trade != "all":
+    if trade and trade != "all":
         worker_filter["$or"] = [
             {"trades": trade},
-            {"trade": trade},
             {"trades": {"$in": [trade]}},
+            {"trade": trade},
         ]
 
     worker_filters_applied = any([
@@ -3287,7 +3292,7 @@ async def build_schedule_export_data(
         worker_filter["worker_type"] = worker_type
     if division and division != "all":
         worker_filter["division"] = division
-        if trades:
+    if trades:
         cleaned_trades = [
             trade_value for trade_value in trades
             if trade_value and trade_value != "all"
@@ -3387,7 +3392,7 @@ async def export_schedule(
     admin: str = Depends(verify_admin)
 ):
     """Export selected workers' schedule as CSV or PDF."""
-       export_data = await build_schedule_export_data(
+    export_data = await build_schedule_export_data(
         start_date=start_date,
         end_date=end_date,
         worker_ids=worker_ids,

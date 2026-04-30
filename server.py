@@ -3010,8 +3010,12 @@ async def get_schedule_entries(
         worker_filter["division"] = division
     if trades:
         cleaned_trades = [trade_value for trade_value in trades if trade_value and trade_value != "all"]
-        if cleaned_trades:
-            worker_filter["$or"] = [{"trades": {"$in": cleaned_trades}}, {"trade": {"$in": cleaned_trades}}]
+        if trade and trade != "all":
+        worker_filter["$or"] = [
+            {"trades": trade},
+            {"trade": trade},
+            {"trades": {"$in": [trade]}},
+        ]
 
     worker_filters_applied = any([
         worker_type and worker_type != "all",
@@ -3283,8 +3287,17 @@ async def build_schedule_export_data(
         worker_filter["worker_type"] = worker_type
     if division and division != "all":
         worker_filter["division"] = division
-    if trade and trade != "all":
-        worker_filter["$or"] = [{"trades": trade}, {"trade": trade}]
+        if trades:
+        cleaned_trades = [
+            trade_value for trade_value in trades
+            if trade_value and trade_value != "all"
+        ]
+
+        if cleaned_trades:
+            worker_filter["$or"] = [
+                {"trades": {"$in": cleaned_trades}},
+                {"trade": {"$in": cleaned_trades}},
+            ]
 
     selected_worker_ids = []
     if worker_ids:
@@ -3374,7 +3387,14 @@ async def export_schedule(
     admin: str = Depends(verify_admin)
 ):
     """Export selected workers' schedule as CSV or PDF."""
-    export_data = await build_schedule_export_data(start_date, end_date, worker_ids, worker_type, division, trade)
+       export_data = await build_schedule_export_data(
+        start_date=start_date,
+        end_date=end_date,
+        worker_ids=worker_ids,
+        worker_type=worker_type,
+        division=division,
+        trades=[trade] if trade and trade != "all" else None,
+    )
     workers = export_data["workers"]
     entry_lookup = export_data["entry_lookup"]
 

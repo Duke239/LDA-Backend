@@ -35,13 +35,12 @@ MONGO_URL = os.environ.get('MONGO_URL')
 DB_NAME = os.environ.get('DB_NAME', 'lda_timetracking')
 PORT = int(os.environ.get('PORT', 8001))
 
-# Google Drive job-folder automation
-GOOGLE_DRIVE_PARENT_FOLDER_ID = os.environ.get('GOOGLE_DRIVE_PARENT_FOLDER_ID', '')
-GOOGLE_DRIVE_TEMPLATE_FOLDER_ID = os.environ.get('GOOGLE_DRIVE_TEMPLATE_FOLDER_ID', '')
-GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON', '')
+# Google Drive job folder automation
+GOOGLE_DRIVE_PARENT_FOLDER_ID = os.environ.get('GOOGLE_DRIVE_PARENT_FOLDER_ID', '').strip()
+GOOGLE_DRIVE_TEMPLATE_FOLDER_ID = os.environ.get('GOOGLE_DRIVE_TEMPLATE_FOLDER_ID', '').strip()
+GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON', '').strip()
 GOOGLE_DRIVE_START_JOB_NUMBER = int(os.environ.get('GOOGLE_DRIVE_START_JOB_NUMBER', '34'))
 GOOGLE_DRIVE_JOB_NUMBER_PADDING = int(os.environ.get('GOOGLE_DRIVE_JOB_NUMBER_PADDING', '3'))
-
 
 # UK timezone handling
 UK_TZ = pytz.timezone('Europe/London')
@@ -185,16 +184,17 @@ class WorkerUpdate(BaseModel):
 
 class Job(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    job_number: Optional[int] = None
-    display_name: Optional[str] = None
-    drive_folder_id: Optional[str] = None
-    drive_folder_link: Optional[str] = None
-    drive_folder_status: Optional[str] = None
     name: str
     description: str
     location: str
     client: str
     quoted_cost: float
+    job_number: Optional[int] = None
+    display_name: Optional[str] = None
+    drive_folder_id: Optional[str] = None
+    drive_folder_link: Optional[str] = None
+    drive_folder_status: Optional[str] = None
+    drive_folder_error: Optional[str] = None
     status: str = "active"  # active, completed, cancelled
     archived: bool = False
     gps_required: bool = False  # If true, location is mandatory for clock in/out
@@ -217,16 +217,17 @@ class JobCreate(BaseModel):
     gantt_sections: List[Dict[str, Any]] = []
 
 class JobUpdate(BaseModel):
-    job_number: Optional[int] = None
-    display_name: Optional[str] = None
-    drive_folder_id: Optional[str] = None
-    drive_folder_link: Optional[str] = None
-    drive_folder_status: Optional[str] = None
     name: Optional[str] = None
     description: Optional[str] = None
     location: Optional[str] = None
     client: Optional[str] = None
     quoted_cost: Optional[float] = None
+    job_number: Optional[int] = None
+    display_name: Optional[str] = None
+    drive_folder_id: Optional[str] = None
+    drive_folder_link: Optional[str] = None
+    drive_folder_status: Optional[str] = None
+    drive_folder_error: Optional[str] = None
     status: Optional[str] = None
     archived: Optional[bool] = None
     gps_required: Optional[bool] = None
@@ -438,7 +439,7 @@ class ClientResponse(BaseModel):
 # Helper functions for quote services (placeholders)
 EmailService = None
 QuotePDFGenerator = None
-get_google_drive_service = lambda: None
+# get_google_drive_service is defined below for Google Drive job-folder automation.
 
 def convert_decimals_to_float(obj):
     """Convert Decimal objects to float and date objects to datetime for MongoDB serialization"""
@@ -453,127 +454,6 @@ def convert_decimals_to_float(obj):
         return datetime.combine(obj, datetime.min.time())
     else:
         return obj
-
-# Google Drive job folder helper functions
-def format_job_number(job_number: Optional[int]) -> str:
-    if job_number is None:
-        return ""
-    padding = GOOGLE_DRIVE_JOB_NUMBER_PADDING if GOOGLE_DRIVE_JOB_NUMBER_PADDING > 0 else 0
-    return str(job_number).zfill(padding) if padding else str(job_number)
-
-def build_job_display_name(job_number: Optional[int], job_name: str) -> str:
-    number_text = format_job_number(job_number)
-    return f"{number_text}: {job_name}" if number_text else job_name
-
-async def get_next_job_number() -> int:
-    highest = await db.jobs.find_one({"job_number": {"$type": "number"}}, sort=[("job_number", -1)])
-    if highest and highest.get("job_number") is not None:
-        return int(highest.get("job_number")) + 1
-    return GOOGLE_DRIVE_START_JOB_NUMBER
-
-def get_google_drive_api_service():
-    if not GOOGLE_DRIVE_PARENT_FOLDER_ID or not GOOGLE_SERVICE_ACCOUNT_JSON:
-        return None
-    if service_account is None or build is None:
-        logger.warning("Google API libraries are not installed. Add google-api-python-client and google-auth to requirements.txt")
-        return None
-    try:
-        info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
-        credentials = service_account.Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
-        return build("drive", "v3", credentials=credentials, cache_discovery=False)
-    except Exception as e:
-        logger.error(f"Failed to initialise Google Drive service: {e}")
-        return None
-
-def create_drive_folder(service, folder_name: str, parent_folder_id: str) -> Dict[str, Any]:
-    metadata = {"name": folder_name, "mimeType": "application/vnd.google-apps.folder", "parents": [parent_folder_id]}
-    folder = service.files().create(body=metadata, fields="id, webViewLink", supportsAllDrives=True).execute()
-    return {"id": folder.get("id"), "webViewLink": folder.get("webViewLink") or f"https://drive.google.com/drive/folders/{folder.get('id')}"}
-
-def copy_drive_template_folder(service, template_folder_id: str, destination_folder_id: str):
-    if not template_folder_id:
-        return
-    page_token = None
-    query = f"'{template_folder_id}' in parents and trashed = false"
-    while True:
-        response = service.files().list(q=query, fields="nextPageToken, files(id, name, mimeType)", pageToken=page_token, supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
-        for item in response.get("files", []):
-            if item.get("mimeType") == "application/vnd.google-apps.folder":
-                new_folder = create_drive_folder(service, item.get("name", "Folder"), destination_folder_id)
-                copy_drive_template_folder(service, item.get("id"), new_folder["id"])
-            else:
-                service.files().copy(fileId=item.get("id"), body={"name": item.get("name"), "parents": [destination_folder_id]}, fields="id", supportsAllDrives=True).execute()
-        page_token = response.get("nextPageToken")
-        if not page_token:
-            break
-
-async def create_google_drive_job_folder_for_job(job_doc: Dict[str, Any]) -> Dict[str, Any]:
-    service = get_google_drive_api_service()
-    if not service:
-        return {"status": "not_configured", "folder_id": None, "folder_link": None}
-    folder_name = job_doc.get("display_name") or build_job_display_name(job_doc.get("job_number"), job_doc.get("name", "New Job"))
-    try:
-        folder = create_drive_folder(service, folder_name, GOOGLE_DRIVE_PARENT_FOLDER_ID)
-        if GOOGLE_DRIVE_TEMPLATE_FOLDER_ID:
-            copy_drive_template_folder(service, GOOGLE_DRIVE_TEMPLATE_FOLDER_ID, folder["id"])
-        return {"status": "created", "folder_id": folder.get("id"), "folder_link": folder.get("webViewLink")}
-    except Exception as e:
-        logger.error(f"Google Drive folder creation failed for job {job_doc.get('id')}: {e}")
-        return {"status": f"failed: {str(e)}", "folder_id": None, "folder_link": None}
-
-async def build_timesheet_export_rows(job_id: Optional[str] = None, worker_id: Optional[str] = None, start_date: Optional[str] = None, end_date: Optional[str] = None, worker_type: Optional[str] = None, division: Optional[str] = None) -> List[Dict[str, Any]]:
-    filter_dict = {"archived": {"$ne": True}}
-    if job_id and job_id != "all":
-        filter_dict["job_id"] = job_id
-    if worker_id and worker_id != "all":
-        filter_dict["worker_id"] = worker_id
-    if start_date:
-        filter_dict["clock_in"] = {"$gte": datetime.fromisoformat(start_date.replace('Z', '+00:00')).replace(tzinfo=None)}
-    if end_date:
-        end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
-        if len(end_date) == 10:
-            end_dt = end_dt + timedelta(days=1) - timedelta(microseconds=1)
-        filter_dict.setdefault("clock_in", {})["$lte"] = end_dt.replace(tzinfo=None)
-
-    entries = await db.time_entries.find(filter_dict).sort("clock_in", 1).to_list(5000)
-    worker_ids = list({entry.get("worker_id") for entry in entries if entry.get("worker_id")})
-    job_ids = list({entry.get("job_id") for entry in entries if entry.get("job_id")})
-    worker_filter = {"id": {"$in": worker_ids}} if worker_ids else {}
-    if worker_type and worker_type != "all":
-        worker_filter["worker_type"] = worker_type
-    if division and division != "all":
-        worker_filter["division"] = division
-    workers = await db.workers.find(worker_filter, {"_id": 0}).to_list(5000) if worker_ids else []
-    jobs = await db.jobs.find({"id": {"$in": job_ids}}, {"_id": 0}).to_list(5000) if job_ids else []
-    worker_lookup = {worker.get("id"): worker for worker in workers}
-    job_lookup = {job.get("id"): job for job in jobs}
-
-    rows = []
-    for entry in entries:
-        worker = worker_lookup.get(entry.get("worker_id"))
-        if not worker:
-            continue
-        job = job_lookup.get(entry.get("job_id"), {})
-        duration_hours = round((entry.get("duration_minutes") or 0) / 60, 2)
-        hourly_rate = worker.get("hourly_rate", 15.0) or 15.0
-        rows.append({
-            "worker_name": worker.get("name", "Unknown Worker"),
-            "worker_type": worker.get("worker_type") or worker.get("role") or "worker",
-            "division": worker.get("division", ""),
-            "job_name": job.get("display_name") or job.get("name", "Unknown Job"),
-            "job_client": job.get("client", ""),
-            "job_location": job.get("location", ""),
-            "clock_in": entry.get("clock_in"),
-            "clock_in_text": format_uk_datetime_for_export(entry.get("clock_in")),
-            "clock_out_text": format_uk_datetime_for_export(entry.get("clock_out")) if entry.get("clock_out") else "Active",
-            "duration_hours": duration_hours,
-            "hourly_rate": hourly_rate,
-            "labour_cost": round(duration_hours * hourly_rate, 2),
-            "notes": entry.get("notes", ""),
-            "suspicious_flags": "; ".join(entry.get("suspicious_flags", []) or []),
-        })
-    rows.sort(key=lambda row: (str(row.get("job_name", "")).lower(), str(row.get("worker_name", "")).lower(), row.get("clock_in") or datetime.min))
-    return rows
 
 # Security functions
 async def verify_admin(credentials: HTTPBasicCredentials = Depends(security)):
@@ -1145,30 +1025,244 @@ async def archive_worker(worker_id: str, admin: str = Depends(verify_admin)):
         raise HTTPException(status_code=404, detail="Worker not found")
     return {"message": "Worker archived successfully"}
 
+
+# ==================== GOOGLE DRIVE JOB FOLDER AUTOMATION ====================
+
+def google_drive_config_missing() -> List[str]:
+    """Return missing Google Drive env variable names without exposing secret values."""
+    missing = []
+    if not GOOGLE_DRIVE_PARENT_FOLDER_ID:
+        missing.append("GOOGLE_DRIVE_PARENT_FOLDER_ID")
+    if not GOOGLE_SERVICE_ACCOUNT_JSON:
+        missing.append("GOOGLE_SERVICE_ACCOUNT_JSON")
+    return missing
+
+
+def get_google_drive_service():
+    """Build a Google Drive API client from the service account JSON in Render env vars."""
+    missing = google_drive_config_missing()
+    if missing:
+        logger.warning("Google Drive automation not configured. Missing: %s", ", ".join(missing))
+        return None
+    if service_account is None or build is None:
+        logger.error("Google Drive packages are not installed. Check requirements.txt")
+        return None
+
+    try:
+        account_info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+        credentials = service_account.Credentials.from_service_account_info(
+            account_info,
+            scopes=["https://www.googleapis.com/auth/drive"],
+        )
+        return build("drive", "v3", credentials=credentials, cache_discovery=False)
+    except Exception as exc:
+        logger.exception("Failed to initialise Google Drive service: %s", exc)
+        return None
+
+
+def drive_safe_name(value: str) -> str:
+    """Keep folder names readable while removing characters Drive/Windows dislike."""
+    value = (value or "Untitled Job").strip()
+    for char in ['<', '>', ':', '"', '/', '\\', '|', '?', '*']:
+        value = value.replace(char, '-')
+    return " ".join(value.split()) or "Untitled Job"
+
+
+async def get_next_job_number() -> int:
+    """Find the next job number using existing job_number values in MongoDB."""
+    latest = await db.jobs.find_one({"job_number": {"$exists": True, "$ne": None}}, sort=[("job_number", -1)])
+    if latest and isinstance(latest.get("job_number"), int):
+        return latest["job_number"] + 1
+    return GOOGLE_DRIVE_START_JOB_NUMBER
+
+
+def build_job_display_name(job_number: int, job_name: str) -> str:
+    padded = str(job_number).zfill(GOOGLE_DRIVE_JOB_NUMBER_PADDING)
+    return f"{padded}: {drive_safe_name(job_name)}"
+
+
+def create_drive_folder(service, name: str, parent_id: str) -> Dict[str, Any]:
+    """Create one folder in Drive and return id/webViewLink."""
+    metadata = {
+        "name": name,
+        "mimeType": "application/vnd.google-apps.folder",
+        "parents": [parent_id],
+    }
+    return service.files().create(
+        body=metadata,
+        fields="id,name,webViewLink",
+        supportsAllDrives=True,
+    ).execute()
+
+
+def list_drive_folder_children(service, folder_id: str) -> List[Dict[str, Any]]:
+    """List all non-trashed children of a Drive folder, including shared drives."""
+    children = []
+    page_token = None
+    while True:
+        response = service.files().list(
+            q=f"'{folder_id}' in parents and trashed = false",
+            fields="nextPageToken, files(id,name,mimeType,shortcutDetails)",
+            pageSize=1000,
+            pageToken=page_token,
+            includeItemsFromAllDrives=True,
+            supportsAllDrives=True,
+        ).execute()
+        children.extend(response.get("files", []))
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+    children.sort(key=lambda item: item.get("name", "").lower())
+    return children
+
+
+def copy_drive_template_contents_recursive(
+    service,
+    source_folder_id: str,
+    destination_folder_id: str,
+    current_path: str = "template",
+    stats: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Recursively copy every folder/file from the template folder into the new job folder.
+
+    Drive's files.copy does not copy folder contents, so folders are recreated first and then
+    their children are copied one level at a time. Skipped items are recorded in stats/logs.
+    """
+    if stats is None:
+        stats = {"folders_created": 0, "files_copied": 0, "shortcuts_created": 0, "skipped": []}
+
+    children = list_drive_folder_children(service, source_folder_id)
+    logger.info("Copying %s Drive item(s) from %s", len(children), current_path)
+
+    for item in children:
+        item_id = item.get("id")
+        item_name = item.get("name", "Untitled")
+        mime_type = item.get("mimeType", "")
+        item_path = f"{current_path}/{item_name}"
+
+        try:
+            if mime_type == "application/vnd.google-apps.folder":
+                new_folder = create_drive_folder(service, item_name, destination_folder_id)
+                stats["folders_created"] += 1
+                copy_drive_template_contents_recursive(
+                    service,
+                    item_id,
+                    new_folder["id"],
+                    current_path=item_path,
+                    stats=stats,
+                )
+            elif mime_type == "application/vnd.google-apps.shortcut":
+                shortcut_details = item.get("shortcutDetails") or {}
+                target_id = shortcut_details.get("targetId")
+                target_mime_type = shortcut_details.get("targetMimeType")
+                if not target_id:
+                    raise ValueError("Shortcut has no targetId")
+                metadata = {
+                    "name": item_name,
+                    "mimeType": "application/vnd.google-apps.shortcut",
+                    "parents": [destination_folder_id],
+                    "shortcutDetails": {"targetId": target_id},
+                }
+                if target_mime_type:
+                    metadata["shortcutDetails"]["targetMimeType"] = target_mime_type
+                service.files().create(
+                    body=metadata,
+                    fields="id,name",
+                    supportsAllDrives=True,
+                ).execute()
+                stats["shortcuts_created"] += 1
+            else:
+                metadata = {"name": item_name, "parents": [destination_folder_id]}
+                service.files().copy(
+                    fileId=item_id,
+                    body=metadata,
+                    fields="id,name",
+                    supportsAllDrives=True,
+                ).execute()
+                stats["files_copied"] += 1
+        except Exception as exc:
+            error_message = f"{item_path}: {exc}"
+            stats["skipped"].append(error_message)
+            logger.warning("Skipped Drive template item during recursive copy: %s", error_message)
+
+    return stats
+
+
+async def create_google_drive_job_folder(job_number: int, job_name: str) -> Dict[str, Any]:
+    """Create the new numbered job folder and recursively copy the template into it."""
+    missing = google_drive_config_missing()
+    if missing:
+        return {
+            "drive_folder_status": "not_configured",
+            "drive_folder_error": "Missing env var(s): " + ", ".join(missing),
+        }
+
+    service = get_google_drive_service()
+    if not service:
+        return {
+            "drive_folder_status": "failed",
+            "drive_folder_error": "Google Drive service could not be initialised. Check Render env vars and requirements.txt.",
+        }
+
+    display_name = build_job_display_name(job_number, job_name)
+    try:
+        folder = create_drive_folder(service, display_name, GOOGLE_DRIVE_PARENT_FOLDER_ID)
+        result = {
+            "drive_folder_status": "created",
+            "drive_folder_id": folder.get("id"),
+            "drive_folder_link": folder.get("webViewLink"),
+        }
+
+        if GOOGLE_DRIVE_TEMPLATE_FOLDER_ID:
+            stats = copy_drive_template_contents_recursive(
+                service,
+                GOOGLE_DRIVE_TEMPLATE_FOLDER_ID,
+                folder["id"],
+                current_path="template",
+            )
+            result["drive_folder_copy_stats"] = stats
+            if stats.get("skipped"):
+                result["drive_folder_status"] = "created_with_copy_warnings"
+                result["drive_folder_error"] = "; ".join(stats.get("skipped", [])[:5])
+            logger.info("Google Drive template copy complete for %s: %s", display_name, stats)
+        else:
+            result["drive_folder_error"] = "No GOOGLE_DRIVE_TEMPLATE_FOLDER_ID set, so only the main job folder was created."
+
+        return result
+    except Exception as exc:
+        logger.exception("Google Drive job folder creation failed for %s: %s", display_name, exc)
+        return {
+            "drive_folder_status": "failed",
+            "drive_folder_error": str(exc),
+        }
+
 # JOB ENDPOINTS
 @api_router.post("/jobs", response_model=Job)
 async def create_job(job: JobCreate, admin: str = Depends(verify_admin)):
-    """Create a new job (Admin only) and create its matching Google Drive folder when configured."""
+    """Create a new job, assign a job number, and create/copy its Google Drive folder."""
     job_dict = job.dict()
-    next_number = await get_next_job_number()
-    job_dict["job_number"] = next_number
-    job_dict["display_name"] = build_job_display_name(next_number, job_dict.get("name", "New Job"))
-    job_dict["drive_folder_status"] = "pending"
+
+    job_number = await get_next_job_number()
+    display_name = build_job_display_name(job_number, job.name)
+
+    job_dict["job_number"] = job_number
+    job_dict["display_name"] = display_name
+
+    drive_result = await create_google_drive_job_folder(job_number, job.name)
+    for key in ["drive_folder_id", "drive_folder_link", "drive_folder_status", "drive_folder_error"]:
+        if key in drive_result:
+            job_dict[key] = drive_result[key]
+
+    drive_copy_stats = drive_result.get("drive_folder_copy_stats")
 
     job_obj = Job(**job_dict)
-    job_doc = job_obj.dict()
-    await db.jobs.insert_one(job_doc)
+    mongo_doc = job_obj.dict()
+    if drive_copy_stats is not None:
+        mongo_doc["drive_folder_copy_stats"] = drive_copy_stats
 
-    drive_result = await create_google_drive_job_folder_for_job(job_doc)
-    drive_update = {
-        "drive_folder_status": drive_result.get("status"),
-        "drive_folder_id": drive_result.get("folder_id"),
-        "drive_folder_link": drive_result.get("folder_link"),
-    }
-    await db.jobs.update_one({"id": job_obj.id}, {"$set": drive_update})
-
-    updated_job = await db.jobs.find_one({"id": job_obj.id})
-    return Job(**updated_job)
+    await db.jobs.insert_one(mongo_doc)
+    return job_obj
 
 @api_router.get("/jobs", response_model=List[Job])
 async def get_jobs(active_only: bool = Query(False), include_archived: bool = Query(False)):
@@ -1366,10 +1460,8 @@ async def get_time_entries(
 
     if worker_id:
         filter_dict["worker_id"] = worker_id
-    if job_id and job_id != "all":
+    if job_id:
         filter_dict["job_id"] = job_id
-    if worker_id and worker_id != "all":
-        filter_dict["worker_id"] = worker_id
 
     if start_date:
         start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
@@ -2326,20 +2418,15 @@ async def export_job_report(job_id: str, admin: str = Depends(verify_admin)):
 @api_router.get("/reports/export/time-entries")
 async def export_time_entries_csv(
     job_id: Optional[str] = Query(None),
-    worker_id: Optional[str] = Query(None),
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
-    worker_type: Optional[str] = Query(None),
-    division: Optional[str] = Query(None),
     admin: str = Depends(verify_admin)
 ):
     """Export time entries as CSV (Admin only)"""
     # Build filter
     filter_dict = {}
-    if job_id and job_id != "all":
+    if job_id:
         filter_dict["job_id"] = job_id
-    if worker_id and worker_id != "all":
-        filter_dict["worker_id"] = worker_id
 
     if start_date:
         start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
@@ -2389,14 +2476,6 @@ async def export_time_entries_csv(
 
     # Data rows
     for entry in time_entries:
-        if worker_type and worker_type != "all":
-            worker_for_filter = await db.workers.find_one({"id": entry.get("worker_id")})
-            if not worker_for_filter or worker_for_filter.get("worker_type") != worker_type:
-                continue
-        if division and division != "all":
-            worker_for_filter = await db.workers.find_one({"id": entry.get("worker_id")})
-            if not worker_for_filter or worker_for_filter.get("division", "") != division:
-                continue
         clock_in = entry.get("clock_in", "")
         clock_out = entry.get("clock_out", "")
         duration_hours = round(entry.get("duration_minutes", 0) / 60, 2) if entry.get("duration_minutes") else ""
@@ -2444,96 +2523,153 @@ async def export_time_entries_csv(
         headers={"Content-Disposition": "attachment; filename=time_entries.csv"}
     )
 
+
+
+async def build_time_entries_export_rows(
+    worker_id: Optional[str] = None,
+    job_id: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    worker_type: Optional[str] = None,
+    division: Optional[str] = None,
+    trade: Optional[str] = None,
+):
+    """Shared row builder for PDF timesheet exports."""
+    filter_dict = {"archived": {"$ne": True}}
+    if worker_id and worker_id != "all":
+        filter_dict["worker_id"] = worker_id
+    if job_id and job_id != "all":
+        filter_dict["job_id"] = job_id
+    if start_date:
+        start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+        filter_dict["clock_in"] = {"$gte": start_dt}
+    if end_date:
+        end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+        if "clock_in" in filter_dict:
+            filter_dict["clock_in"]["$lte"] = end_dt
+        else:
+            filter_dict["clock_in"] = {"$lte": end_dt}
+
+    time_entries = await db.time_entries.find(filter_dict).sort("clock_in", 1).to_list(5000)
+    worker_ids = list({entry.get("worker_id") for entry in time_entries if entry.get("worker_id")})
+    job_ids = list({entry.get("job_id") for entry in time_entries if entry.get("job_id")})
+
+    workers = await db.workers.find({"id": {"$in": worker_ids}}, {"_id": 0}).to_list(1000) if worker_ids else []
+    jobs = await db.jobs.find({"id": {"$in": job_ids}}, {"_id": 0}).to_list(1000) if job_ids else []
+    worker_lookup = {worker.get("id"): worker for worker in workers}
+    job_lookup = {job.get("id"): job for job in jobs}
+
+    rows = []
+    for entry in time_entries:
+        worker = worker_lookup.get(entry.get("worker_id"), {})
+        job = job_lookup.get(entry.get("job_id"), {})
+
+        if worker_type and worker_type != "all" and worker.get("worker_type", "worker") != worker_type:
+            continue
+        if division and division != "all" and worker.get("division", "") != division:
+            continue
+        if trade and trade != "all":
+            worker_trades = worker.get("trades") or ([worker.get("trade")] if worker.get("trade") else [])
+            if trade not in worker_trades:
+                continue
+
+        duration_hours = round((entry.get("duration_minutes", 0) or 0) / 60, 2)
+        rows.append({
+            "worker_name": worker.get("name", "Unknown Worker"),
+            "worker_type": worker.get("worker_type", "worker"),
+            "division": worker.get("division", ""),
+            "job_name": job.get("name", "Unknown Job"),
+            "job_client": job.get("client", ""),
+            "clock_in": format_uk_datetime_for_export(entry.get("clock_in")),
+            "clock_out": format_uk_datetime_for_export(entry.get("clock_out")) if entry.get("clock_out") else "Active",
+            "duration_hours": duration_hours,
+            "notes": entry.get("notes", ""),
+        })
+    return rows
+
+
 @api_router.get("/reports/export/time-entries/pdf")
 @api_router.get("/reports/export/time-entries.pdf")
 async def export_time_entries_pdf(
-    job_id: Optional[str] = Query(None),
     worker_id: Optional[str] = Query(None),
+    job_id: Optional[str] = Query(None),
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
     worker_type: Optional[str] = Query(None),
     division: Optional[str] = Query(None),
+    trade: Optional[str] = Query(None),
+    group_by: str = Query("worker"),
     admin: str = Depends(verify_admin)
 ):
-    """Export time entries as a formatted PDF timesheet (Admin only)."""
+    """Export time entries as a PDF timesheet. Supports worker/job/division filters."""
     try:
         from reportlab.lib import colors
         from reportlab.lib.pagesizes import landscape, A4
-        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.styles import getSampleStyleSheet
         from reportlab.lib.units import cm
         from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-    except Exception as e:
-        logger.error(f"PDF export dependency error: {e}")
-        raise HTTPException(status_code=500, detail="PDF export is not available. Add reportlab to requirements.txt and redeploy.")
+    except Exception as exc:
+        logger.error("PDF export dependency error: %s", exc)
+        raise HTTPException(status_code=500, detail="PDF export is not available on this server. Check reportlab is installed.")
 
-    rows = await build_timesheet_export_rows(job_id=job_id, worker_id=worker_id, start_date=start_date, end_date=end_date, worker_type=worker_type, division=division)
-    total_hours = round(sum(row.get("duration_hours", 0) or 0 for row in rows), 2)
-    total_labour = round(sum(row.get("labour_cost", 0) or 0 for row in rows), 2)
+    rows = await build_time_entries_export_rows(worker_id, job_id, start_date, end_date, worker_type, division, trade)
 
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), rightMargin=0.8*cm, leftMargin=0.8*cm, topMargin=0.8*cm, bottomMargin=0.8*cm)
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle("LDAExportTitle", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=18, leading=22)
-    small_style = ParagraphStyle("LDASmall", parent=styles["BodyText"], fontSize=7, leading=8)
-
-    date_range = "All dates"
-    if start_date or end_date:
-        date_range = f"{start_date or 'Start'} to {end_date or 'End'}"
-
     story = [
-        Paragraph("LDA Group", title_style),
-        Paragraph("PDF Timesheet Export", styles["Heading2"]),
-        Paragraph(f"Date range: {date_range}", styles["Normal"]),
+        Paragraph("LDA Group - Time Sheet Export", styles["Title"]),
+        Paragraph(f"Date range: {start_date or 'All'} to {end_date or 'All'}", styles["Normal"]),
         Paragraph(f"Generated: {get_uk_time().strftime('%d/%m/%Y %H:%M')} UK time", styles["Normal"]),
-        Spacer(1, 0.25*cm),
-        Paragraph(f"Total hours: {total_hours:.2f} &nbsp;&nbsp;&nbsp; Total labour value: £{total_labour:,.2f}", styles["Heading3"]),
-        Spacer(1, 0.25*cm),
+        Spacer(1, 0.35*cm),
     ]
 
-    table_data = [["Worker", "Division", "Job", "Client", "Clock In", "Clock Out", "Hours", "Rate", "Labour", "Notes / Flags"]]
-    for row in rows:
-        notes_flags = row.get("notes", "")
-        if row.get("suspicious_flags"):
-            notes_flags = (notes_flags + " | " if notes_flags else "") + row.get("suspicious_flags")
-        table_data.append([
-            Paragraph(str(row.get("worker_name", "")), small_style),
-            Paragraph(str(row.get("division", "")), small_style),
-            Paragraph(str(row.get("job_name", "")), small_style),
-            Paragraph(str(row.get("job_client", "")), small_style),
-            row.get("clock_in_text", ""),
-            row.get("clock_out_text", ""),
-            f"{row.get('duration_hours', 0):.2f}",
-            f"£{row.get('hourly_rate', 0):.2f}",
-            f"£{row.get('labour_cost', 0):.2f}",
-            Paragraph(str(notes_flags), small_style),
-        ])
-    if len(table_data) == 1:
-        table_data.append(["No time entries found", "", "", "", "", "", "", "", "", ""])
+    if not rows:
+        story.append(Paragraph("No time entries found for the selected filters.", styles["Normal"]))
+    else:
+        if group_by == "job":
+            rows.sort(key=lambda row: (row["job_name"].lower(), row["worker_name"].lower(), row["clock_in"]))
+        else:
+            rows.sort(key=lambda row: (row["worker_name"].lower(), row["job_name"].lower(), row["clock_in"]))
 
-    table = Table(table_data, colWidths=[2.8*cm, 2.5*cm, 3.6*cm, 2.8*cm, 2.6*cm, 2.6*cm, 1.4*cm, 1.5*cm, 1.7*cm, 5.0*cm], repeatRows=1)
-    table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#d01f2f")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, 0), 8),
-        ("FONTSIZE", (0, 1), (-1, -1), 7),
-        ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("ALIGN", (6, 1), (8, -1), "RIGHT"),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7f7f7")]),
-    ]))
-    story.append(table)
+        table_data = [["Worker", "Division", "Job", "Client", "Clock In", "Clock Out", "Hours", "Notes"]]
+        total_hours = 0
+        for row in rows:
+            total_hours += row["duration_hours"] or 0
+            table_data.append([
+                Paragraph(row["worker_name"], styles["BodyText"]),
+                Paragraph(row["division"] or "-", styles["BodyText"]),
+                Paragraph(row["job_name"], styles["BodyText"]),
+                Paragraph(row["job_client"] or "-", styles["BodyText"]),
+                row["clock_in"],
+                row["clock_out"],
+                f"{row['duration_hours']:.2f}",
+                Paragraph(row["notes"] or "", styles["BodyText"]),
+            ])
+        table_data.append(["TOTAL", "", "", "", "", "", f"{total_hours:.2f}", ""])
+
+        table = Table(table_data, colWidths=[3.2*cm, 2.6*cm, 4.0*cm, 3.0*cm, 3.0*cm, 3.0*cm, 1.5*cm, 6.0*cm], repeatRows=1)
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#d01f2f")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("GRID", (0, 0), (-1, -1), 0.35, colors.grey),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+            ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#eeeeee")),
+            ("FONTSIZE", (0, 0), (-1, -1), 7),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#f7f7f7")]),
+        ]))
+        story.append(table)
+
     doc.build(story)
     buffer.seek(0)
-
-    filename = "lda_timesheet"
-    if start_date:
-        filename += f"_{start_date}"
-    if end_date:
-        filename += f"_to_{end_date}"
-    filename += ".pdf"
-
-    return StreamingResponse(buffer, media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename={filename}"})
+    filename = f"time_sheet_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.pdf"
+    return StreamingResponse(
+        buffer,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
 
 @api_router.get("/reports/export/materials")
 async def export_materials_csv(
@@ -2817,8 +2953,10 @@ async def get_schedule_entries(
         worker_filter["worker_type"] = worker_type
     if division and division != "all":
         worker_filter["division"] = division
-    if trade and trade != "all":
-        worker_filter["$or"] = [{"trades": trade}, {"trade": trade}]
+    if trades:
+        cleaned_trades = [trade_value for trade_value in trades if trade_value and trade_value != "all"]
+        if cleaned_trades:
+            worker_filter["$or"] = [{"trades": {"$in": cleaned_trades}}, {"trade": {"$in": cleaned_trades}}]
 
     worker_filters_applied = any([
         worker_type and worker_type != "all",
@@ -3076,7 +3214,7 @@ async def build_schedule_export_data(
     worker_ids: Optional[str] = None,
     worker_type: Optional[str] = None,
     division: Optional[str] = None,
-    trade: Optional[str] = None
+    trades: Optional[List[str]] = None
 ):
     """Build schedule rows for CSV/PDF export and worker schedule views."""
     try:
@@ -3331,7 +3469,7 @@ async def api_info_endpoint():
             "quotes": ["/api/quotes", "/api/quotes/{id}", "/api/quotes/{id}/photos", "/api/quotes/{id}/download-pdf"],
             "reports": ["/api/reports/dashboard", "/api/reports/time-entries", "/api/reports/materials", "/api/reports/job-costs/{id}"],
             "schedule": ["/api/schedule", "/api/schedule/{id}", "/api/schedule/worker/{worker_id}", "/api/schedule/export"],
-            "exports": ["/api/reports/export/job/{id}", "/api/reports/export/time-entries", "/api/reports/export/time-entries/pdf", "/api/reports/export/materials", "/api/reports/export/attendance-alerts"],
+            "exports": ["/api/reports/export/job/{id}", "/api/reports/export/time-entries", "/api/reports/export/materials", "/api/reports/export/attendance-alerts"],
             "system": ["/api/system/status", "/api/api-info"]
         },
         "total_endpoints": 50

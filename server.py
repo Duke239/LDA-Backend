@@ -20,14 +20,12 @@ import base64
 import math
 
 try:
-    from google.oauth2 import service_account
-    from googleapiclient.discovery import build
-    from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
-except Exception:
-    service_account = None
-    build = None
-    MediaIoBaseDownload = None
-    MediaIoBaseUpload = None
+    from google_drive_service import get_google_drive_service, GoogleDriveService
+except Exception as drive_import_error:
+    logger = logging.getLogger(__name__)
+    logger.warning(f"Google Drive service import failed: {drive_import_error}")
+    get_google_drive_service = None
+    GoogleDriveService = None
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -37,13 +35,6 @@ logger = logging.getLogger(__name__)
 MONGO_URL = os.environ.get('MONGO_URL')
 DB_NAME = os.environ.get('DB_NAME', 'lda_timetracking')
 PORT = int(os.environ.get('PORT', 8001))
-
-# Google Drive job folder automation
-GOOGLE_DRIVE_PARENT_FOLDER_ID = os.environ.get('GOOGLE_DRIVE_PARENT_FOLDER_ID', '').strip()
-GOOGLE_DRIVE_TEMPLATE_FOLDER_ID = os.environ.get('GOOGLE_DRIVE_TEMPLATE_FOLDER_ID', '').strip()
-GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON', '').strip()
-GOOGLE_DRIVE_START_JOB_NUMBER = int(os.environ.get('GOOGLE_DRIVE_START_JOB_NUMBER', '34'))
-GOOGLE_DRIVE_JOB_NUMBER_PADDING = int(os.environ.get('GOOGLE_DRIVE_JOB_NUMBER_PADDING', '3'))
 
 # UK timezone handling
 UK_TZ = pytz.timezone('Europe/London')
@@ -140,13 +131,6 @@ async def health_check():
     """Health check endpoint for monitoring"""
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
-@app.get("/health")
-@app.post("/health")
-@app.head("/health")
-async def health():
-    """Simple health check endpoint for browser/monitoring checks"""
-    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
-
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 # Define Models
@@ -163,7 +147,6 @@ class Worker(BaseModel):
     password: Optional[str] = None  # For admin users
     active: bool = True
     archived: bool = False
-    gps_exempt: bool = False
     created_date: datetime = Field(default_factory=datetime.utcnow)
 
 class WorkerCreate(BaseModel):
@@ -175,7 +158,6 @@ class WorkerCreate(BaseModel):
     division: str = ""
     trades: List[str] = []
     hourly_rate: float = 15.0
-    gps_exempt: bool = False
     password: Optional[str] = None
 
 class WorkerUpdate(BaseModel):
@@ -190,7 +172,6 @@ class WorkerUpdate(BaseModel):
     password: Optional[str] = None
     active: Optional[bool] = None
     archived: Optional[bool] = None
-    gps_exempt: Optional[bool] = None
 
 class Job(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -199,12 +180,6 @@ class Job(BaseModel):
     location: str
     client: str
     quoted_cost: float
-    job_number: Optional[int] = None
-    display_name: Optional[str] = None
-    drive_folder_id: Optional[str] = None
-    drive_folder_link: Optional[str] = None
-    drive_folder_status: Optional[str] = None
-    drive_folder_error: Optional[str] = None
     status: str = "active"  # active, completed, cancelled
     archived: bool = False
     gps_required: bool = False  # If true, location is mandatory for clock in/out
@@ -213,6 +188,13 @@ class Job(BaseModel):
     planned_start_date: Optional[str] = None
     planned_end_date: Optional[str] = None
     gantt_sections: List[Dict[str, Any]] = []
+    drive_folder_id: Optional[str] = None
+    drive_folder_link: Optional[str] = None
+    drive_folder_url: Optional[str] = None
+    google_drive_link: Optional[str] = None
+    drive_folder_status: Optional[str] = None
+    drive_folder_error: Optional[str] = None
+    post_work_photos: List[Dict[str, Any]] = []
 
 class JobCreate(BaseModel):
     name: str
@@ -225,6 +207,11 @@ class JobCreate(BaseModel):
     planned_start_date: Optional[str] = None
     planned_end_date: Optional[str] = None
     gantt_sections: List[Dict[str, Any]] = []
+    drive_folder_id: Optional[str] = None
+    drive_folder_link: Optional[str] = None
+    drive_folder_url: Optional[str] = None
+    google_drive_link: Optional[str] = None
+    drive_folder_status: Optional[str] = None
 
 class JobUpdate(BaseModel):
     name: Optional[str] = None
@@ -232,12 +219,6 @@ class JobUpdate(BaseModel):
     location: Optional[str] = None
     client: Optional[str] = None
     quoted_cost: Optional[float] = None
-    job_number: Optional[int] = None
-    display_name: Optional[str] = None
-    drive_folder_id: Optional[str] = None
-    drive_folder_link: Optional[str] = None
-    drive_folder_status: Optional[str] = None
-    drive_folder_error: Optional[str] = None
     status: Optional[str] = None
     archived: Optional[bool] = None
     gps_required: Optional[bool] = None
@@ -245,6 +226,12 @@ class JobUpdate(BaseModel):
     planned_start_date: Optional[str] = None
     planned_end_date: Optional[str] = None
     gantt_sections: Optional[List[Dict[str, Any]]] = None
+    drive_folder_id: Optional[str] = None
+    drive_folder_link: Optional[str] = None
+    drive_folder_url: Optional[str] = None
+    google_drive_link: Optional[str] = None
+    drive_folder_status: Optional[str] = None
+    drive_folder_error: Optional[str] = None
 
 class GPSLocation(BaseModel):
     latitude: float
@@ -282,13 +269,6 @@ class TimeEntryClockOut(BaseModel):
     gps_location: Optional[GPSLocation] = None
     device_id: Optional[str] = None
     notes: str = ""
-
-
-class DeviceUnlockCreate(BaseModel):
-    device_id: str
-    unlock_type: str = "temporary_2h"  # temporary_2h or full_day
-    worker_id: Optional[str] = None
-    reason: str = ""
 
 class TimeEntryUpdate(BaseModel):
     worker_id: Optional[str] = None
@@ -449,7 +429,6 @@ class ClientResponse(BaseModel):
 # Helper functions for quote services (placeholders)
 EmailService = None
 QuotePDFGenerator = None
-# get_google_drive_service is defined below for Google Drive job-folder automation.
 
 def convert_decimals_to_float(obj):
     """Convert Decimal objects to float and date objects to datetime for MongoDB serialization"""
@@ -578,10 +557,6 @@ async def build_suspicious_flags(worker_id: Optional[str], job_id: Optional[str]
     """Build fraud/protection flags without blocking clock in/out."""
     flags = set(existing_flags or [])
 
-    worker = await db.workers.find_one({"id": worker_id}) if worker_id else None
-    if worker and worker.get("gps_exempt", False):
-        flags.add("WORKER_GPS_EXEMPT")
-
     if not gps_location:
         flags.add("MISSING_GPS")
     elif gps_location.accuracy is not None and gps_location.accuracy > 100:
@@ -629,104 +604,6 @@ async def build_suspicious_flags(worker_id: Optional[str], job_id: Optional[str]
             flags.add("UNUSUAL_RAPID_CLOCK_ACTIVITY")
 
     return sorted(flags)
-
-
-def get_uk_working_day_bounds(now_utc: Optional[datetime] = None):
-    """Return current UK working day as (YYYY-MM-DD, UTC start, UTC end)."""
-    now_utc = now_utc or datetime.utcnow()
-    if now_utc.tzinfo is None:
-        now_utc = pytz.utc.localize(now_utc)
-    uk_now = now_utc.astimezone(UK_TZ)
-    uk_start = uk_now.replace(hour=0, minute=0, second=0, microsecond=0)
-    uk_end = uk_start + timedelta(days=1)
-    return uk_start.date().isoformat(), uk_start.astimezone(pytz.utc).replace(tzinfo=None), uk_end.astimezone(pytz.utc).replace(tzinfo=None)
-
-async def get_device_day_owner(device_id: Optional[str], worker_id: Optional[str] = None):
-    """Find the first worker who used this device today, if any."""
-    if not device_id:
-        return None
-    working_day, day_start, day_end = get_uk_working_day_bounds()
-    return await db.time_entries.find_one(
-        {
-            "clock_in": {"$gte": day_start, "$lt": day_end},
-            "$or": [{"device_id_in": device_id}, {"device_id_out": device_id}],
-        },
-        sort=[("clock_in", 1)]
-    )
-
-async def get_active_device_unlock(device_id: Optional[str]):
-    if not device_id:
-        return None
-    working_day, _, _ = get_uk_working_day_bounds()
-    now = datetime.utcnow()
-    return await db.device_unlocks.find_one({
-        "device_id": device_id,
-        "working_day": working_day,
-        "unlock_expires": {"$gt": now},
-        "active": True,
-    }, sort=[("unlock_expires", -1)])
-
-async def log_blocked_device_attempt(worker_id: str, job_id: Optional[str], device_id: str, action_type: str, owner_entry: Dict[str, Any]):
-    working_day, _, _ = get_uk_working_day_bounds()
-    existing = await db.device_unlock_requests.find_one({
-        "device_id": device_id,
-        "worker_id": worker_id,
-        "working_day": working_day,
-        "status": "pending",
-    })
-    if existing:
-        await db.device_unlock_requests.update_one(
-            {"id": existing.get("id")},
-            {"$set": {"last_seen_at": datetime.utcnow(), "action_type": action_type, "job_id": job_id}}
-        )
-        return existing
-
-    request = {
-        "id": str(uuid.uuid4()),
-        "device_id": device_id,
-        "worker_id": worker_id,
-        "job_id": job_id,
-        "owner_worker_id": owner_entry.get("worker_id") if owner_entry else None,
-        "action_type": action_type,
-        "working_day": working_day,
-        "status": "pending",
-        "created_at": datetime.utcnow(),
-        "last_seen_at": datetime.utcnow(),
-    }
-    await db.device_unlock_requests.insert_one(request)
-    return request
-
-async def check_device_worker_allowed(worker_id: str, job_id: Optional[str], device_id: Optional[str], action_type: str):
-    """Enforce one-device/one-worker per UK working day unless an admin unlock is active."""
-    extra_flags = []
-    if not device_id:
-        return extra_flags
-
-    owner_entry = await get_device_day_owner(device_id, worker_id)
-    if not owner_entry or owner_entry.get("worker_id") == worker_id:
-        return extra_flags
-
-    unlock = await get_active_device_unlock(device_id)
-    if unlock:
-        extra_flags.extend(["SHARED_DEVICE_MULTIPLE_WORKERS", "DEVICE_UNLOCK_USED"])
-        if unlock.get("unlock_type") == "full_day":
-            extra_flags.append("DEVICE_FULL_DAY_UNLOCK")
-        else:
-            extra_flags.append("DEVICE_TEMPORARY_UNLOCK_ACTIVE")
-        return extra_flags
-
-    await log_blocked_device_attempt(worker_id, job_id, device_id, action_type, owner_entry)
-    owner_worker = await db.workers.find_one({"id": owner_entry.get("worker_id")}) or {}
-    raise HTTPException(
-        status_code=423,
-        detail={
-            "code": "DEVICE_LOCKED_TO_ANOTHER_WORKER",
-            "message": "This device has already been used by another worker today. Please use your own phone or contact admin.",
-            "device_id": device_id,
-            "locked_to_worker_id": owner_entry.get("worker_id"),
-            "locked_to_worker_name": owner_worker.get("name", "another worker"),
-        }
-    )
 
 # AUTHENTICATION ENDPOINTS
 @api_router.post("/admin/login")
@@ -988,7 +865,6 @@ async def get_workers(
             worker["worker_type"] = "contractor"
         worker.setdefault("worker_type", "worker")
         worker.setdefault("division", "")
-        worker.setdefault("gps_exempt", False)
         if "trades" not in worker:
             old_trade = worker.get("trade", "")
             worker["trades"] = [item.strip() for item in old_trade.split(",") if item.strip()] if old_trade else []
@@ -1035,295 +911,13 @@ async def archive_worker(worker_id: str, admin: str = Depends(verify_admin)):
         raise HTTPException(status_code=404, detail="Worker not found")
     return {"message": "Worker archived successfully"}
 
-
-# ==================== GOOGLE DRIVE JOB FOLDER AUTOMATION ====================
-
-def google_drive_config_missing() -> List[str]:
-    """Return missing Google Drive env variable names without exposing secret values."""
-    missing = []
-    if not GOOGLE_DRIVE_PARENT_FOLDER_ID:
-        missing.append("GOOGLE_DRIVE_PARENT_FOLDER_ID")
-    if not GOOGLE_SERVICE_ACCOUNT_JSON:
-        missing.append("GOOGLE_SERVICE_ACCOUNT_JSON")
-    return missing
-
-
-def get_google_drive_service():
-    """Build a Google Drive API client from the service account JSON in Render env vars."""
-    missing = google_drive_config_missing()
-    if missing:
-        logger.warning("Google Drive automation not configured. Missing: %s", ", ".join(missing))
-        return None
-    if service_account is None or build is None:
-        logger.error("Google Drive packages are not installed. Check requirements.txt")
-        return None
-
-    try:
-        account_info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
-        credentials = service_account.Credentials.from_service_account_info(
-            account_info,
-            scopes=["https://www.googleapis.com/auth/drive"],
-        )
-        return build("drive", "v3", credentials=credentials, cache_discovery=False)
-    except Exception as exc:
-        logger.exception("Failed to initialise Google Drive service: %s", exc)
-        return None
-
-
-def drive_safe_name(value: str) -> str:
-    """Keep folder names readable while removing characters Drive/Windows dislike."""
-    value = (value or "Untitled Job").strip()
-    for char in ['<', '>', ':', '"', '/', '\\', '|', '?', '*']:
-        value = value.replace(char, '-')
-    return " ".join(value.split()) or "Untitled Job"
-
-
-async def get_next_job_number() -> int:
-    """Find the next job number using existing job_number values in MongoDB."""
-    latest = await db.jobs.find_one({"job_number": {"$exists": True, "$ne": None}}, sort=[("job_number", -1)])
-    if latest and isinstance(latest.get("job_number"), int):
-        return latest["job_number"] + 1
-    return GOOGLE_DRIVE_START_JOB_NUMBER
-
-
-def build_job_display_name(job_number: int, job_name: str) -> str:
-    padded = str(job_number).zfill(GOOGLE_DRIVE_JOB_NUMBER_PADDING)
-    return f"{padded}: {drive_safe_name(job_name)}"
-
-
-def create_drive_folder(service, name: str, parent_id: str) -> Dict[str, Any]:
-    """Create one folder in Drive and return id/webViewLink."""
-    metadata = {
-        "name": name,
-        "mimeType": "application/vnd.google-apps.folder",
-        "parents": [parent_id],
-    }
-    return service.files().create(
-        body=metadata,
-        fields="id,name,webViewLink",
-        supportsAllDrives=True,
-    ).execute()
-
-
-def list_drive_folder_children(service, folder_id: str) -> List[Dict[str, Any]]:
-    """List all non-trashed children of a Drive folder, including shared drives."""
-    children = []
-    page_token = None
-    while True:
-        response = service.files().list(
-            q=f"'{folder_id}' in parents and trashed = false",
-            fields="nextPageToken, files(id,name,mimeType,shortcutDetails,exportLinks)",
-            pageSize=1000,
-            pageToken=page_token,
-            includeItemsFromAllDrives=True,
-            supportsAllDrives=True,
-        ).execute()
-        children.extend(response.get("files", []))
-        page_token = response.get("nextPageToken")
-        if not page_token:
-            break
-    children.sort(key=lambda item: item.get("name", "").lower())
-    return children
-
-
-def copy_drive_file_with_download_fallback(
-    service,
-    item_id: str,
-    item_name: str,
-    destination_folder_id: str,
-    mime_type: str,
-) -> None:
-    """Copy one Drive file. If Drive copy is blocked for a binary file, download and re-upload it."""
-    metadata = {"name": item_name, "parents": [destination_folder_id]}
-
-    try:
-        service.files().copy(
-            fileId=item_id,
-            body=metadata,
-            fields="id,name",
-            supportsAllDrives=True,
-        ).execute()
-        return
-    except Exception as copy_exc:
-        # Some externally-owned files in shared folders fail with files.copy even when the
-        # folder itself can be read. For normal binary files such as .docx/.xlsx, fall back
-        # to download + upload so the new job folder still receives a real copy.
-        if mime_type.startswith("application/vnd.google-apps"):
-            raise copy_exc
-        if MediaIoBaseDownload is None or MediaIoBaseUpload is None:
-            raise copy_exc
-
-        logger.warning("Drive files.copy failed for %s; trying download/upload fallback: %s", item_name, copy_exc)
-        buffer = io.BytesIO()
-        request = service.files().get_media(fileId=item_id, supportsAllDrives=True)
-        downloader = MediaIoBaseDownload(buffer, request)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
-        buffer.seek(0)
-
-        media = MediaIoBaseUpload(buffer, mimetype=mime_type or "application/octet-stream", resumable=False)
-        service.files().create(
-            body=metadata,
-            media_body=media,
-            fields="id,name",
-            supportsAllDrives=True,
-        ).execute()
-
-
-def copy_drive_template_contents_recursive(
-    service,
-    source_folder_id: str,
-    destination_folder_id: str,
-    current_path: str = "template",
-    stats: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """
-    Recursively copy every folder/file from the template folder into the new job folder.
-
-    Drive's files.copy does not copy folder contents, so folders are recreated first and then
-    their children are copied one level at a time. Skipped items are recorded in stats/logs.
-    """
-    if stats is None:
-        stats = {
-            "folders_created": 0,
-            "files_copied": 0,
-            "shortcuts_created": 0,
-            "skipped": [],
-            "paths_seen": [],
-        }
-
-    children = list_drive_folder_children(service, source_folder_id)
-    logger.info("Copying %s Drive item(s) from %s", len(children), current_path)
-
-    for item in children:
-        item_id = item.get("id")
-        item_name = item.get("name", "Untitled")
-        mime_type = item.get("mimeType", "")
-        item_path = f"{current_path}/{item_name}"
-        stats["paths_seen"].append(item_path)
-
-        try:
-            if mime_type == "application/vnd.google-apps.folder":
-                new_folder = create_drive_folder(service, item_name, destination_folder_id)
-                stats["folders_created"] += 1
-                copy_drive_template_contents_recursive(
-                    service,
-                    item_id,
-                    new_folder["id"],
-                    current_path=item_path,
-                    stats=stats,
-                )
-            elif mime_type == "application/vnd.google-apps.shortcut":
-                shortcut_details = item.get("shortcutDetails") or {}
-                target_id = shortcut_details.get("targetId")
-                target_mime_type = shortcut_details.get("targetMimeType")
-                if not target_id:
-                    raise ValueError("Shortcut has no targetId")
-                metadata = {
-                    "name": item_name,
-                    "mimeType": "application/vnd.google-apps.shortcut",
-                    "parents": [destination_folder_id],
-                    "shortcutDetails": {"targetId": target_id},
-                }
-                if target_mime_type:
-                    metadata["shortcutDetails"]["targetMimeType"] = target_mime_type
-                service.files().create(
-                    body=metadata,
-                    fields="id,name",
-                    supportsAllDrives=True,
-                ).execute()
-                stats["shortcuts_created"] += 1
-            else:
-                copy_drive_file_with_download_fallback(
-                    service,
-                    item_id=item_id,
-                    item_name=item_name,
-                    destination_folder_id=destination_folder_id,
-                    mime_type=mime_type,
-                )
-                stats["files_copied"] += 1
-        except Exception as exc:
-            error_message = f"{item_path}: {exc}"
-            stats["skipped"].append(error_message)
-            logger.warning("Skipped Drive template item during recursive copy: %s", error_message)
-
-    return stats
-
-
-async def create_google_drive_job_folder(job_number: int, job_name: str) -> Dict[str, Any]:
-    """Create the new numbered job folder and recursively copy the template into it."""
-    missing = google_drive_config_missing()
-    if missing:
-        return {
-            "drive_folder_status": "not_configured",
-            "drive_folder_error": "Missing env var(s): " + ", ".join(missing),
-        }
-
-    service = get_google_drive_service()
-    if not service:
-        return {
-            "drive_folder_status": "failed",
-            "drive_folder_error": "Google Drive service could not be initialised. Check Render env vars and requirements.txt.",
-        }
-
-    display_name = build_job_display_name(job_number, job_name)
-    try:
-        folder = create_drive_folder(service, display_name, GOOGLE_DRIVE_PARENT_FOLDER_ID)
-        result = {
-            "drive_folder_status": "created",
-            "drive_folder_id": folder.get("id"),
-            "drive_folder_link": folder.get("webViewLink"),
-        }
-
-        if GOOGLE_DRIVE_TEMPLATE_FOLDER_ID:
-            stats = copy_drive_template_contents_recursive(
-                service,
-                GOOGLE_DRIVE_TEMPLATE_FOLDER_ID,
-                folder["id"],
-                current_path="template",
-            )
-            result["drive_folder_copy_stats"] = stats
-            if stats.get("skipped"):
-                result["drive_folder_status"] = "created_with_copy_warnings"
-                result["drive_folder_error"] = "; ".join(stats.get("skipped", [])[:5])
-            logger.info("Google Drive template copy complete for %s: %s", display_name, stats)
-        else:
-            result["drive_folder_error"] = "No GOOGLE_DRIVE_TEMPLATE_FOLDER_ID set, so only the main job folder was created."
-
-        return result
-    except Exception as exc:
-        logger.exception("Google Drive job folder creation failed for %s: %s", display_name, exc)
-        return {
-            "drive_folder_status": "failed",
-            "drive_folder_error": str(exc),
-        }
-
 # JOB ENDPOINTS
 @api_router.post("/jobs", response_model=Job)
 async def create_job(job: JobCreate, admin: str = Depends(verify_admin)):
-    """Create a new job, assign a job number, and create/copy its Google Drive folder."""
+    """Create a new job (Admin only)"""
     job_dict = job.dict()
-
-    job_number = await get_next_job_number()
-    display_name = build_job_display_name(job_number, job.name)
-
-    job_dict["job_number"] = job_number
-    job_dict["display_name"] = display_name
-
-    drive_result = await create_google_drive_job_folder(job_number, job.name)
-    for key in ["drive_folder_id", "drive_folder_link", "drive_folder_status", "drive_folder_error"]:
-        if key in drive_result:
-            job_dict[key] = drive_result[key]
-
-    drive_copy_stats = drive_result.get("drive_folder_copy_stats")
-
     job_obj = Job(**job_dict)
-    mongo_doc = job_obj.dict()
-    if drive_copy_stats is not None:
-        mongo_doc["drive_folder_copy_stats"] = drive_copy_stats
-
-    await db.jobs.insert_one(mongo_doc)
+    await db.jobs.insert_one(job_obj.dict())
     return job_obj
 
 @api_router.get("/jobs", response_model=List[Job])
@@ -1382,93 +976,135 @@ async def unarchive_job(job_id: str, admin: str = Depends(verify_admin)):
         raise HTTPException(status_code=404, detail="Job not found")
     return {"message": "Job unarchived successfully"}
 
-# DEVICE UNLOCK ENDPOINTS
-@api_router.get("/device-unlock-requests")
-async def get_device_unlock_requests(admin: str = Depends(verify_admin)):
-    """Pending device lock requests for admin action."""
-    working_day, _, _ = get_uk_working_day_bounds()
-    requests = await db.device_unlock_requests.find({
-        "working_day": working_day,
-        "status": "pending"
-    }, {"_id": 0}).sort("last_seen_at", -1).to_list(1000)
 
-    worker_ids = list({r.get("worker_id") for r in requests if r.get("worker_id")} | {r.get("owner_worker_id") for r in requests if r.get("owner_worker_id")})
-    job_ids = list({r.get("job_id") for r in requests if r.get("job_id")})
-    workers = await db.workers.find({"id": {"$in": worker_ids}}, {"_id": 0}).to_list(1000) if worker_ids else []
-    jobs = await db.jobs.find({"id": {"$in": job_ids}}, {"_id": 0}).to_list(1000) if job_ids else []
-    worker_lookup = {w.get("id"): w for w in workers}
-    job_lookup = {j.get("id"): j for j in jobs}
+def get_job_drive_folder_id(job: Dict[str, Any]) -> Optional[str]:
+    """Return the Google Drive folder ID stored against a job."""
+    if not job:
+        return None
 
-    result = []
-    for r in requests:
-        result.append({
-            **r,
-            "worker_name": worker_lookup.get(r.get("worker_id"), {}).get("name", "Unknown worker"),
-            "owner_worker_name": worker_lookup.get(r.get("owner_worker_id"), {}).get("name", "Unknown worker"),
-            "job_name": job_lookup.get(r.get("job_id"), {}).get("name", "Unknown job"),
-        })
-    return result
+    possible_values = [
+        job.get("drive_folder_id"),
+        job.get("drive_folder_link"),
+        job.get("drive_folder_url"),
+        job.get("google_drive_link"),
+    ]
 
-@api_router.post("/device-unlocks")
-async def create_device_unlock(unlock: DeviceUnlockCreate, admin: str = Depends(verify_admin)):
-    """Unlock a blocked device for 2 hours or the rest of the UK working day."""
-    if unlock.unlock_type not in ["temporary_2h", "full_day"]:
-        raise HTTPException(status_code=400, detail="unlock_type must be temporary_2h or full_day")
+    for value in possible_values:
+        if not value:
+            continue
+        if GoogleDriveService and hasattr(GoogleDriveService, "extract_folder_id"):
+            folder_id = GoogleDriveService.extract_folder_id(value)
+        else:
+            folder_id = str(value).strip()
+        if folder_id:
+            return folder_id
+    return None
 
-    working_day, day_start, day_end = get_uk_working_day_bounds()
-    now = datetime.utcnow()
 
-    if unlock.unlock_type == "temporary_2h":
-        count = await db.device_unlocks.count_documents({
-            "device_id": unlock.device_id,
-            "working_day": working_day,
-            "unlock_type": "temporary_2h",
-        })
-        if count >= 2:
-            raise HTTPException(status_code=400, detail="This device has already used the maximum 2 temporary unlocks today.")
-        unlock_expires = min(now + timedelta(hours=2), day_end)
-    else:
-        count = await db.device_unlocks.count_documents({
-            "device_id": unlock.device_id,
-            "working_day": working_day,
-            "unlock_type": "full_day",
-        })
-        if count >= 1:
-            raise HTTPException(status_code=400, detail="This device has already used the full-day unlock today.")
-        unlock_expires = day_end
+@api_router.post("/jobs/{job_id}/post-work-photos")
+async def upload_job_post_work_photos(
+    job_id: str,
+    files: List[UploadFile] = File(...),
+    worker_id: Optional[str] = Query(None),
+):
+    """Upload worker post-works photos into the job Google Drive folder.
 
-    unlock_doc = {
-        "id": str(uuid.uuid4()),
-        "device_id": unlock.device_id,
-        "unlock_type": unlock.unlock_type,
-        "worker_id": unlock.worker_id,
-        "reason": unlock.reason or "Admin override",
-        "working_day": working_day,
-        "unlock_start": now,
-        "unlock_expires": unlock_expires,
-        "created_by": admin,
-        "created_at": now,
-        "active": True,
+    Target folder inside the job folder:
+    007: Site Deliverables / 04: Site Images Pre & Post / 02: Post Works Images
+    """
+    job = await db.jobs.find_one({"id": job_id, "archived": {"$ne": True}})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if not files:
+        raise HTTPException(status_code=400, detail="Please select at least one photo")
+
+    if len(files) > 20:
+        raise HTTPException(status_code=400, detail="Maximum 20 photos can be uploaded at once")
+
+    job_folder_id = get_job_drive_folder_id(job)
+    if not job_folder_id:
+        raise HTTPException(
+            status_code=400,
+            detail="This job does not have a Google Drive folder link/id saved against it yet",
+        )
+
+    if not get_google_drive_service:
+        raise HTTPException(status_code=500, detail="Google Drive service is not configured on the backend")
+
+    drive_service = get_google_drive_service()
+    if not drive_service:
+        raise HTTPException(status_code=500, detail="Google Drive service could not be initialised")
+
+    worker = None
+    if worker_id:
+        worker = await db.workers.find_one({"id": worker_id})
+
+    uploaded_photos = []
+    errors = []
+
+    for file in files:
+        try:
+            if not file.content_type or not file.content_type.startswith("image/"):
+                errors.append({"filename": file.filename, "error": "Only image files are allowed"})
+                continue
+
+            content = await file.read()
+            if len(content) > 15 * 1024 * 1024:
+                errors.append({"filename": file.filename, "error": "Photo is larger than 15MB"})
+                continue
+
+            uploaded = drive_service.upload_post_work_image(
+                job_folder_id=job_folder_id,
+                file_content=content,
+                filename=file.filename,
+                content_type=file.content_type,
+                worker_name=(worker or {}).get("name", ""),
+                job_name=job.get("name", ""),
+            )
+
+            photo_record = {
+                "id": str(uuid.uuid4()),
+                "job_id": job_id,
+                "job_name": job.get("name", ""),
+                "worker_id": worker_id,
+                "worker_name": (worker or {}).get("name", ""),
+                "original_filename": file.filename,
+                "file_id": uploaded.get("file_id"),
+                "filename": uploaded.get("filename"),
+                "mime_type": uploaded.get("mime_type"),
+                "share_url": uploaded.get("share_url"),
+                "direct_url": uploaded.get("direct_url", ""),
+                "folder_id": uploaded.get("folder_id"),
+                "folder_name": uploaded.get("folder_name"),
+                "folder_link": uploaded.get("folder_link"),
+                "category": "post_works",
+                "uploaded_at": datetime.utcnow(),
+            }
+            uploaded_photos.append(photo_record)
+
+        except Exception as exc:
+            logger.error(f"Error uploading post work photo {file.filename}: {exc}")
+            errors.append({"filename": file.filename, "error": str(exc)})
+
+    if not uploaded_photos and errors:
+        raise HTTPException(status_code=500, detail={"message": "No photos were uploaded", "errors": errors})
+
+    if uploaded_photos:
+        await db.job_photo_uploads.insert_many(uploaded_photos)
+        await db.jobs.update_one(
+            {"id": job_id},
+            {
+                "$push": {"post_work_photos": {"$each": uploaded_photos}},
+                "$set": {"updated_date": datetime.utcnow()},
+            },
+        )
+
+    return {
+        "message": f"Successfully uploaded {len(uploaded_photos)} photo(s)",
+        "photos": uploaded_photos,
+        "errors": errors,
     }
-    await db.device_unlocks.insert_one(unlock_doc)
-    await db.device_unlock_requests.update_many(
-        {"device_id": unlock.device_id, "working_day": working_day, "status": "pending"},
-        {"$set": {"status": "unlocked", "resolved_at": now, "unlock_id": unlock_doc["id"]}}
-    )
-    unlock_doc.pop("_id", None)
-    return unlock_doc
-
-@api_router.get("/device-unlocks/active")
-async def get_active_device_unlocks(admin: str = Depends(verify_admin)):
-    working_day, _, _ = get_uk_working_day_bounds()
-    now = datetime.utcnow()
-    unlocks = await db.device_unlocks.find({
-        "working_day": working_day,
-        "active": True,
-        "unlock_expires": {"$gt": now},
-    }, {"_id": 0}).sort("unlock_expires", 1).to_list(1000)
-    return unlocks
-
 # TIME ENTRY ENDPOINTS
 @api_router.post("/time-entries/clock-in", response_model=TimeEntry)
 async def clock_in(entry: TimeEntryClockIn):
@@ -1481,7 +1117,7 @@ async def clock_in(entry: TimeEntryClockIn):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    if job_requires_gps(job) and not worker.get("gps_exempt", False) and entry.gps_location is None:
+    if job_requires_gps(job) and entry.gps_location is None:
         raise HTTPException(
             status_code=400,
             detail="Location is required for this job. Please allow location access and try again."
@@ -1495,14 +1131,11 @@ async def clock_in(entry: TimeEntryClockIn):
     if active_entry:
         raise HTTPException(status_code=400, detail="Worker already clocked in. Must clock out first.")
 
-    device_extra_flags = await check_device_worker_allowed(entry.worker_id, entry.job_id, entry.device_id, "clock_in")
-
     time_entry_dict = entry.dict()
     time_entry_dict["clock_in"] = datetime.utcnow()
     time_entry_dict["gps_location_in"] = entry.gps_location.dict() if entry.gps_location else None
     time_entry_dict["device_id_in"] = entry.device_id
-    base_flags = await build_suspicious_flags(entry.worker_id, entry.job_id, entry.device_id, entry.gps_location)
-    time_entry_dict["suspicious_flags"] = sorted(set(base_flags + device_extra_flags))
+    time_entry_dict["suspicious_flags"] = await build_suspicious_flags(entry.worker_id, entry.job_id, entry.device_id, entry.gps_location)
     time_entry_dict.pop("gps_location", None)
     time_entry_dict.pop("device_id", None)
 
@@ -1576,8 +1209,7 @@ async def clock_out(entry_id: str, clock_out_data: TimeEntryClockOut):
         raise HTTPException(status_code=404, detail="Active time entry not found")
 
     job = await db.jobs.find_one({"id": time_entry.get("job_id"), "archived": {"$ne": True}}) or {}
-    worker = await db.workers.find_one({"id": time_entry.get("worker_id")}) or {}
-    if job_requires_gps(job) and not worker.get("gps_exempt", False) and clock_out_data.gps_location is None:
+    if job_requires_gps(job) and clock_out_data.gps_location is None:
         raise HTTPException(
             status_code=400,
             detail="Location is required to clock out for this job. Please allow location access and try again."
@@ -1587,26 +1219,18 @@ async def clock_out(entry_id: str, clock_out_data: TimeEntryClockOut):
     clock_in_time = time_entry["clock_in"]
     duration = calculate_duration(clock_in_time, clock_out_time)
 
-    device_extra_flags = await check_device_worker_allowed(
-        time_entry.get("worker_id"),
-        time_entry.get("job_id"),
-        clock_out_data.device_id,
-        "clock_out"
-    )
-    base_flags = await build_suspicious_flags(
-        time_entry.get("worker_id"),
-        time_entry.get("job_id"),
-        clock_out_data.device_id,
-        clock_out_data.gps_location,
-        time_entry.get("suspicious_flags", [])
-    )
-
     update_dict = {
         "clock_out": clock_out_time,
         "duration_minutes": duration,
         "gps_location_out": clock_out_data.gps_location.dict() if clock_out_data.gps_location else None,
         "device_id_out": clock_out_data.device_id,
-        "suspicious_flags": sorted(set(base_flags + device_extra_flags)),
+        "suspicious_flags": await build_suspicious_flags(
+            time_entry.get("worker_id"),
+            time_entry.get("job_id"),
+            clock_out_data.device_id,
+            clock_out_data.gps_location,
+            time_entry.get("suspicious_flags", [])
+        ),
         "notes": clock_out_data.notes
     }
 
@@ -1957,7 +1581,6 @@ async def get_activity_map(
                 "worker_id": entry.get("worker_id"),
                 "worker_name": worker.get("name", "Unknown worker"),
                 "worker_type": worker.get("worker_type", worker.get("role", "worker")),
-                "worker_gps_exempt": worker.get("gps_exempt", False),
                 "job_id": entry.get("job_id"),
                 "job_name": job.get("name", "Unknown job"),
                 "job_client": job.get("client", ""),
@@ -1987,7 +1610,6 @@ async def get_activity_map(
                 "worker_id": entry.get("worker_id"),
                 "worker_name": worker.get("name", "Unknown worker"),
                 "worker_type": worker.get("worker_type", worker.get("role", "worker")),
-                "worker_gps_exempt": worker.get("gps_exempt", False),
                 "job_id": entry.get("job_id"),
                 "job_name": job.get("name", "Unknown job"),
                 "job_client": job.get("client", ""),
@@ -2585,154 +2207,6 @@ async def export_time_entries_csv(
         headers={"Content-Disposition": "attachment; filename=time_entries.csv"}
     )
 
-
-
-async def build_time_entries_export_rows(
-    worker_id: Optional[str] = None,
-    job_id: Optional[str] = None,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    worker_type: Optional[str] = None,
-    division: Optional[str] = None,
-    trade: Optional[str] = None,
-):
-    """Shared row builder for PDF timesheet exports."""
-    filter_dict = {"archived": {"$ne": True}}
-    if worker_id and worker_id != "all":
-        filter_dict["worker_id"] = worker_id
-    if job_id and job_id != "all":
-        filter_dict["job_id"] = job_id
-    if start_date:
-        start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
-        filter_dict["clock_in"] = {"$gte": start_dt}
-    if end_date:
-        end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
-        if "clock_in" in filter_dict:
-            filter_dict["clock_in"]["$lte"] = end_dt
-        else:
-            filter_dict["clock_in"] = {"$lte": end_dt}
-
-    time_entries = await db.time_entries.find(filter_dict).sort("clock_in", 1).to_list(5000)
-    worker_ids = list({entry.get("worker_id") for entry in time_entries if entry.get("worker_id")})
-    job_ids = list({entry.get("job_id") for entry in time_entries if entry.get("job_id")})
-
-    workers = await db.workers.find({"id": {"$in": worker_ids}}, {"_id": 0}).to_list(1000) if worker_ids else []
-    jobs = await db.jobs.find({"id": {"$in": job_ids}}, {"_id": 0}).to_list(1000) if job_ids else []
-    worker_lookup = {worker.get("id"): worker for worker in workers}
-    job_lookup = {job.get("id"): job for job in jobs}
-
-    rows = []
-    for entry in time_entries:
-        worker = worker_lookup.get(entry.get("worker_id"), {})
-        job = job_lookup.get(entry.get("job_id"), {})
-
-        if worker_type and worker_type != "all" and worker.get("worker_type", "worker") != worker_type:
-            continue
-        if division and division != "all" and worker.get("division", "") != division:
-            continue
-        if trade and trade != "all":
-            worker_trades = worker.get("trades") or ([worker.get("trade")] if worker.get("trade") else [])
-            if trade not in worker_trades:
-                continue
-
-        duration_hours = round((entry.get("duration_minutes", 0) or 0) / 60, 2)
-        rows.append({
-            "worker_name": worker.get("name", "Unknown Worker"),
-            "worker_type": worker.get("worker_type", "worker"),
-            "division": worker.get("division", ""),
-            "job_name": job.get("name", "Unknown Job"),
-            "job_client": job.get("client", ""),
-            "clock_in": format_uk_datetime_for_export(entry.get("clock_in")),
-            "clock_out": format_uk_datetime_for_export(entry.get("clock_out")) if entry.get("clock_out") else "Active",
-            "duration_hours": duration_hours,
-            "notes": entry.get("notes", ""),
-        })
-    return rows
-
-
-@api_router.get("/reports/export/time-entries/pdf")
-@api_router.get("/reports/export/time-entries.pdf")
-async def export_time_entries_pdf(
-    worker_id: Optional[str] = Query(None),
-    job_id: Optional[str] = Query(None),
-    start_date: Optional[str] = Query(None),
-    end_date: Optional[str] = Query(None),
-    worker_type: Optional[str] = Query(None),
-    division: Optional[str] = Query(None),
-    trade: Optional[str] = Query(None),
-    group_by: str = Query("worker"),
-    admin: str = Depends(verify_admin)
-):
-    """Export time entries as a PDF timesheet. Supports worker/job/division filters."""
-    try:
-        from reportlab.lib import colors
-        from reportlab.lib.pagesizes import landscape, A4
-        from reportlab.lib.styles import getSampleStyleSheet
-        from reportlab.lib.units import cm
-        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-    except Exception as exc:
-        logger.error("PDF export dependency error: %s", exc)
-        raise HTTPException(status_code=500, detail="PDF export is not available on this server. Check reportlab is installed.")
-
-    rows = await build_time_entries_export_rows(worker_id, job_id, start_date, end_date, worker_type, division, trade)
-
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), rightMargin=0.8*cm, leftMargin=0.8*cm, topMargin=0.8*cm, bottomMargin=0.8*cm)
-    styles = getSampleStyleSheet()
-    story = [
-        Paragraph("LDA Group - Time Sheet Export", styles["Title"]),
-        Paragraph(f"Date range: {start_date or 'All'} to {end_date or 'All'}", styles["Normal"]),
-        Paragraph(f"Generated: {get_uk_time().strftime('%d/%m/%Y %H:%M')} UK time", styles["Normal"]),
-        Spacer(1, 0.35*cm),
-    ]
-
-    if not rows:
-        story.append(Paragraph("No time entries found for the selected filters.", styles["Normal"]))
-    else:
-        if group_by == "job":
-            rows.sort(key=lambda row: (row["job_name"].lower(), row["worker_name"].lower(), row["clock_in"]))
-        else:
-            rows.sort(key=lambda row: (row["worker_name"].lower(), row["job_name"].lower(), row["clock_in"]))
-
-        table_data = [["Worker", "Division", "Job", "Client", "Clock In", "Clock Out", "Hours", "Notes"]]
-        total_hours = 0
-        for row in rows:
-            total_hours += row["duration_hours"] or 0
-            table_data.append([
-                Paragraph(row["worker_name"], styles["BodyText"]),
-                Paragraph(row["division"] or "-", styles["BodyText"]),
-                Paragraph(row["job_name"], styles["BodyText"]),
-                Paragraph(row["job_client"] or "-", styles["BodyText"]),
-                row["clock_in"],
-                row["clock_out"],
-                f"{row['duration_hours']:.2f}",
-                Paragraph(row["notes"] or "", styles["BodyText"]),
-            ])
-        table_data.append(["TOTAL", "", "", "", "", "", f"{total_hours:.2f}", ""])
-
-        table = Table(table_data, colWidths=[3.2*cm, 2.6*cm, 4.0*cm, 3.0*cm, 3.0*cm, 3.0*cm, 1.5*cm, 6.0*cm], repeatRows=1)
-        table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#d01f2f")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("GRID", (0, 0), (-1, -1), 0.35, colors.grey),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
-            ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#eeeeee")),
-            ("FONTSIZE", (0, 0), (-1, -1), 7),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#f7f7f7")]),
-        ]))
-        story.append(table)
-
-    doc.build(story)
-    buffer.seek(0)
-    filename = f"time_sheet_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.pdf"
-    return StreamingResponse(
-        buffer,
-        media_type="application/pdf",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
-    )
-
 @api_router.get("/reports/export/materials")
 async def export_materials_csv(
     worker_id: Optional[str] = Query(None),
@@ -3016,11 +2490,7 @@ async def get_schedule_entries(
     if division and division != "all":
         worker_filter["division"] = division
     if trade and trade != "all":
-        worker_filter["$or"] = [
-            {"trades": trade},
-            {"trades": {"$in": [trade]}},
-            {"trade": trade},
-        ]
+        worker_filter["$or"] = [{"trades": trade}, {"trade": trade}]
 
     worker_filters_applied = any([
         worker_type and worker_type != "all",
@@ -3292,17 +2762,8 @@ async def build_schedule_export_data(
         worker_filter["worker_type"] = worker_type
     if division and division != "all":
         worker_filter["division"] = division
-    if trades:
-        cleaned_trades = [
-            trade_value for trade_value in trades
-            if trade_value and trade_value != "all"
-        ]
-
-        if cleaned_trades:
-            worker_filter["$or"] = [
-                {"trades": {"$in": cleaned_trades}},
-                {"trade": {"$in": cleaned_trades}},
-            ]
+    if trade and trade != "all":
+        worker_filter["$or"] = [{"trades": trade}, {"trade": trade}]
 
     selected_worker_ids = []
     if worker_ids:
@@ -3392,14 +2853,7 @@ async def export_schedule(
     admin: str = Depends(verify_admin)
 ):
     """Export selected workers' schedule as CSV or PDF."""
-    export_data = await build_schedule_export_data(
-        start_date=start_date,
-        end_date=end_date,
-        worker_ids=worker_ids,
-        worker_type=worker_type,
-        division=division,
-        trades=[trade] if trade and trade != "all" else None,
-    )
+    export_data = await build_schedule_export_data(start_date, end_date, worker_ids, worker_type, division, trade)
     workers = export_data["workers"]
     entry_lookup = export_data["entry_lookup"]
 
@@ -3543,7 +2997,7 @@ async def api_info_endpoint():
         "main_endpoints": {
             "authentication": ["/api/admin/login", "/api/surveyors/login", "/api/surveyors/register"],
             "workers": ["/api/workers", "/api/workers/{id}", "/api/workers/{id}/archive"],
-            "jobs": ["/api/jobs", "/api/jobs/{id}", "/api/jobs/{id}/archive"],
+            "jobs": ["/api/jobs", "/api/jobs/{id}", "/api/jobs/{id}/archive", "/api/jobs/{id}/post-work-photos"],
             "time_tracking": ["/api/time-entries", "/api/time-entries/clock-in", "/api/time-entries/{id}/clock-out"],
             "materials": ["/api/materials", "/api/materials/{id}", "/api/materials/{id}/archive"],
             "quotes": ["/api/quotes", "/api/quotes/{id}", "/api/quotes/{id}/photos", "/api/quotes/{id}/download-pdf"],

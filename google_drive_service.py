@@ -1,238 +1,237 @@
-import os
 import io
+import json
 import logging
-import tempfile
-from typing import List, Dict, Optional
+import mimetypes
+import os
+import re
+from datetime import datetime
+from typing import Dict, List, Optional
+
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseUpload
-from google.auth.credentials import Credentials
-from google.oauth2 import service_account
-from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
+
+
 class GoogleDriveService:
-    """Google Drive service for uploading photos with API key authentication"""
-    
+    """Google Drive helper used by the LDA app.
+
+    This uses a Google service account so the backend can create folders and
+    upload worker photos into the shared job folder structure.
+
+    Supported environment variables:
+      - GOOGLE_SERVICE_ACCOUNT_JSON: full JSON service account key as one env var
+      - GOOGLE_SERVICE_ACCOUNT_FILE: path to the JSON key file
+      - GOOGLE_APPLICATION_CREDENTIALS: path to the JSON key file
+    """
+
     def __init__(self):
-        self.api_key = os.getenv("GOOGLE_DRIVE_API_KEY")
         self.service = None
-        
-        if not self.api_key:
-            logger.error("Google Drive API key not found in environment variables")
-            raise ValueError("GOOGLE_DRIVE_API_KEY environment variable is required")
-    
-    def get_service(self):
-        """Get or initialize Google Drive service"""
-        if not self.service:
+
+    def _load_credentials(self):
+        raw_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+        service_account_file = (
+            os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
+            or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        )
+
+        if raw_json:
             try:
-                # Use API key authentication for public file uploads
-                self.service = build('drive', 'v3', developerKey=self.api_key)
-                logger.info("Google Drive service initialized successfully")
-            except Exception as e:
-                logger.error(f"Failed to initialize Google Drive service: {e}")
-                raise
-        
-        return self.service
-    
-    async def upload_photo(
-        self, 
-        file_content: bytes, 
-        filename: str, 
-        quote_id: str,
-        content_type: str = "image/jpeg"
-    ) -> Dict[str, str]:
-        """
-        Upload a photo to Google Drive and return file info
-        
-        Args:
-            file_content: Binary content of the file
-            filename: Original filename
-            quote_id: Quote ID for organization
-            content_type: MIME type of the file
-        
-        Returns:
-            Dict containing file_id, filename, and share_url
-        """
-        try:
-            service = self.get_service()
-            
-            # Create unique filename with timestamp
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            drive_filename = f"{quote_id}_{timestamp}_{filename}"
-            
-            # File metadata
-            file_metadata = {
-                'name': drive_filename,
-                'description': f'Photo for quote {quote_id} - LDA Group',
-            }
-            
-            # Create media upload from bytes
-            media = MediaIoBaseUpload(
-                io.BytesIO(file_content),
-                mimetype=content_type,
-                resumable=True
+                info = json.loads(raw_json)
+            except json.JSONDecodeError:
+                # Some hosting dashboards store new lines escaped inside env vars.
+                info = json.loads(raw_json.replace("\\n", "\n"))
+            return service_account.Credentials.from_service_account_info(
+                info,
+                scopes=DRIVE_SCOPES,
             )
-            
-            # Upload file
-            result = service.files().create(
-                body=file_metadata,
-                media_body=media,
-                fields='id,name,webViewLink'
-            ).execute()
-            
-            file_id = result.get('id')
-            
-            # Make file publicly viewable
-            permission = {
-                'role': 'reader',
-                'type': 'anyone'
-            }
-            
-            service.permissions().create(
-                fileId=file_id,
-                body=permission
-            ).execute()
-            
-            # Get file info with shareable link
-            file_info = service.files().get(
-                fileId=file_id,
-                fields='id,name,webViewLink,webContentLink'
-            ).execute()
-            
-            logger.info(f"Successfully uploaded {filename} for quote {quote_id}")
-            
-            return {
-                'file_id': file_info['id'],
-                'filename': file_info['name'],
-                'original_filename': filename,
-                'share_url': file_info['webViewLink'],
-                'direct_url': file_info.get('webContentLink', ''),
-                'upload_time': datetime.utcnow().isoformat()
-            }
-            
-        except HttpError as error:
-            logger.error(f"Google Drive API error during upload: {error}")
-            raise Exception(f"Failed to upload to Google Drive: {error}")
-        except Exception as error:
-            logger.error(f"Unexpected error during upload: {error}")
-            raise Exception(f"Upload failed: {str(error)}")
-    
-    async def upload_multiple_photos(
-        self, 
-        files: List[Dict], 
-        quote_id: str
-    ) -> List[Dict]:
-        """
-        Upload multiple photos for a quote
-        
-        Args:
-            files: List of dicts with 'content', 'filename', 'content_type'
-            quote_id: Quote ID for organization
-        
-        Returns:
-            List of upload results
-        """
-        results = []
-        
-        for file_data in files:
-            try:
-                result = await self.upload_photo(
-                    file_content=file_data['content'],
-                    filename=file_data['filename'],
-                    quote_id=quote_id,
-                    content_type=file_data.get('content_type', 'image/jpeg')
-                )
-                results.append(result)
-            except Exception as error:
-                logger.error(f"Failed to upload {file_data['filename']}: {error}")
-                results.append({
-                    'filename': file_data['filename'],
-                    'error': str(error),
-                    'success': False
-                })
-        
-        return results
-    
-    async def get_quote_photos(self, quote_id: str) -> List[Dict]:
-        """
-        Get all photos for a specific quote
-        
-        Args:
-            quote_id: Quote ID to search for
-            
-        Returns:
-            List of photo information
-        """
-        try:
-            service = self.get_service()
-            
-            # Search for files with quote_id in name
-            query = f"name contains '{quote_id}_'"
-            
-            results = service.files().list(
-                q=query,
-                fields='files(id,name,webViewLink,webContentLink,createdTime)',
-                pageSize=50
-            ).execute()
-            
-            files = results.get('files', [])
-            
-            photos = []
-            for file in files:
-                photos.append({
-                    'file_id': file['id'],
-                    'filename': file['name'],
-                    'share_url': file['webViewLink'],
-                    'direct_url': file.get('webContentLink', ''),
-                    'created_time': file['createdTime']
-                })
-            
-            return photos
-            
-        except HttpError as error:
-            logger.error(f"Google Drive API error retrieving photos: {error}")
-            return []
-        except Exception as error:
-            logger.error(f"Unexpected error retrieving photos: {error}")
-            return []
-    
-    def validate_photo_file(self, content: bytes, filename: str) -> bool:
-        """
-        Validate that the uploaded file is a valid JPEG image
-        
-        Args:
-            content: File content bytes
-            filename: Original filename
-            
-        Returns:
-            True if valid, False otherwise
-        """
-        # Check file extension
-        if not filename.lower().endswith(('.jpg', '.jpeg')):
-            return False
-        
-        # Check file size (max 10MB)
-        if len(content) > 10 * 1024 * 1024:
-            return False
-        
-        # Check JPEG magic number
-        if len(content) < 10:
-            return False
-        
-        # JPEG files start with FFD8
-        if content[:2] != b'\xff\xd8':
-            return False
-        
-        return True
 
-# Global service instance - lazy initialization
-google_drive_service = None
+        if service_account_file:
+            return service_account.Credentials.from_service_account_file(
+                service_account_file,
+                scopes=DRIVE_SCOPES,
+            )
 
-def get_google_drive_service():
-    """Get or create Google Drive service instance"""
-    global google_drive_service
-    if google_drive_service is None:
-        google_drive_service = GoogleDriveService()
-    return google_drive_service
+        raise ValueError(
+            "Google Drive service account credentials are missing. Set "
+            "GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_SERVICE_ACCOUNT_FILE."
+        )
+
+    def get_service(self):
+        if self.service is None:
+            credentials = self._load_credentials()
+            self.service = build("drive", "v3", credentials=credentials, cache_discovery=False)
+            logger.info("Google Drive service initialised")
+        return self.service
+
+    @staticmethod
+    def extract_folder_id(value: Optional[str]) -> Optional[str]:
+        """Accept a raw folder ID or a Google Drive folder URL and return the ID."""
+        if not value:
+            return None
+
+        value = str(value).strip()
+        if not value:
+            return None
+
+        # Already looks like a Drive ID.
+        if re.match(r"^[A-Za-z0-9_-]{20,}$", value):
+            return value
+
+        patterns = [
+            r"/folders/([A-Za-z0-9_-]+)",
+            r"[?&]id=([A-Za-z0-9_-]+)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, value)
+            if match:
+                return match.group(1)
+        return None
+
+    @staticmethod
+    def safe_filename(filename: str) -> str:
+        filename = os.path.basename(filename or "photo.jpg")
+        filename = re.sub(r"[^A-Za-z0-9._ -]", "_", filename)
+        filename = re.sub(r"\s+", " ", filename).strip()
+        return filename or "photo.jpg"
+
+    def find_child_folder(self, parent_id: str, folder_name: str) -> Optional[Dict]:
+        service = self.get_service()
+        escaped_name = folder_name.replace("'", "\\'")
+        query = (
+            f"'{parent_id}' in parents and "
+            "mimeType='application/vnd.google-apps.folder' and "
+            f"name='{escaped_name}' and trashed=false"
+        )
+        result = service.files().list(
+            q=query,
+            spaces="drive",
+            fields="files(id,name,webViewLink)",
+            pageSize=10,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        ).execute()
+        files = result.get("files", [])
+        return files[0] if files else None
+
+    def create_child_folder(self, parent_id: str, folder_name: str) -> Dict:
+        service = self.get_service()
+        metadata = {
+            "name": folder_name,
+            "mimeType": "application/vnd.google-apps.folder",
+            "parents": [parent_id],
+        }
+        return service.files().create(
+            body=metadata,
+            fields="id,name,webViewLink",
+            supportsAllDrives=True,
+        ).execute()
+
+    def get_or_create_child_folder(self, parent_id: str, folder_name: str) -> Dict:
+        existing = self.find_child_folder(parent_id, folder_name)
+        if existing:
+            return existing
+        return self.create_child_folder(parent_id, folder_name)
+
+    def get_or_create_nested_folder(self, parent_id: str, folder_names: List[str]) -> Dict:
+        current_parent = parent_id
+        current_folder = None
+        for folder_name in folder_names:
+            current_folder = self.get_or_create_child_folder(current_parent, folder_name)
+            current_parent = current_folder["id"]
+        return current_folder
+
+    def get_post_works_images_folder(self, job_folder_id: str) -> Dict:
+        return self.get_or_create_nested_folder(
+            job_folder_id,
+            [
+                "007: Site Deliverables",
+                "04: Site Images Pre & Post",
+                "02: Post Works Images",
+            ],
+        )
+
+    def upload_file_to_folder(
+        self,
+        *,
+        folder_id: str,
+        file_content: bytes,
+        filename: str,
+        content_type: Optional[str] = None,
+        description: str = "",
+    ) -> Dict:
+        service = self.get_service()
+        clean_filename = self.safe_filename(filename)
+        content_type = content_type or mimetypes.guess_type(clean_filename)[0] or "application/octet-stream"
+
+        metadata = {
+            "name": clean_filename,
+            "parents": [folder_id],
+            "description": description,
+        }
+        media = MediaIoBaseUpload(
+            io.BytesIO(file_content),
+            mimetype=content_type,
+            resumable=True,
+        )
+
+        uploaded = service.files().create(
+            body=metadata,
+            media_body=media,
+            fields="id,name,webViewLink,webContentLink,mimeType,createdTime",
+            supportsAllDrives=True,
+        ).execute()
+
+        return {
+            "file_id": uploaded.get("id"),
+            "filename": uploaded.get("name"),
+            "mime_type": uploaded.get("mimeType"),
+            "share_url": uploaded.get("webViewLink"),
+            "direct_url": uploaded.get("webContentLink", ""),
+            "created_time": uploaded.get("createdTime"),
+        }
+
+    def upload_post_work_image(
+        self,
+        *,
+        job_folder_id: str,
+        file_content: bytes,
+        filename: str,
+        content_type: Optional[str] = None,
+        worker_name: str = "",
+        job_name: str = "",
+    ) -> Dict:
+        target_folder = self.get_post_works_images_folder(job_folder_id)
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        clean_filename = self.safe_filename(filename)
+        drive_filename = f"POST_{timestamp}_{clean_filename}"
+
+        description_bits = ["LDA worker post works image"]
+        if job_name:
+            description_bits.append(f"Job: {job_name}")
+        if worker_name:
+            description_bits.append(f"Uploaded by: {worker_name}")
+
+        uploaded = self.upload_file_to_folder(
+            folder_id=target_folder["id"],
+            file_content=file_content,
+            filename=drive_filename,
+            content_type=content_type,
+            description=" | ".join(description_bits),
+        )
+        uploaded["folder_id"] = target_folder["id"]
+        uploaded["folder_name"] = target_folder.get("name")
+        uploaded["folder_link"] = target_folder.get("webViewLink")
+        return uploaded
+
+
+def get_google_drive_service() -> Optional[GoogleDriveService]:
+    try:
+        return GoogleDriveService()
+    except Exception as exc:
+        logger.error("Google Drive service unavailable: %s", exc)
+        return None

@@ -3204,7 +3204,7 @@ async def build_schedule_export_data(
     worker_ids: Optional[str] = None,
     worker_type: Optional[str] = None,
     division: Optional[str] = None,
-    trades: Optional[List[str]] = None
+    trade: Optional[str] = None
 ):
     """Build schedule rows for CSV/PDF export and worker schedule views."""
     try:

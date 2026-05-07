@@ -191,6 +191,7 @@ class WorkerUpdate(BaseModel):
     password: Optional[str] = None
     active: Optional[bool] = None
     archived: Optional[bool] = None
+    gps_exempt: Optional[bool] = None
 
 class Job(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))

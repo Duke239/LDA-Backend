@@ -3217,7 +3217,7 @@ async def build_schedule_export_data(
     division: Optional[str] = None,
     trade: Optional[str] = None
 ):
-    """Build schedule rows for CSV/PDF export and worker schedule views."""
+    """Build schedule rows for CSV/PDF export and worker/job schedule views."""
     try:
         datetime.fromisoformat(start_date)
         datetime.fromisoformat(end_date)
@@ -3240,33 +3240,71 @@ async def build_schedule_export_data(
 
     workers = await db.workers.find(worker_filter).to_list(1000)
     workers.sort(key=lambda worker: worker.get("name", ""))
+    allowed_worker_ids = [worker.get("id") for worker in workers if worker.get("id")]
 
-    schedule_filter = {"scheduled_date": {"$gte": start_date, "$lte": end_date}, "archived": {"$ne": True}}
-    if selected_worker_ids:
-        schedule_filter["worker_id"] = {"$in": selected_worker_ids}
+    schedule_filter = {
+        "scheduled_date": {"$gte": start_date, "$lte": end_date},
+        "archived": {"$ne": True},
+    }
+
+    # Important for job exports: when filters or selected workers are applied, only export
+    # allocations for the workers that survived those filters.
+    if allowed_worker_ids:
+        schedule_filter["worker_id"] = {"$in": allowed_worker_ids}
+    else:
+        schedule_filter["worker_id"] = {"$in": []}
 
     entries = await db.schedule_entries.find(schedule_filter).to_list(1000)
     job_ids = list({entry.get("job_id") for entry in entries if entry.get("job_id")})
     jobs = await db.jobs.find({"id": {"$in": job_ids}}).to_list(1000) if job_ids else []
     job_lookup = {job["id"]: job for job in jobs if "id" in job}
+    worker_lookup = {worker["id"]: worker for worker in workers if "id" in worker}
 
     entry_lookup = {}
+    job_day_lookup = {}
     enriched_entries = []
+
     for entry in entries:
         entry.pop("_id", None)
         job = job_lookup.get(entry.get("job_id"), {})
+        worker_match = worker_lookup.get(entry.get("worker_id"), {})
+
         entry["job_name"] = job.get("name", "Unknown")
         entry["job_client"] = job.get("client", "")
-        worker_match = next((worker for worker in workers if worker.get("id") == entry.get("worker_id")), {})
         entry["job_location"] = job.get("location", "")
-        entry["worker_name"] = worker_match.get("name", "")
+        entry["worker_name"] = worker_match.get("name", "Unknown")
         entry["worker_type"] = worker_match.get("worker_type", "worker")
         entry["worker_division"] = worker_match.get("division", "")
         entry["worker_trades"] = worker_match.get("trades", [worker_match.get("trade", "")] if worker_match.get("trade") else [])
+
         enriched_entries.append(entry)
         entry_lookup[(entry.get("worker_id"), entry.get("scheduled_date"))] = entry
+        job_day_lookup.setdefault((entry.get("job_id"), entry.get("scheduled_date")), []).append(entry)
 
-    return {"workers": workers, "entries": enriched_entries, "entry_lookup": entry_lookup}
+    export_jobs = []
+    seen_job_ids = set()
+    for entry in enriched_entries:
+        job_id_value = entry.get("job_id")
+        if not job_id_value or job_id_value in seen_job_ids:
+            continue
+        job = job_lookup.get(job_id_value, {})
+        export_jobs.append({
+            "id": job_id_value,
+            "name": job.get("name", entry.get("job_name", "Unknown")),
+            "client": job.get("client", entry.get("job_client", "")),
+            "location": job.get("location", entry.get("job_location", "")),
+        })
+        seen_job_ids.add(job_id_value)
+
+    export_jobs.sort(key=lambda job: job.get("name", ""))
+
+    return {
+        "workers": workers,
+        "jobs": export_jobs,
+        "entries": enriched_entries,
+        "entry_lookup": entry_lookup,
+        "job_day_lookup": job_day_lookup,
+    }
 
 @api_router.get("/schedule/worker/{worker_id}", response_model=List[Dict[str, Any]])
 async def get_worker_schedule_entries(
@@ -3316,13 +3354,20 @@ async def export_schedule(
     worker_type: Optional[str] = Query(None),
     division: Optional[str] = Query(None),
     trade: Optional[str] = Query(None),
+    group_by: str = Query("worker"),
     format: str = Query("csv"),
     admin: str = Depends(verify_admin)
 ):
-    """Export selected workers' schedule as CSV or PDF."""
+    """Export the weekly schedule as CSV or PDF, grouped by worker or by job."""
+    group_by = (group_by or "worker").lower().strip()
+    if group_by not in ["worker", "job"]:
+        group_by = "worker"
+
     export_data = await build_schedule_export_data(start_date, end_date, worker_ids, worker_type, division, trade)
     workers = export_data["workers"]
+    jobs = export_data["jobs"]
     entry_lookup = export_data["entry_lookup"]
+    job_day_lookup = export_data["job_day_lookup"]
 
     start_dt = datetime.fromisoformat(start_date)
     end_dt = datetime.fromisoformat(end_date)
@@ -3332,7 +3377,7 @@ async def export_schedule(
         date_list.append(cursor.strftime("%Y-%m-%d"))
         cursor += timedelta(days=1)
 
-    def cell_text(worker_id: str, day: str) -> str:
+    def worker_cell_text(worker_id: str, day: str) -> str:
         entry = entry_lookup.get((worker_id, day))
         if not entry:
             return "Unallocated"
@@ -3344,6 +3389,27 @@ async def export_schedule(
         if entry.get("notes"):
             lines.append(f"Notes: {entry.get('notes')}")
         return " | ".join(lines)
+
+    def job_cell_text(job_id: str, day: str) -> str:
+        entries = job_day_lookup.get((job_id, day), [])
+        if not entries:
+            return "Unallocated"
+
+        lines = []
+        for entry in sorted(entries, key=lambda item: item.get("worker_name", "")):
+            worker_line = entry.get("worker_name", "Unknown worker")
+            extras = []
+            if entry.get("worker_division"):
+                extras.append(entry.get("worker_division"))
+            if entry.get("notes"):
+                extras.append(f"Notes: {entry.get('notes')}")
+            if extras:
+                worker_line += " (" + "; ".join(extras) + ")"
+            lines.append(worker_line)
+        return " | ".join(lines)
+
+    export_title = "LDA Group - Weekly Job Schedule" if group_by == "job" else "LDA Group - Weekly Worker Schedule"
+    first_column = "Job" if group_by == "job" else "Worker"
 
     if format.lower() == "pdf":
         try:
@@ -3360,22 +3426,36 @@ async def export_schedule(
         doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), rightMargin=1*cm, leftMargin=1*cm, topMargin=1*cm, bottomMargin=1*cm)
         styles = getSampleStyleSheet()
         story = [
-            Paragraph("LDA Group - Weekly Worker Schedule", styles["Title"]),
+            Paragraph(export_title, styles["Title"]),
             Paragraph(f"{start_date} to {end_date}", styles["Normal"]),
             Spacer(1, 0.4*cm),
         ]
 
-        headers = ["Worker"] + [datetime.fromisoformat(day).strftime("%a %d %b") for day in date_list]
+        headers = [first_column] + [datetime.fromisoformat(day).strftime("%a %d %b") for day in date_list]
         table_data = [headers]
-        for worker in workers:
-            row = [worker.get("name", "Unknown")]
-            for day in date_list:
-                text = cell_text(worker.get("id"), day).replace(" | ", "<br/>")
-                row.append(Paragraph(text, styles["BodyText"]))
-            table_data.append(row)
+
+        if group_by == "job":
+            for job in jobs:
+                row_title_parts = [job.get("name", "Unknown")]
+                if job.get("client"):
+                    row_title_parts.append(job.get("client"))
+                if job.get("location"):
+                    row_title_parts.append(job.get("location"))
+                row = [Paragraph("<br/>".join(row_title_parts), styles["BodyText"])]
+                for day in date_list:
+                    row.append(Paragraph(job_cell_text(job.get("id"), day).replace(" | ", "<br/>"), styles["BodyText"]))
+                table_data.append(row)
+        else:
+            for worker in workers:
+                row = [worker.get("name", "Unknown")]
+                for day in date_list:
+                    text = worker_cell_text(worker.get("id"), day).replace(" | ", "<br/>")
+                    row.append(Paragraph(text, styles["BodyText"]))
+                table_data.append(row)
 
         if len(table_data) == 1:
-            table_data.append(["No selected workers"] + ["" for _ in date_list])
+            empty_label = "No scheduled jobs" if group_by == "job" else "No selected workers"
+            table_data.append([empty_label] + ["" for _ in date_list])
 
         col_widths = [3.2*cm] + [3.1*cm for _ in date_list]
         table = Table(table_data, colWidths=col_widths, repeatRows=1)
@@ -3391,21 +3471,31 @@ async def export_schedule(
         story.append(table)
         doc.build(story)
         buffer.seek(0)
-        filename = f"worker_schedule_{start_date}_to_{end_date}.pdf"
+        filename = f"{group_by}_schedule_{start_date}_to_{end_date}.pdf"
         return StreamingResponse(buffer, media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename={filename}"})
 
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["LDA Group - Weekly Worker Schedule"])
+    writer.writerow([export_title])
     writer.writerow(["Date range", start_date, "to", end_date])
     writer.writerow([])
-    writer.writerow(["Worker"] + [datetime.fromisoformat(day).strftime("%a %d %b %Y") for day in date_list])
+    writer.writerow([first_column] + [datetime.fromisoformat(day).strftime("%a %d %b %Y") for day in date_list])
 
-    for worker in workers:
-        writer.writerow([worker.get("name", "Unknown")] + [cell_text(worker.get("id"), day) for day in date_list])
+    if group_by == "job":
+        for job in jobs:
+            job_label_parts = [job.get("name", "Unknown")]
+            if job.get("client"):
+                job_label_parts.append(job.get("client"))
+            if job.get("location"):
+                job_label_parts.append(job.get("location"))
+            job_label = " | ".join(job_label_parts)
+            writer.writerow([job_label] + [job_cell_text(job.get("id"), day) for day in date_list])
+    else:
+        for worker in workers:
+            writer.writerow([worker.get("name", "Unknown")] + [worker_cell_text(worker.get("id"), day) for day in date_list])
 
     output.seek(0)
-    filename = f"worker_schedule_{start_date}_to_{end_date}.csv"
+    filename = f"{group_by}_schedule_{start_date}_to_{end_date}.csv"
     return StreamingResponse(
         io.BytesIO(output.getvalue().encode("utf-8-sig")),
         media_type="text/csv",

@@ -382,6 +382,74 @@ class GanttShiftProjectRequest(BaseModel):
     shift_schedule: bool = True
 
 
+class FinanceRecord(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    job_id: str
+    application_marker_id: Optional[str] = None
+    type: str = "application"  # application, invoice, payment, retention, adjustment
+    label: str = ""
+    submitted_date: Optional[str] = None
+    submitted_value: float = 0.0
+    certified_value: float = 0.0
+    invoice_number: str = ""
+    invoice_date: Optional[str] = None
+    invoice_value: float = 0.0
+    payment_due_date: Optional[str] = None
+    paid_date: Optional[str] = None
+    paid_value: float = 0.0
+    retention_percent: float = 0.0
+    retention_value: float = 0.0
+    retention_due_date: Optional[str] = None
+    retention_paid_date: Optional[str] = None
+    status: str = "draft"  # draft, submitted, certified, invoiced, part_paid, paid, overdue, disputed
+    notes: str = ""
+    created_date: datetime = Field(default_factory=datetime.utcnow)
+    updated_date: Optional[datetime] = None
+    archived: bool = False
+
+class FinanceRecordCreate(BaseModel):
+    job_id: str
+    application_marker_id: Optional[str] = None
+    type: str = "application"
+    label: str = ""
+    submitted_date: Optional[str] = None
+    submitted_value: float = 0.0
+    certified_value: float = 0.0
+    invoice_number: str = ""
+    invoice_date: Optional[str] = None
+    invoice_value: float = 0.0
+    payment_due_date: Optional[str] = None
+    paid_date: Optional[str] = None
+    paid_value: float = 0.0
+    retention_percent: float = 0.0
+    retention_value: float = 0.0
+    retention_due_date: Optional[str] = None
+    retention_paid_date: Optional[str] = None
+    status: str = "draft"
+    notes: str = ""
+
+class FinanceRecordUpdate(BaseModel):
+    application_marker_id: Optional[str] = None
+    type: Optional[str] = None
+    label: Optional[str] = None
+    submitted_date: Optional[str] = None
+    submitted_value: Optional[float] = None
+    certified_value: Optional[float] = None
+    invoice_number: Optional[str] = None
+    invoice_date: Optional[str] = None
+    invoice_value: Optional[float] = None
+    payment_due_date: Optional[str] = None
+    paid_date: Optional[str] = None
+    paid_value: Optional[float] = None
+    retention_percent: Optional[float] = None
+    retention_value: Optional[float] = None
+    retention_due_date: Optional[str] = None
+    retention_paid_date: Optional[str] = None
+    status: Optional[str] = None
+    notes: Optional[str] = None
+    archived: Optional[bool] = None
+
+
 class AdminLogin(BaseModel):
     username: str
     password: str
@@ -3786,6 +3854,297 @@ async def export_schedule(
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
 
+
+
+# ==================== FINANCE SECTION ENDPOINTS ====================
+
+def finance_to_number(value: Any, fallback: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return fallback
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def parse_iso_date_safe(value: Optional[str]) -> Optional[date]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).date()
+    except Exception:
+        return None
+
+
+def section_finance_values(section: Dict[str, Any]) -> Dict[str, float]:
+    labour = finance_to_number(section.get("labour_value"))
+    material = finance_to_number(section.get("material_value"))
+    subcontractor = finance_to_number(section.get("subcontractor_value"))
+    other = finance_to_number(section.get("other_value"))
+    calculated_total = labour + material + subcontractor + other
+    stored_total = finance_to_number(section.get("section_value") or section.get("total_value") or section.get("value"))
+    total = calculated_total if calculated_total > 0 else stored_total
+    progress = max(0.0, min(100.0, finance_to_number(section.get("progress_percent"))))
+    earned = total * (progress / 100.0)
+    return {
+        "labour_value": round(labour, 2),
+        "material_value": round(material, 2),
+        "subcontractor_value": round(subcontractor, 2),
+        "other_value": round(other, 2),
+        "section_value": round(total, 2),
+        "progress_percent": round(progress, 2),
+        "earned_value": round(earned, 2),
+        "remaining_value": round(max(0.0, total - earned), 2),
+    }
+
+
+def section_planned_value_by_date(section: Dict[str, Any], marker_date: Optional[date]) -> float:
+    if not marker_date:
+        return 0.0
+    values = section_finance_values(section)
+    section_value = values["section_value"]
+    if section_value <= 0:
+        return 0.0
+    start = parse_iso_date_safe(section.get("start_date"))
+    end = parse_iso_date_safe(section.get("end_date")) or start
+    if not start or not end:
+        return 0.0
+    if end < start:
+        start, end = end, start
+    if marker_date < start:
+        return 0.0
+    if marker_date >= end:
+        return section_value
+    total_days = max(1, (end - start).days + 1)
+    days_to_marker = max(0, (marker_date - start).days + 1)
+    ratio = max(0.0, min(1.0, days_to_marker / total_days))
+    return round(section_value * ratio, 2)
+
+
+def normalise_finance_marker(marker: Dict[str, Any]) -> Dict[str, Any]:
+    marker_type = str(marker.get("type") or marker.get("marker_type") or "application").strip().lower()
+    marker_id = marker.get("id") or str(uuid.uuid4())
+    label = marker.get("label") or marker.get("name") or marker_type.replace("_", " ").title()
+    return {
+        **marker,
+        "id": marker_id,
+        "type": marker_type,
+        "label": label,
+        "date": marker.get("date") or marker.get("marker_date") or "",
+        "value_mode": marker.get("value_mode") or "auto",
+        "manual_value": finance_to_number(marker.get("manual_value")),
+        "notes": marker.get("notes") or "",
+    }
+
+
+async def build_finance_project_summary(job_id: str) -> Dict[str, Any]:
+    job = await db.jobs.find_one({"id": job_id, "archived": {"$ne": True}}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    sections = []
+    for section in job.get("gantt_sections") or []:
+        values = section_finance_values(section)
+        sections.append({
+            "id": section.get("id"),
+            "name": section.get("name", "Section"),
+            "start_date": section.get("start_date", ""),
+            "end_date": section.get("end_date", ""),
+            "status": section.get("status", ""),
+            **values,
+        })
+
+    records = await db.finance_records.find({"job_id": job_id, "archived": {"$ne": True}}, {"_id": 0}).to_list(1000)
+    total_value = round(sum(item["section_value"] for item in sections), 2)
+    earned_value = round(sum(item["earned_value"] for item in sections), 2)
+    remaining_value = round(max(0.0, total_value - earned_value), 2)
+    submitted_to_date = round(sum(finance_to_number(item.get("submitted_value")) for item in records), 2)
+    certified_to_date = round(sum(finance_to_number(item.get("certified_value")) for item in records), 2)
+    invoiced_to_date = round(sum(finance_to_number(item.get("invoice_value")) for item in records), 2)
+    paid_to_date = round(sum(finance_to_number(item.get("paid_value")) for item in records), 2)
+    retention_held = round(sum(finance_to_number(item.get("retention_value")) for item in records if not item.get("retention_paid_date")), 2)
+    outstanding = round(max(0.0, invoiced_to_date - paid_to_date), 2)
+
+    markers = [normalise_finance_marker(marker) for marker in (job.get("commercial_markers") or [])]
+    application_forecast = []
+    for marker in markers:
+        if marker.get("type") != "application":
+            continue
+        marker_date = parse_iso_date_safe(marker.get("date"))
+        planned = round(sum(section_planned_value_by_date(section, marker_date) for section in (job.get("gantt_sections") or [])), 2)
+        manual_value = finance_to_number(marker.get("manual_value"))
+        value_mode = marker.get("value_mode") or "auto"
+        forecast_value = manual_value if value_mode == "manual" and manual_value > 0 else planned
+        linked_records = [record for record in records if record.get("application_marker_id") == marker.get("id")]
+        submitted = round(sum(finance_to_number(item.get("submitted_value")) for item in linked_records), 2)
+        certified = round(sum(finance_to_number(item.get("certified_value")) for item in linked_records), 2)
+        invoiced = round(sum(finance_to_number(item.get("invoice_value")) for item in linked_records), 2)
+        paid = round(sum(finance_to_number(item.get("paid_value")) for item in linked_records), 2)
+        shortfall = round(max(0.0, forecast_value - earned_value), 2)
+        application_forecast.append({
+            "marker_id": marker.get("id"),
+            "label": marker.get("label"),
+            "date": marker.get("date"),
+            "value_mode": value_mode,
+            "planned_value": planned,
+            "forecast_value": round(forecast_value, 2),
+            "earned_value": earned_value,
+            "shortfall": shortfall,
+            "suggested_claim": round(min(earned_value, forecast_value), 2),
+            "submitted_value": submitted,
+            "certified_value": certified,
+            "invoice_value": invoiced,
+            "paid_value": paid,
+            "status": "at_risk" if shortfall > 0 else "on_track",
+        })
+    application_forecast.sort(key=lambda item: item.get("date") or "")
+
+    next_application = None
+    today = datetime.utcnow().date()
+    future_apps = [item for item in application_forecast if parse_iso_date_safe(item.get("date")) and parse_iso_date_safe(item.get("date")) >= today]
+    if future_apps:
+        next_application = future_apps[0]
+    elif application_forecast:
+        next_application = application_forecast[-1]
+
+    return {
+        "job": {
+            "id": job.get("id"),
+            "name": job.get("name"),
+            "client": job.get("client", ""),
+            "location": job.get("location", ""),
+            "quoted_cost": job.get("quoted_cost", 0),
+            "planned_start_date": job.get("planned_start_date"),
+            "planned_end_date": job.get("planned_end_date"),
+            "status": job.get("status", "active"),
+        },
+        "sections": sections,
+        "markers": markers,
+        "application_forecast": application_forecast,
+        "next_application": next_application,
+        "records": records,
+        "summary": {
+            "contract_value": total_value,
+            "earned_value": earned_value,
+            "remaining_value": remaining_value,
+            "submitted_to_date": submitted_to_date,
+            "certified_to_date": certified_to_date,
+            "invoiced_to_date": invoiced_to_date,
+            "paid_to_date": paid_to_date,
+            "retention_held": retention_held,
+            "outstanding": outstanding,
+            "application_risk": next_application.get("shortfall", 0) if next_application else 0,
+        },
+    }
+
+
+@api_router.get("/finance/projects")
+async def get_finance_projects(admin: str = Depends(verify_admin)):
+    """Return active projects that can be reviewed in the Finance section."""
+    jobs = await db.jobs.find({"archived": {"$ne": True}}, {"_id": 0}).sort("name", 1).to_list(1000)
+    result = []
+    for job in jobs:
+        sections = job.get("gantt_sections") or []
+        section_value = round(sum(section_finance_values(section)["section_value"] for section in sections), 2)
+        earned_value = round(sum(section_finance_values(section)["earned_value"] for section in sections), 2)
+        result.append({
+            "id": job.get("id"),
+            "name": job.get("name"),
+            "client": job.get("client", ""),
+            "location": job.get("location", ""),
+            "status": job.get("status", "active"),
+            "include_in_gantt": job.get("include_in_gantt", False),
+            "section_count": len(sections),
+            "section_value": section_value,
+            "earned_value": earned_value,
+            "commercial_marker_count": len(job.get("commercial_markers") or []),
+        })
+    return result
+
+
+@api_router.get("/finance/project/{job_id}/summary")
+async def get_finance_project_summary(job_id: str, admin: str = Depends(verify_admin)):
+    return await build_finance_project_summary(job_id)
+
+
+@api_router.get("/finance/project/{job_id}/records")
+async def get_finance_records(job_id: str, admin: str = Depends(verify_admin)):
+    records = await db.finance_records.find({"job_id": job_id, "archived": {"$ne": True}}, {"_id": 0}).sort("created_date", -1).to_list(1000)
+    return records
+
+
+@api_router.post("/finance/records", response_model=FinanceRecord)
+async def create_finance_record(record: FinanceRecordCreate, admin: str = Depends(verify_admin)):
+    job = await db.jobs.find_one({"id": record.job_id, "archived": {"$ne": True}})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    record_dict = record.dict()
+    if finance_to_number(record_dict.get("retention_value")) <= 0 and finance_to_number(record_dict.get("retention_percent")) > 0:
+        base_value = finance_to_number(record_dict.get("invoice_value")) or finance_to_number(record_dict.get("certified_value")) or finance_to_number(record_dict.get("submitted_value"))
+        record_dict["retention_value"] = round(base_value * (finance_to_number(record_dict.get("retention_percent")) / 100.0), 2)
+    record_obj = FinanceRecord(**record_dict)
+    await db.finance_records.insert_one(record_obj.dict())
+    return record_obj
+
+
+@api_router.put("/finance/records/{record_id}", response_model=FinanceRecord)
+async def update_finance_record(record_id: str, record_update: FinanceRecordUpdate, admin: str = Depends(verify_admin)):
+    existing = await db.finance_records.find_one({"id": record_id, "archived": {"$ne": True}})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Finance record not found")
+    update_dict = {k: v for k, v in record_update.dict().items() if v is not None}
+    if update_dict:
+        base_value = finance_to_number(update_dict.get("invoice_value", existing.get("invoice_value"))) or finance_to_number(update_dict.get("certified_value", existing.get("certified_value"))) or finance_to_number(update_dict.get("submitted_value", existing.get("submitted_value")))
+        retention_percent = finance_to_number(update_dict.get("retention_percent", existing.get("retention_percent")))
+        if "retention_value" not in update_dict and retention_percent > 0 and base_value > 0:
+            update_dict["retention_value"] = round(base_value * (retention_percent / 100.0), 2)
+        update_dict["updated_date"] = datetime.utcnow()
+        result = await db.finance_records.update_one({"id": record_id}, {"$set": update_dict})
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Finance record not found")
+    updated = await db.finance_records.find_one({"id": record_id}, {"_id": 0})
+    return FinanceRecord(**updated)
+
+
+@api_router.delete("/finance/records/{record_id}")
+async def delete_finance_record(record_id: str, admin: str = Depends(verify_admin)):
+    result = await db.finance_records.update_one({"id": record_id}, {"$set": {"archived": True, "updated_date": datetime.utcnow()}})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Finance record not found")
+    return {"message": "Finance record archived successfully"}
+
+
+@api_router.get("/finance/project/{job_id}/export.csv")
+async def export_finance_project_csv(job_id: str, admin: str = Depends(verify_admin)):
+    data = await build_finance_project_summary(job_id)
+    output = io.StringIO()
+    writer = csv.writer(output)
+    job = data["job"]
+    summary = data["summary"]
+    writer.writerow(["LDA Group - Finance Summary"])
+    writer.writerow(["Project", job.get("name", "")])
+    writer.writerow(["Client", job.get("client", "")])
+    writer.writerow([])
+    writer.writerow(["Contract Value", summary["contract_value"]])
+    writer.writerow(["Earned Value", summary["earned_value"]])
+    writer.writerow(["Remaining Value", summary["remaining_value"]])
+    writer.writerow(["Submitted To Date", summary["submitted_to_date"]])
+    writer.writerow(["Certified To Date", summary["certified_to_date"]])
+    writer.writerow(["Invoiced To Date", summary["invoiced_to_date"]])
+    writer.writerow(["Paid To Date", summary["paid_to_date"]])
+    writer.writerow(["Outstanding", summary["outstanding"]])
+    writer.writerow(["Retention Held", summary["retention_held"]])
+    writer.writerow([])
+    writer.writerow(["Section", "Start", "End", "Labour", "Materials", "Subcontractor", "Other", "Total", "Progress %", "Earned", "Remaining"])
+    for section in data["sections"]:
+        writer.writerow([section.get("name"), section.get("start_date"), section.get("end_date"), section.get("labour_value"), section.get("material_value"), section.get("subcontractor_value"), section.get("other_value"), section.get("section_value"), section.get("progress_percent"), section.get("earned_value"), section.get("remaining_value")])
+    writer.writerow([])
+    writer.writerow(["Application", "Date", "Planned", "Earned", "Shortfall", "Suggested Claim", "Submitted", "Certified", "Invoiced", "Paid", "Status"])
+    for app in data["application_forecast"]:
+        writer.writerow([app.get("label"), app.get("date"), app.get("forecast_value"), app.get("earned_value"), app.get("shortfall"), app.get("suggested_claim"), app.get("submitted_value"), app.get("certified_value"), app.get("invoice_value"), app.get("paid_value"), app.get("status")])
+    output.seek(0)
+    filename = f"finance_{str(job.get('name', 'project')).replace(' ', '_')}_{datetime.utcnow().strftime('%Y%m%d')}.csv"
+    return StreamingResponse(io.BytesIO(output.getvalue().encode("utf-8-sig")), media_type="text/csv", headers={"Content-Disposition": f"attachment; filename={filename}"})
 
 # ==================== SYSTEM STATUS & API INFO ====================
 

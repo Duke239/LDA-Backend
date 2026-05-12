@@ -333,19 +333,23 @@ class MaterialUpdate(BaseModel):
 class ScheduleEntry(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     worker_id: str
-    job_id: str
+    job_id: Optional[str] = None
     scheduled_date: str  # YYYY-MM-DD
     notes: str = ""
     status: str = "scheduled"
+    schedule_type: str = "job"  # job, holiday, sick, unavailable
+    absence_type: Optional[str] = None
     created_date: datetime = Field(default_factory=datetime.utcnow)
     updated_date: Optional[datetime] = None
 
 class ScheduleEntryCreate(BaseModel):
     worker_id: str
-    job_id: str
+    job_id: Optional[str] = None
     scheduled_date: str  # YYYY-MM-DD
     notes: str = ""
     status: str = "scheduled"
+    schedule_type: str = "job"
+    absence_type: Optional[str] = None
 
 class ScheduleEntryUpdate(BaseModel):
     worker_id: Optional[str] = None
@@ -353,6 +357,8 @@ class ScheduleEntryUpdate(BaseModel):
     scheduled_date: Optional[str] = None
     notes: Optional[str] = None
     status: Optional[str] = None
+    schedule_type: Optional[str] = None
+    absence_type: Optional[str] = None
 
 class GanttPushToScheduleRequest(BaseModel):
     job_id: str
@@ -2925,6 +2931,31 @@ async def archive_time_entry_endpoint(entry_id: str, admin: str = Depends(verify
         raise HTTPException(status_code=404, detail="Time entry not found")
     return {"message": "Time entry archived successfully"}
 
+
+VALID_SCHEDULE_TYPES = {"job", "holiday", "sick", "unavailable"}
+ABSENCE_SCHEDULE_TYPES = {"holiday", "sick", "unavailable"}
+
+
+def normalise_schedule_type(value: Optional[str]) -> str:
+    """Return a safe schedule type for older and newer schedule records."""
+    schedule_type = str(value or "job").strip().lower()
+    return schedule_type if schedule_type in VALID_SCHEDULE_TYPES else "job"
+
+
+def schedule_type_label(schedule_type: Optional[str]) -> str:
+    schedule_type = normalise_schedule_type(schedule_type)
+    if schedule_type == "holiday":
+        return "Holiday"
+    if schedule_type == "sick":
+        return "Sick Day"
+    if schedule_type == "unavailable":
+        return "Unavailable"
+    return "Scheduled job"
+
+
+def is_absence_schedule_type(schedule_type: Optional[str]) -> bool:
+    return normalise_schedule_type(schedule_type) in ABSENCE_SCHEDULE_TYPES
+
 # ==================== SCHEDULING ENDPOINTS ====================
 
 @api_router.get("/schedule", response_model=List[Dict[str, Any]])
@@ -2988,13 +3019,21 @@ async def get_schedule_entries(
         entry.pop("_id", None)
         worker = worker_lookup.get(entry.get("worker_id"), {})
         job = job_lookup.get(entry.get("job_id"), {})
+        schedule_type = normalise_schedule_type(entry.get("schedule_type"))
+        entry["schedule_type"] = schedule_type
+        entry["absence_type"] = entry.get("absence_type") or (schedule_type if is_absence_schedule_type(schedule_type) else None)
         entry["worker_name"] = worker.get("name", "Unknown")
         entry["worker_type"] = worker.get("worker_type", "worker")
         entry["worker_division"] = worker.get("division", "")
         entry["worker_trades"] = worker.get("trades", [worker.get("trade", "")] if worker.get("trade") else [])
-        entry["job_name"] = job.get("name", "Unknown")
-        entry["job_client"] = job.get("client", "")
-        entry["job_location"] = job.get("location", "")
+        if is_absence_schedule_type(schedule_type):
+            entry["job_name"] = schedule_type_label(schedule_type)
+            entry["job_client"] = ""
+            entry["job_location"] = ""
+        else:
+            entry["job_name"] = job.get("name", "Unknown")
+            entry["job_client"] = job.get("client", "")
+            entry["job_location"] = job.get("location", "")
         result.append(entry)
 
     result.sort(key=lambda x: (x.get("scheduled_date", ""), x.get("worker_name", "")))
@@ -3107,17 +3146,22 @@ async def _push_gantt_section_to_schedule(request: GanttPushToScheduleRequest):
                 "archived": {"$ne": True},
             })
             if existing:
+                existing_type = normalise_schedule_type(existing.get("schedule_type"))
+                existing_name = schedule_type_label(existing_type) if is_absence_schedule_type(existing_type) else await get_job_name(existing.get("job_id"))
                 clash_record = {
                     "worker_id": worker_id,
                     "worker_name": worker.get("name", "Unknown"),
                     "scheduled_date": scheduled_date,
                     "existing_entry_id": existing.get("id"),
                     "existing_job_id": existing.get("job_id"),
-                    "existing_job_name": await get_job_name(existing.get("job_id")),
+                    "existing_job_name": existing_name,
+                    "existing_schedule_type": existing_type,
                     "existing_notes": existing.get("notes", ""),
                 }
 
-                if request.override_existing_allocations:
+                # Holiday/sick/unavailable records are intentional absence blocks. Do not override them
+                # from the Gantt, even when normal job clashes are being overridden.
+                if request.override_existing_allocations and not is_absence_schedule_type(existing_type):
                     await db.schedule_entries.update_one(
                         {"id": existing.get("id")},
                         {"$set": {"archived": True, "updated_date": datetime.utcnow(), "overridden_by_gantt_section_id": request.section_id}},
@@ -3133,6 +3177,7 @@ async def _push_gantt_section_to_schedule(request: GanttPushToScheduleRequest):
                 scheduled_date=scheduled_date,
                 notes=section_note,
                 status="scheduled",
+                schedule_type="job",
             )
             await db.schedule_entries.insert_one(entry_obj.dict())
             created.append(entry_obj.dict())
@@ -3191,31 +3236,44 @@ async def schedule_from_gantt(request: GanttPushToScheduleRequest, admin: str = 
 
 @api_router.post("/schedule", response_model=ScheduleEntry)
 async def create_schedule_entry(schedule_entry: ScheduleEntryCreate, admin: str = Depends(verify_admin)):
-    """Allocate a worker to an active job on a specific date (Admin only)."""
+    """Allocate a worker to a job or block a day as holiday/sick/unavailable (Admin only)."""
     try:
         datetime.fromisoformat(schedule_entry.scheduled_date)
     except ValueError:
         raise HTTPException(status_code=400, detail="scheduled_date must be in YYYY-MM-DD format")
 
+    schedule_type = normalise_schedule_type(schedule_entry.schedule_type)
+    if schedule_type == "job" and not schedule_entry.job_id:
+        raise HTTPException(status_code=400, detail="Select an active job first")
+
     worker = await db.workers.find_one({"id": schedule_entry.worker_id, "active": True, "archived": {"$ne": True}})
     if not worker:
         raise HTTPException(status_code=404, detail="Active worker not found")
 
-    job = await db.jobs.find_one({"id": schedule_entry.job_id, "status": "active", "archived": {"$ne": True}})
-    if not job:
-        raise HTTPException(status_code=404, detail="Active job not found")
+    if schedule_type == "job":
+        job = await db.jobs.find_one({"id": schedule_entry.job_id, "status": "active", "archived": {"$ne": True}})
+        if not job:
+            raise HTTPException(status_code=404, detail="Active job not found")
+    else:
+        schedule_entry.job_id = None
+        schedule_entry.absence_type = schedule_type
 
     existing = await db.schedule_entries.find_one({"worker_id": schedule_entry.worker_id, "scheduled_date": schedule_entry.scheduled_date, "archived": {"$ne": True}})
     if existing:
-        raise HTTPException(status_code=400, detail="This worker already has a scheduled job on this date")
+        raise HTTPException(status_code=400, detail="This worker already has a schedule entry on this date")
 
-    entry_obj = ScheduleEntry(**schedule_entry.dict())
+    entry_dict = schedule_entry.dict()
+    entry_dict["schedule_type"] = schedule_type
+    if schedule_type != "job":
+        entry_dict["job_id"] = None
+        entry_dict["absence_type"] = schedule_type
+    entry_obj = ScheduleEntry(**entry_dict)
     await db.schedule_entries.insert_one(entry_obj.dict())
     return entry_obj
 
 @api_router.put("/schedule/{schedule_id}", response_model=ScheduleEntry)
 async def update_schedule_entry(schedule_id: str, schedule_update: ScheduleEntryUpdate, admin: str = Depends(verify_admin)):
-    """Update a schedule allocation (Admin only)."""
+    """Update a schedule allocation or absence block (Admin only)."""
     existing_entry = await db.schedule_entries.find_one({"id": schedule_id, "archived": {"$ne": True}})
     if not existing_entry:
         raise HTTPException(status_code=404, detail="Schedule entry not found")
@@ -3226,8 +3284,9 @@ async def update_schedule_entry(schedule_id: str, schedule_update: ScheduleEntry
         return ScheduleEntry(**existing_entry)
 
     new_worker_id = update_dict.get("worker_id", existing_entry.get("worker_id"))
-    new_job_id = update_dict.get("job_id", existing_entry.get("job_id"))
     new_date = update_dict.get("scheduled_date", existing_entry.get("scheduled_date"))
+    new_schedule_type = normalise_schedule_type(update_dict.get("schedule_type", existing_entry.get("schedule_type")))
+    new_job_id = update_dict.get("job_id", existing_entry.get("job_id"))
 
     if "scheduled_date" in update_dict:
         try:
@@ -3240,14 +3299,23 @@ async def update_schedule_entry(schedule_id: str, schedule_update: ScheduleEntry
         if not worker:
             raise HTTPException(status_code=404, detail="Active worker not found")
 
-    if "job_id" in update_dict:
+    if new_schedule_type == "job":
+        if not new_job_id:
+            raise HTTPException(status_code=400, detail="Select an active job first")
         job = await db.jobs.find_one({"id": new_job_id, "status": "active", "archived": {"$ne": True}})
         if not job:
             raise HTTPException(status_code=404, detail="Active job not found")
+        update_dict["job_id"] = new_job_id
+        update_dict["absence_type"] = None
+    else:
+        update_dict["job_id"] = None
+        update_dict["absence_type"] = new_schedule_type
+
+    update_dict["schedule_type"] = new_schedule_type
 
     duplicate = await db.schedule_entries.find_one({"id": {"$ne": schedule_id}, "worker_id": new_worker_id, "scheduled_date": new_date, "archived": {"$ne": True}})
     if duplicate:
-        raise HTTPException(status_code=400, detail="This worker already has a scheduled job on this date")
+        raise HTTPException(status_code=400, detail="This worker already has a schedule entry on this date")
 
     update_dict["updated_date"] = datetime.utcnow()
     result = await db.schedule_entries.update_one({"id": schedule_id}, {"$set": update_dict})
@@ -3328,9 +3396,17 @@ async def build_schedule_export_data(
         job = job_lookup.get(entry.get("job_id"), {})
         worker_match = worker_lookup.get(entry.get("worker_id"), {})
 
-        entry["job_name"] = job.get("name", "Unknown")
-        entry["job_client"] = job.get("client", "")
-        entry["job_location"] = job.get("location", "")
+        schedule_type = normalise_schedule_type(entry.get("schedule_type"))
+        entry["schedule_type"] = schedule_type
+        entry["absence_type"] = entry.get("absence_type") or (schedule_type if is_absence_schedule_type(schedule_type) else None)
+        if is_absence_schedule_type(schedule_type):
+            entry["job_name"] = schedule_type_label(schedule_type)
+            entry["job_client"] = ""
+            entry["job_location"] = ""
+        else:
+            entry["job_name"] = job.get("name", "Unknown")
+            entry["job_client"] = job.get("client", "")
+            entry["job_location"] = job.get("location", "")
         entry["worker_name"] = worker_match.get("name", "Unknown")
         entry["worker_type"] = worker_match.get("worker_type", "worker")
         entry["worker_division"] = worker_match.get("division", "")
@@ -3338,7 +3414,8 @@ async def build_schedule_export_data(
 
         enriched_entries.append(entry)
         entry_lookup[(entry.get("worker_id"), entry.get("scheduled_date"))] = entry
-        job_day_lookup.setdefault((entry.get("job_id"), entry.get("scheduled_date")), []).append(entry)
+        if not is_absence_schedule_type(schedule_type):
+            job_day_lookup.setdefault((entry.get("job_id"), entry.get("scheduled_date")), []).append(entry)
 
     export_jobs = []
     seen_job_ids = set()
@@ -3396,10 +3473,18 @@ async def get_worker_schedule_entries(
     for entry in entries:
         entry.pop("_id", None)
         job = job_lookup.get(entry.get("job_id"), {})
+        schedule_type = normalise_schedule_type(entry.get("schedule_type"))
+        entry["schedule_type"] = schedule_type
+        entry["absence_type"] = entry.get("absence_type") or (schedule_type if is_absence_schedule_type(schedule_type) else None)
         entry["worker_name"] = worker.get("name", "")
-        entry["job_name"] = job.get("name", "Unknown")
-        entry["job_client"] = job.get("client", "")
-        entry["job_location"] = job.get("location", "")
+        if is_absence_schedule_type(schedule_type):
+            entry["job_name"] = schedule_type_label(schedule_type)
+            entry["job_client"] = ""
+            entry["job_location"] = ""
+        else:
+            entry["job_name"] = job.get("name", "Unknown")
+            entry["job_client"] = job.get("client", "")
+            entry["job_location"] = job.get("location", "")
         result.append(entry)
 
     result.sort(key=lambda item: item.get("scheduled_date", ""))

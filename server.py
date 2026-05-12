@@ -4176,6 +4176,18 @@ class DashboardFinanceRecordBase(BaseModel):
 
     notes: Optional[str] = None
 
+    # Links dashboard tracking records back to Gantt commercial markers so
+    # the Finance page can supersede the original planned marker once tracked.
+    linked_marker_id: Optional[str] = None
+    source_marker_id: Optional[str] = None
+
+    # Lightweight audit fields. The frontend sends the logged-in user details
+    # where available, and the backend preserves them.
+    created_by: Optional[str] = None
+    created_by_role: Optional[str] = None
+    updated_by: Optional[str] = None
+    updated_by_role: Optional[str] = None
+
 
 class DashboardFinanceRecordCreate(DashboardFinanceRecordBase):
     pass
@@ -4199,6 +4211,12 @@ class DashboardFinanceRecordUpdate(BaseModel):
     received_amount: Optional[float] = None
 
     notes: Optional[str] = None
+    linked_marker_id: Optional[str] = None
+    source_marker_id: Optional[str] = None
+    created_by: Optional[str] = None
+    created_by_role: Optional[str] = None
+    updated_by: Optional[str] = None
+    updated_by_role: Optional[str] = None
     archived: Optional[bool] = None
 
 
@@ -4237,6 +4255,12 @@ def serialize_dashboard_finance_record(record: Dict[str, Any]) -> Dict[str, Any]
             else None
         ),
         "notes": record.get("notes"),
+        "linked_marker_id": record.get("linked_marker_id"),
+        "source_marker_id": record.get("source_marker_id"),
+        "created_by": record.get("created_by"),
+        "created_by_role": record.get("created_by_role"),
+        "updated_by": record.get("updated_by"),
+        "updated_by_role": record.get("updated_by_role"),
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
         "archived": record.get("archived", False),
@@ -4325,6 +4349,13 @@ async def create_dashboard_finance_record(record: DashboardFinanceRecordCreate):
     data["updated_at"] = now
     data["archived"] = False
 
+    created_by = (data.get("created_by") or "").strip()
+    created_by_role = (data.get("created_by_role") or "").strip()
+    data["created_by"] = created_by or "Unknown user"
+    data["created_by_role"] = created_by_role or "unknown"
+    data["updated_by"] = (data.get("updated_by") or data["created_by"]).strip() or data["created_by"]
+    data["updated_by_role"] = (data.get("updated_by_role") or data["created_by_role"]).strip() or data["created_by_role"]
+
     if data.get("anticipated_amount") is None:
         data["anticipated_amount"] = data.get("expected_amount", 0)
 
@@ -4354,6 +4385,16 @@ async def update_dashboard_finance_record(record_id: str, update: DashboardFinan
     }
 
     update_data["updated_at"] = datetime.utcnow().isoformat()
+
+    # Do not accidentally blank out audit fields when the frontend has no user context.
+    for audit_key in ["created_by", "created_by_role", "updated_by", "updated_by_role"]:
+        if audit_key in update_data and (update_data[audit_key] is None or str(update_data[audit_key]).strip() == ""):
+            update_data.pop(audit_key, None)
+
+    if not update_data.get("updated_by"):
+        update_data["updated_by"] = "Unknown user"
+    if not update_data.get("updated_by_role"):
+        update_data["updated_by_role"] = "unknown"
 
     if update_data.get("project_id") and not update_data.get("project_name"):
         update_data = await backfill_dashboard_project_name(update_data)

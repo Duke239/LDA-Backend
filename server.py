@@ -4146,6 +4146,343 @@ async def export_finance_project_csv(job_id: str, admin: str = Depends(verify_ad
     filename = f"finance_{str(job.get('name', 'project')).replace(' ', '_')}_{datetime.utcnow().strftime('%Y%m%d')}.csv"
     return StreamingResponse(io.BytesIO(output.getvalue().encode("utf-8-sig")), media_type="text/csv", headers={"Content-Disposition": f"attachment; filename={filename}"})
 
+
+
+# ==================== COMPANY FINANCE DASHBOARD ENDPOINTS ====================
+# These routes power the new company-level finance dashboard.
+# They intentionally use a separate MongoDB collection from the existing
+# project application finance records so the older project finance workflow is preserved.
+
+class DashboardFinanceRecordBase(BaseModel):
+    project_id: Optional[str] = None
+    project_name: Optional[str] = None
+
+    # deposit, interim, final, retention, variation, other
+    type: str = "interim"
+
+    description: Optional[str] = None
+
+    expected_date: Optional[str] = None
+    expected_amount: float = 0.0
+
+    anticipated_date: Optional[str] = None
+    anticipated_amount: Optional[float] = None
+
+    # expected, anticipated, at_risk, received, overdue
+    status: str = "expected"
+
+    received_date: Optional[str] = None
+    received_amount: Optional[float] = None
+
+    notes: Optional[str] = None
+
+
+class DashboardFinanceRecordCreate(DashboardFinanceRecordBase):
+    pass
+
+
+class DashboardFinanceRecordUpdate(BaseModel):
+    project_id: Optional[str] = None
+    project_name: Optional[str] = None
+    type: Optional[str] = None
+    description: Optional[str] = None
+
+    expected_date: Optional[str] = None
+    expected_amount: Optional[float] = None
+
+    anticipated_date: Optional[str] = None
+    anticipated_amount: Optional[float] = None
+
+    status: Optional[str] = None
+
+    received_date: Optional[str] = None
+    received_amount: Optional[float] = None
+
+    notes: Optional[str] = None
+    archived: Optional[bool] = None
+
+
+def dashboard_finance_to_float(value: Any, fallback: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return fallback
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def serialize_dashboard_finance_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    if not record:
+        return {}
+
+    return {
+        "id": record.get("id"),
+        "project_id": record.get("project_id"),
+        "project_name": record.get("project_name"),
+        "type": record.get("type", "interim"),
+        "description": record.get("description"),
+        "expected_date": record.get("expected_date"),
+        "expected_amount": dashboard_finance_to_float(record.get("expected_amount")),
+        "anticipated_date": record.get("anticipated_date"),
+        "anticipated_amount": (
+            dashboard_finance_to_float(record.get("anticipated_amount"))
+            if record.get("anticipated_amount") is not None
+            else None
+        ),
+        "status": record.get("status", "expected"),
+        "received_date": record.get("received_date"),
+        "received_amount": (
+            dashboard_finance_to_float(record.get("received_amount"))
+            if record.get("received_amount") is not None
+            else None
+        ),
+        "notes": record.get("notes"),
+        "created_at": record.get("created_at"),
+        "updated_at": record.get("updated_at"),
+        "archived": record.get("archived", False),
+    }
+
+
+def calculate_dashboard_finance_status(record: Dict[str, Any]) -> str:
+    status = record.get("status") or "expected"
+
+    if status == "received":
+        return "received"
+
+    expected_date = parse_iso_date_safe(record.get("expected_date"))
+    anticipated_date = parse_iso_date_safe(record.get("anticipated_date"))
+    due_date = anticipated_date or expected_date
+    today = datetime.utcnow().date()
+
+    if due_date and due_date < today:
+        return "overdue"
+
+    return status
+
+
+async def backfill_dashboard_project_name(data: Dict[str, Any]) -> Dict[str, Any]:
+    if data.get("project_id") and not data.get("project_name"):
+        job = await db.jobs.find_one({"id": data["project_id"]}, {"_id": 0})
+        if job:
+            data["project_name"] = (
+                job.get("name")
+                or job.get("job_name")
+                or job.get("address")
+                or job.get("location")
+                or "Unnamed project"
+            )
+    return data
+
+
+@api_router.get("/finance-records")
+async def get_dashboard_finance_records(
+    project_id: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    type: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+):
+    query: Dict[str, Any] = {"archived": {"$ne": True}}
+
+    if project_id:
+        query["project_id"] = project_id
+
+    if status:
+        query["status"] = status
+
+    if type:
+        query["type"] = type
+
+    if start_date or end_date:
+        date_query: Dict[str, Any] = {}
+
+        if start_date:
+            date_query["$gte"] = start_date
+
+        if end_date:
+            date_query["$lte"] = end_date
+
+        query["expected_date"] = date_query
+
+    records = await db.finance_dashboard_records.find(query, {"_id": 0}).sort("expected_date", 1).to_list(2000)
+
+    output = []
+    for record in records:
+        serialized = serialize_dashboard_finance_record(record)
+        serialized["status"] = calculate_dashboard_finance_status(serialized)
+        output.append(serialized)
+
+    return output
+
+
+@api_router.post("/finance-records")
+async def create_dashboard_finance_record(record: DashboardFinanceRecordCreate):
+    now = datetime.utcnow().isoformat()
+
+    data = record.dict()
+    data["id"] = str(uuid.uuid4())
+    data["created_at"] = now
+    data["updated_at"] = now
+    data["archived"] = False
+
+    if data.get("anticipated_amount") is None:
+        data["anticipated_amount"] = data.get("expected_amount", 0)
+
+    if not data.get("anticipated_date"):
+        data["anticipated_date"] = data.get("expected_date")
+
+    data = await backfill_dashboard_project_name(data)
+
+    await db.finance_dashboard_records.insert_one(data)
+
+    serialized = serialize_dashboard_finance_record(data)
+    serialized["status"] = calculate_dashboard_finance_status(serialized)
+    return serialized
+
+
+@api_router.put("/finance-records/{record_id}")
+async def update_dashboard_finance_record(record_id: str, update: DashboardFinanceRecordUpdate):
+    existing = await db.finance_dashboard_records.find_one({"id": record_id, "archived": {"$ne": True}})
+
+    if not existing:
+        raise HTTPException(status_code=404, detail="Finance record not found")
+
+    update_data = {
+        key: value
+        for key, value in update.dict().items()
+        if value is not None
+    }
+
+    update_data["updated_at"] = datetime.utcnow().isoformat()
+
+    if update_data.get("project_id") and not update_data.get("project_name"):
+        update_data = await backfill_dashboard_project_name(update_data)
+
+    await db.finance_dashboard_records.update_one(
+        {"id": record_id},
+        {"$set": update_data}
+    )
+
+    updated = await db.finance_dashboard_records.find_one({"id": record_id}, {"_id": 0})
+    serialized = serialize_dashboard_finance_record(updated)
+    serialized["status"] = calculate_dashboard_finance_status(serialized)
+
+    return serialized
+
+
+@api_router.delete("/finance-records/{record_id}")
+async def delete_dashboard_finance_record(record_id: str):
+    result = await db.finance_dashboard_records.update_one(
+        {"id": record_id, "archived": {"$ne": True}},
+        {"$set": {"archived": True, "updated_at": datetime.utcnow().isoformat()}},
+    )
+
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Finance record not found")
+
+    return {"success": True, "message": "Finance record deleted"}
+
+
+@api_router.get("/finance-dashboard")
+async def get_company_finance_dashboard():
+    today = datetime.utcnow().date()
+    lookahead_end = today + timedelta(days=28)
+
+    # Include past unpaid records so overdue money is visible in the summary,
+    # while the forecast grid itself remains a 4-week lookahead.
+    records = await db.finance_dashboard_records.find({
+        "archived": {"$ne": True},
+        "expected_date": {"$lte": lookahead_end.isoformat()},
+    }, {"_id": 0}).sort("expected_date", 1).to_list(2000)
+
+    all_records = []
+
+    for record in records:
+        serialized = serialize_dashboard_finance_record(record)
+        serialized["status"] = calculate_dashboard_finance_status(serialized)
+        all_records.append(serialized)
+
+    weeks = []
+
+    for i in range(4):
+        week_start = today + timedelta(days=i * 7)
+        week_end = week_start + timedelta(days=6)
+
+        week_records = []
+
+        for record in all_records:
+            record_date = parse_iso_date_safe(
+                record.get("anticipated_date") or record.get("expected_date")
+            )
+
+            if record_date and week_start <= record_date <= week_end:
+                week_records.append(record)
+
+        expected_total = sum(
+            dashboard_finance_to_float(r.get("expected_amount"))
+            for r in week_records
+        )
+
+        anticipated_total = sum(
+            dashboard_finance_to_float(r.get("anticipated_amount"), dashboard_finance_to_float(r.get("expected_amount")))
+            for r in week_records
+        )
+
+        received_total = sum(
+            dashboard_finance_to_float(r.get("received_amount"))
+            for r in week_records
+            if r.get("status") == "received"
+        )
+
+        at_risk_total = sum(
+            dashboard_finance_to_float(r.get("anticipated_amount"), dashboard_finance_to_float(r.get("expected_amount")))
+            for r in week_records
+            if r.get("status") == "at_risk"
+        )
+
+        overdue_total = sum(
+            dashboard_finance_to_float(r.get("anticipated_amount"), dashboard_finance_to_float(r.get("expected_amount")))
+            for r in week_records
+            if r.get("status") == "overdue"
+        )
+
+        weeks.append({
+            "week_index": i + 1,
+            "start_date": week_start.isoformat(),
+            "end_date": week_end.isoformat(),
+            "expected_total": round(expected_total, 2),
+            "anticipated_total": round(anticipated_total, 2),
+            "received_total": round(received_total, 2),
+            "at_risk_total": round(at_risk_total, 2),
+            "overdue_total": round(overdue_total, 2),
+            "records": week_records,
+        })
+
+    overdue_records = [record for record in all_records if record.get("status") == "overdue"]
+    received_records = [record for record in all_records if record.get("status") == "received"]
+    at_risk_records = [record for record in all_records if record.get("status") == "at_risk"]
+
+    future_records = []
+    for record in all_records:
+        record_date = parse_iso_date_safe(record.get("anticipated_date") or record.get("expected_date"))
+        if record_date and today <= record_date <= lookahead_end:
+            future_records.append(record)
+
+    summary = {
+        "expected_next_4_weeks": round(sum(dashboard_finance_to_float(r.get("expected_amount")) for r in future_records), 2),
+        "anticipated_next_4_weeks": round(sum(dashboard_finance_to_float(r.get("anticipated_amount"), dashboard_finance_to_float(r.get("expected_amount"))) for r in future_records), 2),
+        "received_next_4_weeks": round(sum(dashboard_finance_to_float(r.get("received_amount")) for r in received_records), 2),
+        "at_risk_next_4_weeks": round(sum(dashboard_finance_to_float(r.get("anticipated_amount"), dashboard_finance_to_float(r.get("expected_amount"))) for r in at_risk_records), 2),
+        "overdue_next_4_weeks": round(sum(dashboard_finance_to_float(r.get("anticipated_amount"), dashboard_finance_to_float(r.get("expected_amount"))) for r in overdue_records), 2),
+        "record_count": len(all_records),
+    }
+
+    return {
+        "summary": summary,
+        "weeks": weeks,
+        "records": all_records,
+    }
+
 # ==================== SYSTEM STATUS & API INFO ====================
 
 @api_router.get("/system/status")

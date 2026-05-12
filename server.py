@@ -362,6 +362,7 @@ class GanttPushToScheduleRequest(BaseModel):
     end_date: str
     section_name: str = ""
     replace_existing_for_section: bool = True
+    override_existing_allocations: bool = False
 
 
 class AdminLogin(BaseModel):
@@ -3037,7 +3038,7 @@ async def get_schedule_by_job(
     return result
 
 async def _push_gantt_section_to_schedule(request: GanttPushToScheduleRequest):
-    """Create schedule entries from a Gantt section. Skips weekends and protects existing allocations."""
+    """Create schedule entries from a Gantt section. Skips weekends and protects existing allocations unless override is requested."""
     if not request.worker_ids:
         raise HTTPException(status_code=400, detail="Select at least one worker")
 
@@ -3069,6 +3070,8 @@ async def _push_gantt_section_to_schedule(request: GanttPushToScheduleRequest):
             dates.append(current.isoformat())
         current = current + timedelta(days=1)
 
+    expected_count = len(request.worker_ids) * len(dates)
+
     if request.replace_existing_for_section and dates:
         await db.schedule_entries.update_many(
             {
@@ -3082,9 +3085,18 @@ async def _push_gantt_section_to_schedule(request: GanttPushToScheduleRequest):
         )
 
     created = []
-    skipped = []
     clashes = []
+    overridden = []
     worker_lookup = {worker.get("id"): worker for worker in workers}
+    job_lookup: Dict[str, Dict[str, Any]] = {request.job_id: job}
+
+    async def get_job_name(job_id: Optional[str]) -> str:
+        if not job_id:
+            return "Unknown job"
+        if job_id not in job_lookup:
+            found_job = await db.jobs.find_one({"id": job_id}) or {}
+            job_lookup[job_id] = found_job
+        return job_lookup.get(job_id, {}).get("name", "Unknown job")
 
     for worker_id in request.worker_ids:
         worker = worker_lookup.get(worker_id, {})
@@ -3095,13 +3107,25 @@ async def _push_gantt_section_to_schedule(request: GanttPushToScheduleRequest):
                 "archived": {"$ne": True},
             })
             if existing:
-                clashes.append({
+                clash_record = {
                     "worker_id": worker_id,
                     "worker_name": worker.get("name", "Unknown"),
                     "scheduled_date": scheduled_date,
+                    "existing_entry_id": existing.get("id"),
                     "existing_job_id": existing.get("job_id"),
-                })
-                continue
+                    "existing_job_name": await get_job_name(existing.get("job_id")),
+                    "existing_notes": existing.get("notes", ""),
+                }
+
+                if request.override_existing_allocations:
+                    await db.schedule_entries.update_one(
+                        {"id": existing.get("id")},
+                        {"$set": {"archived": True, "updated_date": datetime.utcnow(), "overridden_by_gantt_section_id": request.section_id}},
+                    )
+                    overridden.append(clash_record)
+                else:
+                    clashes.append(clash_record)
+                    continue
 
             entry_obj = ScheduleEntry(
                 worker_id=worker_id,
@@ -3114,39 +3138,46 @@ async def _push_gantt_section_to_schedule(request: GanttPushToScheduleRequest):
             created.append(entry_obj.dict())
 
     created_entry_ids = [entry.get("id") for entry in created if entry.get("id")]
+    fully_scheduled = expected_count > 0 and len(created) >= expected_count and len(clashes) == 0
+    schedule_status = "scheduled" if fully_scheduled else "partial_scheduled" if created else "not_scheduled"
     updated_section = None
 
-    if created_entry_ids:
-        gantt_sections = job.get("gantt_sections") or []
-        updated_sections = []
-        for section in gantt_sections:
-            if section.get("id") == request.section_id:
-                existing_ids = section.get("schedule_entry_ids") or []
-                merged_ids = list(dict.fromkeys([*existing_ids, *created_entry_ids]))
-                section = {
-                    **section,
-                    "assigned_worker_ids": request.worker_ids,
-                    "sent_to_schedule": True,
-                    "schedule_status": "scheduled",
-                    "schedule_entry_ids": merged_ids,
-                    "scheduled_at": datetime.utcnow().isoformat(),
-                }
-                updated_section = section
-            updated_sections.append(section)
+    gantt_sections = job.get("gantt_sections") or []
+    updated_sections = []
+    for section in gantt_sections:
+        if section.get("id") == request.section_id:
+            existing_ids = section.get("schedule_entry_ids") or []
+            merged_ids = list(dict.fromkeys([*existing_ids, *created_entry_ids]))
+            section = {
+                **section,
+                "assigned_worker_ids": request.worker_ids,
+                "sent_to_schedule": fully_scheduled,
+                "schedule_status": schedule_status,
+                "schedule_entry_ids": merged_ids,
+                "scheduled_at": datetime.utcnow().isoformat() if created else section.get("scheduled_at", ""),
+                "schedule_clashes": clashes,
+                "last_schedule_push_at": datetime.utcnow().isoformat(),
+            }
+            updated_section = section
+        updated_sections.append(section)
 
-        await db.jobs.update_one(
-            {"id": request.job_id},
-            {"$set": {"gantt_sections": updated_sections}}
-        )
+    await db.jobs.update_one(
+        {"id": request.job_id},
+        {"$set": {"gantt_sections": updated_sections}}
+    )
 
     return {
         "message": "Gantt section pushed to schedule",
         "created_count": len(created),
+        "expected_count": expected_count,
+        "fully_scheduled": fully_scheduled,
         "skipped_weekend_count": max(0, ((end - start).days + 1) - len(dates)),
         "clash_count": len(clashes),
+        "overridden_count": len(overridden),
         "created": created,
         "created_entry_ids": created_entry_ids,
         "clashes": clashes,
+        "overridden": overridden,
         "updated_section": updated_section,
     }
 

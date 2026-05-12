@@ -3113,13 +3113,41 @@ async def _push_gantt_section_to_schedule(request: GanttPushToScheduleRequest):
             await db.schedule_entries.insert_one(entry_obj.dict())
             created.append(entry_obj.dict())
 
+    created_entry_ids = [entry.get("id") for entry in created if entry.get("id")]
+    updated_section = None
+
+    if created_entry_ids:
+        gantt_sections = job.get("gantt_sections") or []
+        updated_sections = []
+        for section in gantt_sections:
+            if section.get("id") == request.section_id:
+                existing_ids = section.get("schedule_entry_ids") or []
+                merged_ids = list(dict.fromkeys([*existing_ids, *created_entry_ids]))
+                section = {
+                    **section,
+                    "assigned_worker_ids": request.worker_ids,
+                    "sent_to_schedule": True,
+                    "schedule_status": "scheduled",
+                    "schedule_entry_ids": merged_ids,
+                    "scheduled_at": datetime.utcnow().isoformat(),
+                }
+                updated_section = section
+            updated_sections.append(section)
+
+        await db.jobs.update_one(
+            {"id": request.job_id},
+            {"$set": {"gantt_sections": updated_sections}}
+        )
+
     return {
         "message": "Gantt section pushed to schedule",
         "created_count": len(created),
         "skipped_weekend_count": max(0, ((end - start).days + 1) - len(dates)),
         "clash_count": len(clashes),
         "created": created,
+        "created_entry_ids": created_entry_ids,
         "clashes": clashes,
+        "updated_section": updated_section,
     }
 
 @api_router.post("/gantt/push-to-schedule")

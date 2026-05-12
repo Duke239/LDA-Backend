@@ -218,6 +218,7 @@ class Job(BaseModel):
     drive_folder_error: Optional[str] = None
     drive_folder_copy_stats: Optional[Dict[str, Any]] = None
     post_work_photos: List[Dict[str, Any]] = []
+    commercial_markers: List[Dict[str, Any]] = []
 
 class JobCreate(BaseModel):
     name: str
@@ -230,6 +231,7 @@ class JobCreate(BaseModel):
     planned_start_date: Optional[str] = None
     planned_end_date: Optional[str] = None
     gantt_sections: List[Dict[str, Any]] = []
+    commercial_markers: List[Dict[str, Any]] = []
     drive_folder_id: Optional[str] = None
     drive_folder_link: Optional[str] = None
     drive_folder_url: Optional[str] = None
@@ -255,6 +257,7 @@ class JobUpdate(BaseModel):
     google_drive_link: Optional[str] = None
     drive_folder_status: Optional[str] = None
     drive_folder_error: Optional[str] = None
+    commercial_markers: Optional[List[Dict[str, Any]]] = None
 
 class GPSLocation(BaseModel):
     latitude: float
@@ -369,6 +372,14 @@ class GanttPushToScheduleRequest(BaseModel):
     section_name: str = ""
     replace_existing_for_section: bool = True
     override_existing_allocations: bool = False
+
+class GanttShiftProjectRequest(BaseModel):
+    job_id: str
+    planned_start_date: str
+    planned_end_date: str
+    delta_days: int
+    shift_sections: bool = True
+    shift_schedule: bool = True
 
 
 class AdminLogin(BaseModel):
@@ -3233,6 +3244,135 @@ async def push_gantt_to_schedule(request: GanttPushToScheduleRequest, admin: str
 @api_router.post("/schedule/from-gantt")
 async def schedule_from_gantt(request: GanttPushToScheduleRequest, admin: str = Depends(verify_admin)):
     return await _push_gantt_section_to_schedule(request)
+
+
+
+def shift_iso_date(value: Optional[str], delta_days: int) -> Optional[str]:
+    """Shift a YYYY-MM-DD date string by delta_days and return YYYY-MM-DD."""
+    if not value:
+        return value
+    try:
+        shifted = datetime.fromisoformat(str(value)).date() + timedelta(days=delta_days)
+        return shifted.isoformat()
+    except Exception:
+        return value
+
+
+@api_router.post("/gantt/shift-project")
+async def shift_gantt_project(request: GanttShiftProjectRequest, admin: str = Depends(verify_admin)):
+    """Move a project's planned dates, optionally moving its sections and linked schedule entries by the same day offset."""
+    try:
+        datetime.fromisoformat(request.planned_start_date)
+        datetime.fromisoformat(request.planned_end_date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="planned_start_date and planned_end_date must be YYYY-MM-DD")
+
+    if request.delta_days == 0:
+        raise HTTPException(status_code=400, detail="delta_days must not be zero")
+
+    job = await db.jobs.find_one({"id": request.job_id, "archived": {"$ne": True}})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    original_sections = job.get("gantt_sections") or []
+    updated_sections = []
+    linked_schedule_ids = []
+
+    for section in original_sections:
+        section_copy = dict(section)
+        if request.shift_sections:
+            section_copy["start_date"] = shift_iso_date(section_copy.get("start_date"), request.delta_days)
+            section_copy["end_date"] = shift_iso_date(section_copy.get("end_date"), request.delta_days)
+            if section_copy.get("schedule_status") == "scheduled":
+                section_copy["last_programme_shift_at"] = datetime.utcnow().isoformat()
+        for entry_id in section_copy.get("schedule_entry_ids") or []:
+            if entry_id:
+                linked_schedule_ids.append(entry_id)
+        updated_sections.append(section_copy)
+
+    shifted_schedule_count = 0
+    clashes = []
+
+    if request.shift_schedule and linked_schedule_ids:
+        entries = await db.schedule_entries.find({
+            "id": {"$in": list(dict.fromkeys(linked_schedule_ids))},
+            "archived": {"$ne": True},
+        }).to_list(5000)
+
+        for entry in entries:
+            old_date = entry.get("scheduled_date")
+            new_date = shift_iso_date(old_date, request.delta_days)
+            if not new_date or new_date == old_date:
+                continue
+
+            duplicate = await db.schedule_entries.find_one({
+                "id": {"$ne": entry.get("id")},
+                "worker_id": entry.get("worker_id"),
+                "scheduled_date": new_date,
+                "archived": {"$ne": True},
+            })
+
+            if duplicate:
+                duplicate_type = normalise_schedule_type(duplicate.get("schedule_type"))
+                clashes.append({
+                    "entry_id": entry.get("id"),
+                    "worker_id": entry.get("worker_id"),
+                    "old_date": old_date,
+                    "new_date": new_date,
+                    "existing_entry_id": duplicate.get("id"),
+                    "existing_job_id": duplicate.get("job_id"),
+                    "existing_schedule_type": duplicate_type,
+                    "existing_label": schedule_type_label(duplicate_type) if is_absence_schedule_type(duplicate_type) else "Existing scheduled job",
+                })
+                continue
+
+            await db.schedule_entries.update_one(
+                {"id": entry.get("id")},
+                {"$set": {
+                    "scheduled_date": new_date,
+                    "updated_date": datetime.utcnow(),
+                    "shifted_from_date": old_date,
+                    "shifted_by_gantt_job_id": request.job_id,
+                }},
+            )
+            shifted_schedule_count += 1
+
+    # If some linked schedule entries could not be shifted, mark their sections as partial so the Gantt does not look fully safe.
+    clash_entry_ids = {item.get("entry_id") for item in clashes if item.get("entry_id")}
+    if clash_entry_ids:
+        adjusted_sections = []
+        for section in updated_sections:
+            section_ids = set(section.get("schedule_entry_ids") or [])
+            if section_ids.intersection(clash_entry_ids):
+                section = {
+                    **section,
+                    "sent_to_schedule": False,
+                    "schedule_status": "partial_scheduled",
+                    "schedule_clashes": clashes,
+                }
+            adjusted_sections.append(section)
+        updated_sections = adjusted_sections
+
+    update_doc = {
+        "planned_start_date": request.planned_start_date,
+        "planned_end_date": request.planned_end_date,
+        "gantt_sections": updated_sections if request.shift_sections else original_sections,
+        "last_programme_shift_at": datetime.utcnow().isoformat(),
+        "last_programme_shift_days": request.delta_days,
+    }
+
+    await db.jobs.update_one({"id": request.job_id}, {"$set": update_doc})
+    updated_job = await db.jobs.find_one({"id": request.job_id}, {"_id": 0})
+
+    return {
+        "message": "Project programme shifted",
+        "job": updated_job,
+        "delta_days": request.delta_days,
+        "sections_shifted": len(updated_sections) if request.shift_sections else 0,
+        "shifted_schedule_count": shifted_schedule_count,
+        "clash_count": len(clashes),
+        "clashes": clashes,
+    }
 
 @api_router.post("/schedule", response_model=ScheduleEntry)
 async def create_schedule_entry(schedule_entry: ScheduleEntryCreate, admin: str = Depends(verify_admin)):

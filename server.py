@@ -18,6 +18,9 @@ import logging
 import hashlib
 import base64
 import math
+import re
+import smtplib
+from email.message import EmailMessage
 
 try:
     from google.oauth2 import service_account
@@ -449,6 +452,147 @@ class FinanceRecordUpdate(BaseModel):
     notes: Optional[str] = None
     archived: Optional[bool] = None
 
+
+# ==================== PURCHASE ORDER SYSTEM MODELS ====================
+
+class Supplier(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str
+    contact_name: str = ""
+    orders_email: str = ""
+    accounts_email: str = ""
+    phone: str = ""
+    address: str = ""
+    vat_number: str = ""
+    payment_terms: str = "30 days"
+    notes: str = ""
+    active: bool = True
+    archived: bool = False
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: Optional[datetime] = None
+
+class SupplierCreate(BaseModel):
+    name: str
+    contact_name: str = ""
+    orders_email: str = ""
+    accounts_email: str = ""
+    phone: str = ""
+    address: str = ""
+    vat_number: str = ""
+    payment_terms: str = "30 days"
+    notes: str = ""
+
+class SupplierUpdate(BaseModel):
+    name: Optional[str] = None
+    contact_name: Optional[str] = None
+    orders_email: Optional[str] = None
+    accounts_email: Optional[str] = None
+    phone: Optional[str] = None
+    address: Optional[str] = None
+    vat_number: Optional[str] = None
+    payment_terms: Optional[str] = None
+    notes: Optional[str] = None
+    active: Optional[bool] = None
+    archived: Optional[bool] = None
+
+class PurchaseOrderLine(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    description: str
+    quantity: float = 1.0
+    unit_cost: float = 0.0
+    vat_rate: float = 20.0
+    net_total: float = 0.0
+    vat_total: float = 0.0
+    gross_total: float = 0.0
+    job_section_id: str = ""
+    job_section_name: str = ""
+    cost_category: str = "Materials"
+    received_quantity: float = 0.0
+    material_status: str = "committed"
+    material_id: Optional[str] = None
+
+class PurchaseOrder(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    po_number: str = ""
+    supplier_id: str
+    supplier_name: str = ""
+    supplier_email: str = ""
+    job_id: str
+    job_name: str = ""
+    job_number: Optional[int] = None
+    division: str = ""
+    status: str = "draft"
+    requested_by_user_id: str = ""
+    requested_by_name: str = ""
+    approved_by_user_id: Optional[str] = None
+    approved_by_name: Optional[str] = None
+    approved_at: Optional[datetime] = None
+    sent_at: Optional[datetime] = None
+    sent_by_user_id: Optional[str] = None
+    sent_by_name: Optional[str] = None
+    email_subject: str = ""
+    required_date: Optional[str] = None
+    delivery_address: str = ""
+    notes: str = ""
+    supplier_quote_number: str = ""
+    source_type: str = "manual"
+    source_upload_id: Optional[str] = None
+    source_file_name: str = ""
+    extraction_status: str = "not_required"
+    extraction_confidence: str = ""
+    lines: List[PurchaseOrderLine] = []
+    net_total: float = 0.0
+    vat_total: float = 0.0
+    gross_total: float = 0.0
+    materials_assigned: bool = False
+    materials_assigned_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: Optional[datetime] = None
+
+class PurchaseOrderCreate(BaseModel):
+    supplier_id: str
+    supplier_name: str = ""
+    supplier_email: str = ""
+    job_id: str
+    job_name: str = ""
+    job_number: Optional[int] = None
+    division: str = ""
+    required_date: Optional[str] = None
+    delivery_address: str = ""
+    notes: str = ""
+    supplier_quote_number: str = ""
+    source_type: str = "manual"
+    source_upload_id: Optional[str] = None
+    source_file_name: str = ""
+    extraction_status: str = "not_required"
+    extraction_confidence: str = ""
+    lines: List[PurchaseOrderLine] = []
+    net_total: float = 0.0
+    vat_total: float = 0.0
+    gross_total: float = 0.0
+
+class PurchaseOrderUpdate(BaseModel):
+    supplier_id: Optional[str] = None
+    supplier_name: Optional[str] = None
+    supplier_email: Optional[str] = None
+    job_id: Optional[str] = None
+    job_name: Optional[str] = None
+    job_number: Optional[int] = None
+    division: Optional[str] = None
+    status: Optional[str] = None
+    required_date: Optional[str] = None
+    delivery_address: Optional[str] = None
+    notes: Optional[str] = None
+    supplier_quote_number: Optional[str] = None
+    source_type: Optional[str] = None
+    source_upload_id: Optional[str] = None
+    source_file_name: Optional[str] = None
+    extraction_status: Optional[str] = None
+    extraction_confidence: Optional[str] = None
+    lines: Optional[List[PurchaseOrderLine]] = None
+    net_total: Optional[float] = None
+    vat_total: Optional[float] = None
+    gross_total: Optional[float] = None
 
 class AdminLogin(BaseModel):
     username: str
@@ -4523,6 +4667,495 @@ async def get_company_finance_dashboard():
         "weeks": weeks,
         "records": all_records,
     }
+
+# ==================== PURCHASE ORDER SYSTEM ====================
+
+def clean_mongo_doc(doc: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not doc:
+        return None
+    doc.pop("_id", None)
+    return doc
+
+
+def calculate_po_line_totals(line: Dict[str, Any]) -> Dict[str, Any]:
+    quantity = float(line.get("quantity") or 0)
+    unit_cost = float(line.get("unit_cost") or 0)
+    vat_rate = float(line.get("vat_rate") or 0)
+    net_total = round(quantity * unit_cost, 2)
+    vat_total = round(net_total * (vat_rate / 100), 2)
+    gross_total = round(net_total + vat_total, 2)
+    line["quantity"] = quantity
+    line["unit_cost"] = unit_cost
+    line["vat_rate"] = vat_rate
+    line["net_total"] = net_total
+    line["vat_total"] = vat_total
+    line["gross_total"] = gross_total
+    line.setdefault("id", str(uuid.uuid4()))
+    line.setdefault("received_quantity", 0.0)
+    line.setdefault("material_status", "committed")
+    return line
+
+
+def calculate_po_totals(po_dict: Dict[str, Any]) -> Dict[str, Any]:
+    lines = [calculate_po_line_totals(dict(line)) for line in po_dict.get("lines", [])]
+    po_dict["lines"] = lines
+    po_dict["net_total"] = round(sum(line.get("net_total", 0) for line in lines), 2)
+    po_dict["vat_total"] = round(sum(line.get("vat_total", 0) for line in lines), 2)
+    po_dict["gross_total"] = round(sum(line.get("gross_total", 0) for line in lines), 2)
+    return po_dict
+
+
+async def next_po_number() -> str:
+    year = datetime.utcnow().year
+    prefix = f"PO-{year}-"
+    latest = await db.purchase_orders.find_one({"po_number": {"$regex": f"^{prefix}"}}, sort=[("po_number", -1)])
+    if latest and latest.get("po_number"):
+        try:
+            next_number = int(latest["po_number"].split("-")[-1]) + 1
+        except Exception:
+            next_number = 1
+    else:
+        next_number = 1
+    return f"{prefix}{str(next_number).zfill(4)}"
+
+
+def extract_quote_number(text: str) -> str:
+    patterns = [
+        r"(?:quote|quotation|estimate)\s*(?:number|no|ref|reference)?\s*[:#-]?\s*([A-Z0-9][A-Z0-9\-/]{2,})",
+        r"(?:ref|reference)\s*[:#-]?\s*([A-Z0-9][A-Z0-9\-/]{2,})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
+def parse_quote_lines_from_text(text: str) -> List[Dict[str, Any]]:
+    lines = []
+    money_pattern = re.compile(r"£?\s*([0-9]+(?:,[0-9]{3})*(?:\.\d{2})?)")
+    for raw_line in text.splitlines():
+        cleaned = " ".join(raw_line.strip().split())
+        if len(cleaned) < 8:
+            continue
+        lower = cleaned.lower()
+        if any(term in lower for term in ["subtotal", "sub total", "vat", "total", "balance", "quote", "quotation"]):
+            continue
+        amounts = money_pattern.findall(cleaned)
+        if not amounts:
+            continue
+        # Use the final amount on the row as the line total. This is deliberately conservative.
+        try:
+            line_total = float(amounts[-1].replace(",", ""))
+        except Exception:
+            continue
+        if line_total <= 0:
+            continue
+        description = money_pattern.sub("", cleaned).strip(" -|\t")
+        if not description or len(description) < 3:
+            description = cleaned
+        lines.append({
+            "description": description[:220],
+            "quantity": 1,
+            "unit_cost": line_total,
+            "vat_rate": 20,
+            "cost_category": "Materials",
+        })
+        if len(lines) >= 30:
+            break
+    return lines
+
+
+async def extract_text_from_upload(file: UploadFile, content: bytes) -> str:
+    filename = (file.filename or "").lower()
+    content_type = (file.content_type or "").lower()
+    if filename.endswith(".pdf") or "pdf" in content_type:
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(io.BytesIO(content))
+            return "\n".join(page.extract_text() or "" for page in reader.pages)
+        except Exception as exc:
+            logger.warning("PDF text extraction failed: %s", exc)
+            return ""
+    try:
+        return content.decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+
+def generate_purchase_order_pdf_bytes(po: Dict[str, Any]) -> bytes:
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.lib.units import cm
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    except Exception as exc:
+        logger.error("PO PDF dependency error: %s", exc)
+        raise HTTPException(status_code=500, detail="PDF generation is not available on this server. Check reportlab is installed.")
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=1.2*cm, leftMargin=1.2*cm, topMargin=1.2*cm, bottomMargin=1.2*cm)
+    styles = getSampleStyleSheet()
+    story = []
+
+    story.append(Paragraph("LDA Group - Purchase Order", styles["Title"]))
+    story.append(Paragraph(f"<b>PO Number:</b> {po.get('po_number', '')}", styles["Normal"]))
+    story.append(Paragraph(f"<b>Status:</b> {po.get('status', '').replace('_', ' ').title()}", styles["Normal"]))
+    story.append(Paragraph(f"<b>Date:</b> {get_uk_time().strftime('%d/%m/%Y')}", styles["Normal"]))
+    story.append(Spacer(1, 0.35*cm))
+
+    detail_data = [
+        [Paragraph("<b>Supplier</b>", styles["BodyText"]), Paragraph("<b>Job / Delivery</b>", styles["BodyText"])],
+        [
+            Paragraph(f"{po.get('supplier_name', '')}<br/>{po.get('supplier_email', '')}", styles["BodyText"]),
+            Paragraph(f"{po.get('job_name', '')}<br/>{po.get('delivery_address') or ''}", styles["BodyText"]),
+        ],
+        [Paragraph(f"<b>Supplier Quote Ref:</b> {po.get('supplier_quote_number') or '-'}", styles["BodyText"]), Paragraph(f"<b>Required Date:</b> {po.get('required_date') or '-'}", styles["BodyText"])],
+    ]
+    detail_table = Table(detail_data, colWidths=[9*cm, 9*cm])
+    detail_table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.grey),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eeeeee")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("PADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(detail_table)
+    story.append(Spacer(1, 0.45*cm))
+
+    table_data = [["Description", "Qty", "Unit", "VAT %", "Net", "VAT", "Gross"]]
+    for line in po.get("lines", []):
+        table_data.append([
+            Paragraph(str(line.get("description", "")), styles["BodyText"]),
+            f"{line.get('quantity', 0):g}",
+            f"£{line.get('unit_cost', 0):,.2f}",
+            f"{line.get('vat_rate', 0):g}%",
+            f"£{line.get('net_total', 0):,.2f}",
+            f"£{line.get('vat_total', 0):,.2f}",
+            f"£{line.get('gross_total', 0):,.2f}",
+        ])
+    table_data.extend([
+        ["", "", "", "", "Net", "", f"£{po.get('net_total', 0):,.2f}"],
+        ["", "", "", "", "VAT", "", f"£{po.get('vat_total', 0):,.2f}"],
+        ["", "", "", "", "Gross", "", f"£{po.get('gross_total', 0):,.2f}"],
+    ])
+    line_table = Table(table_data, colWidths=[7*cm, 1.3*cm, 2*cm, 1.5*cm, 2*cm, 2*cm, 2.2*cm], repeatRows=1)
+    line_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#d01f2f")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.grey),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+        ("BACKGROUND", (4, -3), (-1, -1), colors.HexColor("#f3f4f6")),
+        ("FONTNAME", (4, -3), (-1, -1), "Helvetica-Bold"),
+    ]))
+    story.append(line_table)
+
+    if po.get("notes"):
+        story.append(Spacer(1, 0.45*cm))
+        story.append(Paragraph("<b>Notes</b>", styles["Heading3"]))
+        story.append(Paragraph(str(po.get("notes", "")).replace("\n", "<br/>"), styles["BodyText"]))
+
+    story.append(Spacer(1, 0.45*cm))
+    story.append(Paragraph("Please confirm receipt and advise expected delivery date.", styles["Normal"]))
+    doc.build(story)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+@api_router.get("/suppliers")
+async def get_suppliers(include_archived: bool = Query(False), admin: str = Depends(verify_admin)):
+    filter_dict = {} if include_archived else {"archived": {"$ne": True}}
+    suppliers = await db.suppliers.find(filter_dict, {"_id": 0}).sort("name", 1).to_list(1000)
+    return suppliers
+
+
+@api_router.post("/suppliers", response_model=Supplier)
+async def create_supplier(supplier: SupplierCreate, admin: str = Depends(verify_admin)):
+    existing = await db.suppliers.find_one({"name": {"$regex": f"^{re.escape(supplier.name)}$", "$options": "i"}, "archived": {"$ne": True}})
+    if existing:
+        raise HTTPException(status_code=400, detail="A supplier with this name already exists")
+    supplier_obj = Supplier(**supplier.dict())
+    await db.suppliers.insert_one(supplier_obj.dict())
+    return supplier_obj
+
+
+@api_router.put("/suppliers/{supplier_id}", response_model=Supplier)
+async def update_supplier(supplier_id: str, supplier_update: SupplierUpdate, admin: str = Depends(verify_admin)):
+    update_dict = {k: v for k, v in supplier_update.dict().items() if v is not None}
+    update_dict["updated_at"] = datetime.utcnow()
+    result = await db.suppliers.update_one({"id": supplier_id}, {"$set": update_dict})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Supplier not found")
+    updated = await db.suppliers.find_one({"id": supplier_id})
+    return Supplier(**updated)
+
+
+@api_router.delete("/suppliers/{supplier_id}")
+async def archive_supplier(supplier_id: str, admin: str = Depends(verify_admin)):
+    result = await db.suppliers.update_one({"id": supplier_id}, {"$set": {"archived": True, "active": False, "updated_at": datetime.utcnow()}})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Supplier not found")
+    return {"message": "Supplier archived successfully"}
+
+
+@api_router.get("/purchase-orders")
+async def get_purchase_orders(
+    status: Optional[str] = Query(None),
+    job_id: Optional[str] = Query(None),
+    supplier_id: Optional[str] = Query(None),
+    include_cancelled: bool = Query(True),
+    admin: str = Depends(verify_admin),
+):
+    filter_dict = {}
+    if status:
+        filter_dict["status"] = status
+    elif not include_cancelled:
+        filter_dict["status"] = {"$ne": "cancelled"}
+    if job_id:
+        filter_dict["job_id"] = job_id
+    if supplier_id:
+        filter_dict["supplier_id"] = supplier_id
+    purchase_orders = await db.purchase_orders.find(filter_dict, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    return purchase_orders
+
+
+@api_router.get("/purchase-orders/{po_id}")
+async def get_purchase_order(po_id: str, admin: str = Depends(verify_admin)):
+    po = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+    return po
+
+
+@api_router.post("/purchase-orders", response_model=PurchaseOrder)
+async def create_purchase_order(po_data: PurchaseOrderCreate, admin: str = Depends(verify_admin)):
+    po_dict = po_data.dict()
+    supplier = await db.suppliers.find_one({"id": po_data.supplier_id}) or {}
+    job = await db.jobs.find_one({"id": po_data.job_id}) or {}
+    if not supplier:
+        raise HTTPException(status_code=404, detail="Supplier not found")
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    po_dict["po_number"] = await next_po_number()
+    po_dict["supplier_name"] = po_dict.get("supplier_name") or supplier.get("name", "")
+    po_dict["supplier_email"] = po_dict.get("supplier_email") or supplier.get("orders_email") or supplier.get("accounts_email") or ""
+    po_dict["job_name"] = po_dict.get("job_name") or job.get("display_name") or job.get("name", "")
+    po_dict["job_number"] = po_dict.get("job_number") or job.get("job_number")
+    po_dict["division"] = po_dict.get("division") or job.get("division", "")
+    po_dict["delivery_address"] = po_dict.get("delivery_address") or job.get("location", "")
+    po_dict["requested_by_user_id"] = admin
+    po_dict["requested_by_name"] = admin
+    po_dict = calculate_po_totals(po_dict)
+
+    po_obj = PurchaseOrder(**po_dict)
+    await db.purchase_orders.insert_one(po_obj.dict())
+    return po_obj
+
+
+@api_router.put("/purchase-orders/{po_id}", response_model=PurchaseOrder)
+async def update_purchase_order(po_id: str, po_update: PurchaseOrderUpdate, admin: str = Depends(verify_admin)):
+    existing = await db.purchase_orders.find_one({"id": po_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+    update_dict = {k: v for k, v in po_update.dict().items() if v is not None}
+    if "lines" in update_dict:
+        temp = calculate_po_totals({"lines": update_dict["lines"]})
+        update_dict["lines"] = temp["lines"]
+        update_dict["net_total"] = temp["net_total"]
+        update_dict["vat_total"] = temp["vat_total"]
+        update_dict["gross_total"] = temp["gross_total"]
+    update_dict["updated_at"] = datetime.utcnow()
+    result = await db.purchase_orders.update_one({"id": po_id}, {"$set": update_dict})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+    updated = await db.purchase_orders.find_one({"id": po_id})
+    return PurchaseOrder(**updated)
+
+
+@api_router.delete("/purchase-orders/{po_id}")
+async def delete_purchase_order(po_id: str, admin: str = Depends(verify_admin)):
+    result = await db.purchase_orders.delete_one({"id": po_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+    return {"message": "Purchase order deleted successfully"}
+
+
+@api_router.post("/purchase-orders/{po_id}/approve")
+async def approve_purchase_order(po_id: str, admin: str = Depends(verify_admin)):
+    update = {
+        "status": "approved",
+        "approved_by_user_id": admin,
+        "approved_by_name": admin,
+        "approved_at": datetime.utcnow(),
+        "updated_at": datetime.utcnow(),
+    }
+    result = await db.purchase_orders.update_one({"id": po_id}, {"$set": update})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+    return {"message": "Purchase order approved"}
+
+
+@api_router.post("/purchase-orders/{po_id}/mark-sent")
+async def mark_purchase_order_sent(po_id: str, admin: str = Depends(verify_admin)):
+    result = await db.purchase_orders.update_one({"id": po_id}, {"$set": {"status": "sent", "sent_at": datetime.utcnow(), "sent_by_user_id": admin, "sent_by_name": admin, "updated_at": datetime.utcnow()}})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+    return {"message": "Purchase order marked as sent"}
+
+
+@api_router.get("/purchase-orders/{po_id}/pdf")
+async def download_purchase_order_pdf(po_id: str, admin: str = Depends(verify_admin)):
+    po = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+    pdf_bytes = generate_purchase_order_pdf_bytes(po)
+    filename = f"{po.get('po_number', 'purchase_order')}.pdf"
+    return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename={filename}"})
+
+
+@api_router.post("/purchase-orders/{po_id}/send-email")
+async def send_purchase_order_email(po_id: str, admin: str = Depends(verify_admin)):
+    po = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+    supplier_email = (po.get("supplier_email") or "").strip()
+    if not supplier_email:
+        raise HTTPException(status_code=400, detail="No supplier email address is saved against this purchase order")
+
+    smtp_host = os.environ.get("SMTP_HOST", "").strip()
+    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+    smtp_username = os.environ.get("SMTP_USERNAME", "").strip()
+    smtp_password = os.environ.get("SMTP_PASSWORD", "").strip()
+    smtp_from = os.environ.get("SMTP_FROM_EMAIL", smtp_username).strip()
+    smtp_from_name = os.environ.get("SMTP_FROM_NAME", "LDA Group").strip()
+    smtp_use_tls = os.environ.get("SMTP_USE_TLS", "true").lower() != "false"
+    if not smtp_host or not smtp_from:
+        raise HTTPException(status_code=500, detail="SMTP email is not configured. Add SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD and SMTP_FROM_EMAIL in Render.")
+
+    pdf_bytes = generate_purchase_order_pdf_bytes(po)
+    subject = f"Purchase Order {po.get('po_number')} - LDA Group"
+    body = f"""Hi,\n\nPlease find attached purchase order {po.get('po_number')} for the following job:\n\nJob: {po.get('job_name', '')}\nRequired date: {po.get('required_date') or 'TBC'}\nDelivery address: {po.get('delivery_address') or 'TBC'}\n\nPlease confirm receipt and advise expected delivery date.\n\nKind regards,\nLDA Group\n"""
+
+    message = EmailMessage()
+    message["From"] = f"{smtp_from_name} <{smtp_from}>"
+    message["To"] = supplier_email
+    message["Subject"] = subject
+    message.set_content(body)
+    filename = f"{po.get('po_number', 'purchase_order')}.pdf"
+    message.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename=filename)
+
+    try:
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as smtp:
+            if smtp_use_tls:
+                smtp.starttls()
+            if smtp_username and smtp_password:
+                smtp.login(smtp_username, smtp_password)
+            smtp.send_message(message)
+    except Exception as exc:
+        logger.exception("Failed to send PO email: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Failed to send PO email: {exc}")
+
+    await db.purchase_orders.update_one({"id": po_id}, {"$set": {"status": "sent", "sent_at": datetime.utcnow(), "sent_by_user_id": admin, "sent_by_name": admin, "email_subject": subject, "updated_at": datetime.utcnow()}})
+    return {"message": "Purchase order email sent", "sent_to": supplier_email}
+
+
+@api_router.post("/purchase-orders/{po_id}/assign-materials")
+async def assign_purchase_order_materials(po_id: str, admin: str = Depends(verify_admin)):
+    po = await db.purchase_orders.find_one({"id": po_id})
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+    if po.get("materials_assigned"):
+        raise HTTPException(status_code=400, detail="Materials have already been assigned for this PO")
+    materials_to_insert = []
+    updated_lines = []
+    for line in po.get("lines", []):
+        material_id = str(uuid.uuid4())
+        material = {
+            "id": material_id,
+            "job_id": po.get("job_id"),
+            "name": line.get("description", "PO material"),
+            "cost": float(line.get("unit_cost") or 0),
+            "quantity": int(float(line.get("quantity") or 0)) if float(line.get("quantity") or 0).is_integer() else float(line.get("quantity") or 0),
+            "supplier": po.get("supplier_name", ""),
+            "reference": po.get("po_number", ""),
+            "purchase_date": datetime.utcnow(),
+            "notes": f"Assigned from purchase order {po.get('po_number', '')}",
+            "created_date": datetime.utcnow(),
+            "source_type": "purchase_order",
+            "purchase_order_id": po_id,
+            "purchase_order_line_id": line.get("id"),
+            "status": "committed",
+        }
+        materials_to_insert.append(material)
+        line["material_id"] = material_id
+        line["material_status"] = "committed"
+        updated_lines.append(line)
+    if materials_to_insert:
+        await db.materials.insert_many(materials_to_insert)
+    await db.purchase_orders.update_one({"id": po_id}, {"$set": {"lines": updated_lines, "materials_assigned": True, "materials_assigned_at": datetime.utcnow(), "status": "materials_assigned", "updated_at": datetime.utcnow()}})
+    return {"message": "PO materials assigned to job", "materials_created": len(materials_to_insert)}
+
+
+@api_router.post("/purchase-orders/import-quote")
+async def import_purchase_order_quote(
+    file: UploadFile = File(...),
+    job_id: Optional[str] = Query(None),
+    admin: str = Depends(verify_admin),
+):
+    content = await file.read()
+    if len(content) > 8 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Quote file is too large. Maximum size is 8MB for this first version.")
+    extracted_text = await extract_text_from_upload(file, content)
+    lines = parse_quote_lines_from_text(extracted_text) if extracted_text else []
+    quote_number = extract_quote_number(extracted_text) if extracted_text else ""
+    confidence = "medium" if extracted_text and lines else "low"
+    warning = "Digital text was extracted. Please review line items carefully."
+    if not extracted_text:
+        warning = "No readable text could be extracted. Scanned PDFs/images need the later OCR upgrade, but the file has been stored."
+    elif not lines:
+        warning = "Text was extracted, but line items could not be confidently detected. Please enter the PO lines manually."
+
+    upload_id = str(uuid.uuid4())
+    upload_doc = {
+        "id": upload_id,
+        "filename": file.filename,
+        "content_type": file.content_type,
+        "size_bytes": len(content),
+        "job_id": job_id,
+        "uploaded_by": admin,
+        "uploaded_at": datetime.utcnow(),
+        "extracted_text": extracted_text[:20000],
+        "quote_number": quote_number,
+        "confidence": confidence,
+    }
+    # Store content only for small files to avoid hitting MongoDB document limits.
+    if len(content) <= 2 * 1024 * 1024:
+        upload_doc["content_base64"] = base64.b64encode(content).decode("utf-8")
+    await db.purchase_order_quote_uploads.insert_one(upload_doc)
+
+    return {
+        "upload_id": upload_id,
+        "filename": file.filename,
+        "quote_number": quote_number,
+        "lines": lines,
+        "confidence": confidence,
+        "warning": warning,
+        "extracted_text_preview": extracted_text[:1000] if extracted_text else "",
+    }
+
+
+@api_router.get("/jobs/{job_id}/purchase-orders")
+async def get_job_purchase_orders(job_id: str, admin: str = Depends(verify_admin)):
+    purchase_orders = await db.purchase_orders.find({"job_id": job_id}, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    committed_statuses = {"approved", "sent", "materials_assigned", "part_received"}
+    committed_value = sum(po.get("net_total", 0) for po in purchase_orders if po.get("status") in committed_statuses)
+    actual_value = sum(po.get("net_total", 0) for po in purchase_orders if po.get("status") in {"received", "invoiced", "closed"})
+    return {"purchase_orders": purchase_orders, "committed_value": committed_value, "actual_value": actual_value}
+
 
 # ==================== SYSTEM STATUS & API INFO ====================
 

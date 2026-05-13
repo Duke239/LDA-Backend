@@ -505,6 +505,10 @@ class PurchaseOrderLine(BaseModel):
     net_total: float = 0.0
     vat_total: float = 0.0
     gross_total: float = 0.0
+    prices_include_vat: bool = False
+    source_line_net_total: Optional[float] = None
+    source_line_vat_total: Optional[float] = None
+    source_line_gross_total: Optional[float] = None
     job_section_id: str = ""
     job_section_name: str = ""
     cost_category: str = "Materials"
@@ -4682,9 +4686,19 @@ def calculate_po_line_totals(line: Dict[str, Any]) -> Dict[str, Any]:
     quantity = float(line.get("quantity") or 0)
     unit_cost = float(line.get("unit_cost") or 0)
     vat_rate = float(line.get("vat_rate") or 0)
-    net_total = round(quantity * unit_cost, 2)
-    vat_total = round(net_total * (vat_rate / 100), 2)
-    gross_total = round(net_total + vat_total, 2)
+
+    # Quote imports can provide supplier gross amounts that already include VAT.
+    # Preserve those exact totals so VAT is not added twice and pennies do not drift.
+    if line.get("prices_include_vat") and line.get("source_line_gross_total") is not None:
+        gross_total = round(float(line.get("source_line_gross_total") or 0), 2)
+        net_total = round(float(line.get("source_line_net_total") or (gross_total / (1 + vat_rate / 100) if vat_rate else gross_total)), 2)
+        vat_total = round(float(line.get("source_line_vat_total") or (gross_total - net_total)), 2)
+        unit_cost = round(net_total / quantity, 4) if quantity else 0.0
+    else:
+        net_total = round(quantity * unit_cost, 2)
+        vat_total = round(net_total * (vat_rate / 100), 2)
+        gross_total = round(net_total + vat_total, 2)
+
     line["quantity"] = quantity
     line["unit_cost"] = unit_cost
     line["vat_rate"] = vat_rate
@@ -4751,16 +4765,29 @@ def parse_money_value(value: Any) -> Optional[float]:
 
 def extract_quote_number(text: str) -> str:
     cleaned_text = normalise_quote_text(text)
+    lines = [line.strip() for line in cleaned_text.splitlines() if line.strip()]
+
+    # Prefer exact label-next-line layouts such as:
+    # Quote Number\nQU-1757
+    labels = {"quote number", "quotenumber", "quotation number", "quotationnumber", "quote no", "quoteno", "estimate number", "estimatenumber"}
+    for idx, line in enumerate(lines):
+        compact = re.sub(r"[^a-z0-9]", "", line.lower())
+        if compact in {re.sub(r"[^a-z0-9]", "", label) for label in labels}:
+            for candidate in lines[idx + 1: idx + 4]:
+                value = candidate.strip().strip(".,;:")
+                if re.search(r"[A-Z]", value, re.IGNORECASE) and re.search(r"\d", value) and len(value) <= 35:
+                    return value
+
     patterns = [
-        r"(?:quote|quotation|estimate)\s*(?:number|no\.?|ref|reference)?\s*[:#-]?\s*([A-Z0-9][A-Z0-9\-/]{2,})",
-        r"(?:quote|quotation|estimate)\s+([A-Z0-9][A-Z0-9\-/]{2,})",
-        r"(?:ref|reference)\s*[:#-]?\s*([A-Z0-9][A-Z0-9\-/]{2,})",
+        r"(?:quote\s*number|quotation\s*number|quote\s*no\.?|quotation\s*no\.?)\s*[:#-]?\s*([A-Z0-9][A-Z0-9\-/]{2,})",
+        r"(?:quote|quotation)\s*(?:ref|reference)\s*[:#-]?\s*([A-Z0-9][A-Z0-9\-/]{2,})",
+        r"(?:ref|reference)\s*[:#-]?\s*([A-Z]{1,5}-?\d{2,})",
     ]
     for pattern in patterns:
         match = re.search(pattern, cleaned_text, re.IGNORECASE)
         if match:
             value = match.group(1).strip().strip(".,;:")
-            if not re.match(r"^\d{1,2}/\d{1,2}/\d{2,4}$", value):
+            if re.search(r"\d", value) and not re.match(r"^\d{1,2}/\d{1,2}/\d{2,4}$", value):
                 return value
     return ""
 
@@ -4782,13 +4809,60 @@ def extract_email_from_text(text: str) -> str:
 
 
 def extract_supplier_name_from_text(text: str) -> str:
-    """Best-effort supplier name extraction from the first useful lines of a quote."""
+    """Best-effort supplier name extraction from supplier quote text.
+
+    Patch 2.1 deliberately avoids returning the customer name, company numbers,
+    VAT numbers, phone numbers or address fragments as the supplier.
+    """
     cleaned_text = normalise_quote_text(text)
     lines = [line.strip() for line in cleaned_text.splitlines() if line.strip()]
+
+    # Xero-style estimates often show the supplier block immediately after the VAT number.
+    for idx, line in enumerate(lines):
+        if re.fullmatch(r"(?:vat\s*)?number", line, flags=re.IGNORECASE) or re.sub(r"[^a-z]", "", line.lower()) == "vatnumber" or line.lower().startswith("vat number"):
+            block = []
+            for candidate in lines[idx + 1: idx + 10]:
+                c = candidate.strip(" -|,. ")
+                lower = c.lower()
+                if not c:
+                    continue
+                if re.fullmatch(r"[0-9 ]{6,}", c):
+                    continue
+                if any(term in lower for term in ["unit", "road", "street", "park", "upon tyne", "postcode", "tel", "phone", "019", "email", "to supply", "description"]):
+                    break
+                block.append(c)
+                joined = " ".join(block)
+                if any(term in joined.lower() for term in ["ltd", "limited", "plc", "llp", "t/a", "trading as"]) and len(joined) >= 8:
+                    # Allow one or two following trading-name fragments where useful.
+                    continue
+            joined = " ".join(block).strip()
+            if joined and any(term in joined.lower() for term in ["ltd", "limited", "plc", "llp", "t/a", "trading as"]):
+                return joined[:140]
+
+    # Look for company-like runs in the first part of the document.
+    stop_words = ["description", "quantity", "qty", "unit price", "amount", "total", "terms", "payment"]
+    search_lines = []
+    for line in lines[:35]:
+        if any(stop in line.lower() for stop in stop_words):
+            break
+        search_lines.append(line)
+
+    for window_size in [3, 2, 1]:
+        for idx in range(0, max(0, len(search_lines) - window_size + 1)):
+            joined = " ".join(search_lines[idx: idx + window_size]).strip(" -|,. ")
+            lower = joined.lower()
+            if any(skip in lower for skip in ["company registration", "registered office", "lda group", "ldagroup", "quote number", "estimate", "invoice", "date", "expiry", "reference"]):
+                continue
+            if "@" in joined or re.search(r"£|\d{3,}", joined):
+                continue
+            if re.search(r"\b(ltd|limited|plc|llp|t/a|trading as)\b", joined, re.IGNORECASE) and 5 <= len(joined) <= 140:
+                return joined
+
+    # Final fallback: first non-customer, non-address useful line.
     skip_terms = [
         "quote", "quotation", "estimate", "invoice", "date", "page", "tel", "phone",
-        "email", "vat", "company reg", "account", "delivery", "address", "customer",
-        "subtotal", "total", "amount", "qty", "quantity", "unit", "price",
+        "email", "vat", "company reg", "registered office", "account", "delivery", "address", "customer",
+        "subtotal", "total", "amount", "qty", "quantity", "unit", "price", "lda group", "ldagroup",
     ]
     for line in lines[:18]:
         lower = line.lower()
@@ -4798,18 +4872,44 @@ def extract_supplier_name_from_text(text: str) -> str:
             continue
         if len(line) < 3 or len(line) > 90:
             continue
-        # Prefer company-looking lines, but still allow a simple trading name.
         return line.strip(" -|,.")
     return ""
 
 
+def quote_appears_vat_inclusive(text: str) -> bool:
+    """Return True when quote wording suggests line/totals already include VAT."""
+    lower = normalise_quote_text(text).lower()
+    inclusive_patterns = [
+        "includes vat",
+        "include vat",
+        "including vat",
+        "inc vat",
+        "inc. vat",
+        "vat included",
+        "prices include vat",
+        "amount gbp",
+    ]
+    return any(pattern in lower for pattern in inclusive_patterns)
+
+
 def extract_quote_totals(text: str) -> Dict[str, Optional[float]]:
     cleaned_text = normalise_quote_text(text)
-    result = {"net_total": None, "vat_total": None, "gross_total": None}
+    result = {"net_total": None, "vat_total": None, "gross_total": None, "vat_inclusive": quote_appears_vat_inclusive(cleaned_text)}
     money = r"£?\s*([0-9]+(?:,[0-9]{3})*(?:\.\d{2})?)"
+
+    # Specific Xero-style: INCLUDES VAT 20% 577.16 / TOTAL GBP 3,463.00
+    include_vat_matches = re.findall(r"includes?\s+vat\s*(?:\d+(?:\.\d+)?%\s*)?" + money, cleaned_text, flags=re.IGNORECASE)
+    if include_vat_matches:
+        result["vat_total"] = parse_money_value(include_vat_matches[-1])
+        result["vat_inclusive"] = True
+
+    total_gbp_matches = re.findall(r"(?:total\s*gbp|total\s+£|grand\s+total|total\s+due|amount\s+due|gross\s+total)\s*[:\-]?\s*" + money, cleaned_text, flags=re.IGNORECASE)
+    if total_gbp_matches:
+        result["gross_total"] = parse_money_value(total_gbp_matches[-1])
+
     patterns = {
         "net_total": [
-            rf"(?:sub\s*total|subtotal|net\s*total|goods\s*total|total\s*net)\s*[:\-]?\s*{money}",
+            rf"(?:sub\s*total|subtotal|net\s*total|goods\s*total|total\s*net|net\s*amount)\s*[:\-]?\s*{money}",
         ],
         "vat_total": [
             rf"(?:vat|v\.a\.t\.|tax)\s*(?:total|amount)?\s*[:\-]?\s*{money}",
@@ -4820,99 +4920,204 @@ def extract_quote_totals(text: str) -> Dict[str, Optional[float]]:
         ],
     }
     for key, key_patterns in patterns.items():
+        if result.get(key) is not None:
+            continue
         for pattern in key_patterns:
             matches = re.findall(pattern, cleaned_text, flags=re.IGNORECASE | re.MULTILINE)
             if matches:
-                # Use the final occurrence as totals often appear at the bottom.
                 value = parse_money_value(matches[-1] if isinstance(matches[-1], str) else matches[-1][0])
                 if value is not None:
                     result[key] = value
                     break
+
+    if result["gross_total"] is not None and result["vat_total"] is not None and result["net_total"] is None:
+        result["net_total"] = round(result["gross_total"] - result["vat_total"], 2)
     if result["gross_total"] is None and result["net_total"] is not None and result["vat_total"] is not None:
         result["gross_total"] = round(result["net_total"] + result["vat_total"], 2)
     if result["vat_total"] is None and result["gross_total"] is not None and result["net_total"] is not None:
         result["vat_total"] = round(result["gross_total"] - result["net_total"], 2)
+    if result["net_total"] is None and result["gross_total"] is not None and result.get("vat_inclusive"):
+        # Fallback to 20% extraction if VAT amount is not explicitly shown.
+        result["net_total"] = round(result["gross_total"] / 1.2, 2)
+        result["vat_total"] = round(result["gross_total"] - result["net_total"], 2)
     return result
 
 
-def parse_quote_lines_from_text(text: str) -> List[Dict[str, Any]]:
-    """Best-effort quote line extraction. Always requires review before PO creation."""
-    cleaned_text = normalise_quote_text(text)
-    parsed_lines: List[Dict[str, Any]] = []
-    money_value = r"£?\s*[0-9]+(?:,[0-9]{3})*(?:\.\d{2})?"
-    skip_terms = [
-        "subtotal", "sub total", "vat", "total", "balance", "amount due", "grand total",
-        "quote", "quotation", "estimate", "invoice", "terms", "payment", "bank", "sort code",
-        "account", "delivery", "address", "page", "email", "telephone", "phone",
+def extract_quote_table_lines(text: str) -> List[str]:
+    """Return only the likely line-item section, not headers/footers/terms."""
+    lines = [line.strip() for line in normalise_quote_text(text).splitlines() if line.strip()]
+    start_idx = None
+    header_terms = ["description", "qty", "quantity", "unit", "price", "vat", "amount", "total", "gbp"]
+    for idx, line in enumerate(lines):
+        lower = line.lower()
+        score = sum(1 for term in header_terms if term in lower)
+        if score >= 3 and ("description" in lower or "item" in lower or "product" in lower or "service" in lower):
+            start_idx = idx + 1
+            break
+    if start_idx is None:
+        # Fallback: start after wording such as 'To Supply' or 'Please see estimate'.
+        for idx, line in enumerate(lines):
+            lower = line.lower()
+            if any(marker in lower for marker in ["to supply", "initial estimate", "please see the following"]):
+                start_idx = idx + 1
+                break
+    if start_idx is None:
+        start_idx = 0
+
+    table_lines = []
+    stop_markers = [
+        "includes vat", "include vat", "subtotal", "sub total", "total gbp", "grand total",
+        "total due", "terms", "payment", "bank details", "all goods remain", "warranty", "returns",
+        "company registration no", "registered office",
     ]
+    for line in lines[start_idx:]:
+        lower = line.lower()
+        if any(marker in lower for marker in stop_markers):
+            break
+        table_lines.append(line)
+    return table_lines
 
-    for raw_line in cleaned_text.splitlines():
-        cleaned = " ".join(raw_line.strip().split())
-        if len(cleaned) < 8:
-            continue
-        lower = cleaned.lower()
-        if any(term in lower for term in skip_terms):
-            continue
-        if not re.search(r"\d", cleaned) or not re.search(money_value, cleaned):
-            continue
 
-        # Pattern: description qty unit-price line-total
-        structured = re.match(
-            rf"^(?P<description>.+?)\s+(?P<quantity>\d+(?:\.\d+)?)\s+(?P<unit>{money_value})\s+(?P<total>{money_value})$",
-            cleaned,
-            flags=re.IGNORECASE,
-        )
-        if structured:
-            description = structured.group("description").strip(" -|\t")
-            quantity = parse_money_value(structured.group("quantity")) or 1
-            unit_cost = parse_money_value(structured.group("unit")) or 0
-            line_total = parse_money_value(structured.group("total")) or 0
-            # If unit * qty differs significantly from final total, use total / qty as the safer unit cost.
-            if quantity and abs((quantity * unit_cost) - line_total) > 0.05:
-                unit_cost = round(line_total / quantity, 2)
-            if description and unit_cost > 0:
-                parsed_lines.append({
-                    "description": description[:220],
-                    "quantity": quantity,
-                    "unit_cost": unit_cost,
-                    "vat_rate": 20,
-                    "cost_category": "Materials",
-                })
-                if len(parsed_lines) >= 60:
-                    break
-                continue
+def line_looks_like_numeric_item_row(line: str) -> bool:
+    """Detect lines that contain qty, VAT/discount and final amount columns."""
+    stripped = line.strip()
+    if not stripped:
+        return False
+    moneyish = re.findall(r"(?:£\s*)?\d+(?:,\d{3})*(?:\.\d{2})?%?", stripped)
+    if len(moneyish) < 3:
+        return False
+    # Numeric rows often start with quantity, but can also end a description line.
+    return bool(re.search(r"\b\d+(?:\.\d+)?\s+\d", stripped) or re.search(r"\d+(?:\.\d+)?%", stripped))
 
-        amounts = re.findall(money_value, cleaned, flags=re.IGNORECASE)
-        if not amounts:
-            continue
-        line_total = parse_money_value(amounts[-1])
-        if line_total is None or line_total <= 0:
-            continue
-        description = re.sub(money_value, " ", cleaned, flags=re.IGNORECASE)
-        description = re.sub(r"\s{2,}", " ", description).strip(" -|\t")
-        # Avoid creating lines that are just codes or column headers.
-        if len(description) < 3 or description.lower() in {"qty", "quantity", "unit", "price"}:
-            continue
+
+def parse_numeric_item_row(line: str) -> Optional[Dict[str, float]]:
+    """Extract quantity, VAT rate and final line amount from a flexible numeric row.
+
+    Works from the right-hand side of the row so product names/dimensions such as
+    "Bench 45 Low" or "840mm x 840mm" are not mistaken for quantities.
+    """
+    tokens = re.findall(r"(?:£\s*)?\d+(?:,\d{3})*(?:\.\d{2})?%?", line)
+    if len(tokens) < 2:
+        return None
+    numbers = [parse_money_value(token) for token in tokens]
+    if any(num is None for num in numbers):
+        numbers = [num for num in numbers if num is not None]
+    if len(numbers) < 2:
+        return None
+
+    amount = numbers[-1]
+    percent_positions = [idx for idx, token in enumerate(tokens) if "%" in token]
+    vat_rate = 20.0
+    if percent_positions:
+        rate = parse_money_value(tokens[percent_positions[-1]])
+        if rate is not None and 0 <= rate <= 100:
+            vat_rate = rate
+
+    # Expected right-hand patterns:
+    # qty unit discount% vat% amount  -> quantity is five tokens from the end
+    # qty unit vat% amount            -> quantity is four tokens from the end
+    if len(percent_positions) >= 2 and len(numbers) >= 5:
+        quantity = numbers[-5]
+    elif len(percent_positions) >= 1 and len(numbers) >= 4:
+        quantity = numbers[-4]
+    elif len(numbers) >= 3:
+        quantity = numbers[-3]
+    else:
+        quantity = 1
+
+    if quantity is None or quantity <= 0 or quantity > 10000:
+        quantity = 1
+    if amount is None or amount <= 0:
+        return None
+    return {"quantity": float(quantity), "amount": float(amount), "vat_rate": float(vat_rate)}
+
+
+def parse_quote_lines_from_text(text: str) -> List[Dict[str, Any]]:
+    """Best-effort quote line extraction. Always requires review before PO creation.
+
+    Patch 2.1 reads table-like areas only and uses the supplier's final amount column,
+    rather than every number in the document.
+    """
+    table_lines = extract_quote_table_lines(text)
+    vat_inclusive = quote_appears_vat_inclusive(text)
+    parsed_lines: List[Dict[str, Any]] = []
+    description_buffer: List[str] = []
+    skip_description_terms = ["description", "quantity", "unit price", "discount", "amount gbp", "vat"]
+
+    def flush_line(description: str, numeric: Dict[str, float]):
+        desc = " ".join(description.split()).strip(" -|,. ")
+        if not desc or len(desc) < 3:
+            return
+        if any(term == desc.lower() for term in skip_description_terms):
+            return
+        quantity = float(numeric.get("quantity") or 1)
+        amount = float(numeric.get("amount") or 0)
+        vat_rate = float(numeric.get("vat_rate") or 20)
+        if amount <= 0 or quantity <= 0:
+            return
+        # The PO model stores unit_cost as NET. If supplier amount is VAT-inclusive,
+        # strip VAT here so the PO does not add VAT twice.
+        if vat_inclusive and vat_rate > 0:
+            gross_line_total = round(amount, 2)
+            net_line_total = round(gross_line_total / (1 + vat_rate / 100), 2)
+            vat_line_total = round(gross_line_total - net_line_total, 2)
+        else:
+            net_line_total = round(amount, 2)
+            vat_line_total = round(net_line_total * (vat_rate / 100), 2)
+            gross_line_total = round(net_line_total + vat_line_total, 2)
+        unit_cost = round(net_line_total / quantity, 4)
         parsed_lines.append({
-            "description": description[:220],
-            "quantity": 1,
-            "unit_cost": line_total,
-            "vat_rate": 20,
+            "description": desc[:220],
+            "quantity": quantity,
+            "unit_cost": unit_cost,
+            "vat_rate": vat_rate,
+            "net_total": net_line_total,
+            "vat_total": vat_line_total,
+            "gross_total": gross_line_total,
+            "prices_include_vat": bool(vat_inclusive),
+            "source_line_net_total": net_line_total,
+            "source_line_vat_total": vat_line_total,
+            "source_line_gross_total": gross_line_total,
             "cost_category": "Materials",
         })
-        if len(parsed_lines) >= 60:
-            break
 
-    # De-duplicate identical description/value rows caused by PDF extraction artefacts.
+    for raw_line in table_lines:
+        line = " ".join(raw_line.split())
+        lower = line.lower()
+        if not line:
+            continue
+        if any(term in lower for term in ["subtotal", "total", "terms", "payment", "company registration", "registered office"]):
+            break
+        if any(term == lower for term in skip_description_terms):
+            continue
+
+        numeric = parse_numeric_item_row(line) if line_looks_like_numeric_item_row(line) else None
+        if numeric:
+            # Remove the numeric tokens from the line; anything left at the front is description.
+            description_part = re.sub(r"(?:£\s*)?\d+(?:,\d{3})*(?:\.\d{2})?%?", " ", line)
+            description_part = re.sub(r"\s{2,}", " ", description_part).strip(" -|,. ")
+            description = " ".join(description_buffer + ([description_part] if description_part else []))
+            flush_line(description, numeric)
+            description_buffer = []
+        else:
+            # Ignore footnote/options that do not have their own price row.
+            if re.search(r"\*\*|\bmore\b|optional|option", line, re.IGNORECASE):
+                continue
+            description_buffer.append(line)
+            # Avoid a runaway buffer on messy PDFs.
+            if len(description_buffer) > 8:
+                description_buffer = description_buffer[-8:]
+
+    # De-duplicate identical rows caused by PDF extraction artefacts.
     unique_lines = []
     seen = set()
     for line in parsed_lines:
-        key = (line.get("description", "").lower(), float(line.get("quantity") or 0), float(line.get("unit_cost") or 0))
+        key = (line.get("description", "").lower(), float(line.get("quantity") or 0), float(line.get("unit_cost") or 0), float(line.get("vat_rate") or 0))
         if key in seen:
             continue
         seen.add(key)
         unique_lines.append(line)
-    return unique_lines
+    return unique_lines[:80]
 
 
 async def extract_text_from_upload(file: UploadFile, content: bytes) -> str:
@@ -5405,7 +5610,8 @@ async def import_purchase_order_quote(
     supplier_email = extract_email_from_text(extracted_text) if extracted_text else ""
     quote_date = extract_first_date_for_patterns(extracted_text, [r"quote\s*date", r"quotation\s*date", r"date"]) if extracted_text else ""
     expiry_date = extract_first_date_for_patterns(extracted_text, [r"valid\s*until", r"expiry\s*date", r"expires", r"quote\s*valid\s*until"]) if extracted_text else ""
-    totals = extract_quote_totals(extracted_text) if extracted_text else {"net_total": None, "vat_total": None, "gross_total": None}
+    totals = extract_quote_totals(extracted_text) if extracted_text else {"net_total": None, "vat_total": None, "gross_total": None, "vat_inclusive": False}
+    vat_inclusive = bool(totals.get("vat_inclusive"))
     supplier_match = await match_supplier_from_quote(supplier_name, supplier_email) if extracted_text else {"matched_supplier_id": None, "matched_supplier_name": "", "match_score": 0}
 
     warnings = []
@@ -5420,12 +5626,19 @@ async def import_purchase_order_quote(
             warnings.append("Supplier name could not be confidently detected.")
     if extracted_text and not quote_number:
         warnings.append("Quote reference could not be confidently detected.")
+    if extracted_text and vat_inclusive:
+        warnings.append("Quote appears to include VAT already. The importer has converted line amounts back to net values so VAT is not added twice.")
 
-    line_net_total = round(sum((float(line.get("quantity") or 0) * float(line.get("unit_cost") or 0)) for line in lines), 2)
+    line_net_total = round(sum(float(line.get("net_total") if line.get("net_total") is not None else (float(line.get("quantity") or 0) * float(line.get("unit_cost") or 0))) for line in lines), 2)
+    line_gross_total = round(sum(float(line.get("gross_total") if line.get("gross_total") is not None else ((float(line.get("quantity") or 0) * float(line.get("unit_cost") or 0)) * (1 + (float(line.get("vat_rate") or 0) / 100)))) for line in lines), 2)
     extracted_net = totals.get("net_total")
     extracted_gross = totals.get("gross_total")
     totals_match = None
-    if lines and extracted_net is not None:
+    if lines and extracted_gross is not None and vat_inclusive:
+        totals_match = abs(line_gross_total - extracted_gross) <= max(1.0, extracted_gross * 0.03)
+        if not totals_match:
+            warnings.append("Extracted line gross total does not match the quote gross total. Review quantities and prices before creating the PO.")
+    elif lines and extracted_net is not None:
         totals_match = abs(line_net_total - extracted_net) <= max(1.0, extracted_net * 0.03)
         if not totals_match:
             warnings.append("Extracted line total does not match the quote net total. Review quantities and prices before creating the PO.")
@@ -5469,6 +5682,7 @@ async def import_purchase_order_quote(
         "supplier_name": supplier_name,
         "supplier_email": supplier_email,
         "totals": totals,
+        "vat_inclusive": vat_inclusive,
         "lines": lines,
         "confidence": confidence,
         "confidence_score": confidence_score,
@@ -5496,6 +5710,8 @@ async def import_purchase_order_quote(
         "quote_net_total": totals.get("net_total"),
         "quote_vat_total": totals.get("vat_total"),
         "quote_gross_total": totals.get("gross_total"),
+        "vat_inclusive": vat_inclusive,
+        "line_gross_total": line_gross_total,
         "totals_match": totals_match,
         "confidence": confidence,
         "confidence_score": confidence_score,

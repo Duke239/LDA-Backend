@@ -20,6 +20,7 @@ import base64
 import math
 import re
 import smtplib
+import requests
 from email.message import EmailMessage
 
 try:
@@ -4719,51 +4720,199 @@ async def next_po_number() -> str:
     return f"{prefix}{str(next_number).zfill(4)}"
 
 
+def normalise_quote_text(text: str) -> str:
+    """Clean extracted quote text while preserving useful line breaks."""
+    if not text:
+        return ""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[\t\u00a0]+", " ", text)
+    text = re.sub(r"[ ]{2,}", " ", text)
+    lines = [line.strip() for line in text.split("\n")]
+    return "\n".join(line for line in lines if line)
+
+
+def parse_money_value(value: Any) -> Optional[float]:
+    """Parse UK money strings like £1,234.56 into floats."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    cleaned = str(value).strip()
+    cleaned = cleaned.replace("£", "").replace(",", "").replace(" ", "")
+    cleaned = cleaned.replace("GBP", "").replace("gbp", "")
+    cleaned = re.sub(r"[^0-9.\-]", "", cleaned)
+    if cleaned in {"", ".", "-"}:
+        return None
+    try:
+        return round(float(cleaned), 2)
+    except Exception:
+        return None
+
+
 def extract_quote_number(text: str) -> str:
+    cleaned_text = normalise_quote_text(text)
     patterns = [
-        r"(?:quote|quotation|estimate)\s*(?:number|no|ref|reference)?\s*[:#-]?\s*([A-Z0-9][A-Z0-9\-/]{2,})",
+        r"(?:quote|quotation|estimate)\s*(?:number|no\.?|ref|reference)?\s*[:#-]?\s*([A-Z0-9][A-Z0-9\-/]{2,})",
+        r"(?:quote|quotation|estimate)\s+([A-Z0-9][A-Z0-9\-/]{2,})",
         r"(?:ref|reference)\s*[:#-]?\s*([A-Z0-9][A-Z0-9\-/]{2,})",
     ]
     for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
+        match = re.search(pattern, cleaned_text, re.IGNORECASE)
+        if match:
+            value = match.group(1).strip().strip(".,;:")
+            if not re.match(r"^\d{1,2}/\d{1,2}/\d{2,4}$", value):
+                return value
+    return ""
+
+
+def extract_first_date_for_patterns(text: str, labels: List[str]) -> str:
+    cleaned_text = normalise_quote_text(text)
+    date_pattern = r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2}|\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4})"
+    for label in labels:
+        pattern = rf"{label}\s*[:#-]?\s*{date_pattern}"
+        match = re.search(pattern, cleaned_text, re.IGNORECASE)
         if match:
             return match.group(1).strip()
     return ""
 
 
+def extract_email_from_text(text: str) -> str:
+    match = re.search(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", text or "", re.IGNORECASE)
+    return match.group(0).strip() if match else ""
+
+
+def extract_supplier_name_from_text(text: str) -> str:
+    """Best-effort supplier name extraction from the first useful lines of a quote."""
+    cleaned_text = normalise_quote_text(text)
+    lines = [line.strip() for line in cleaned_text.splitlines() if line.strip()]
+    skip_terms = [
+        "quote", "quotation", "estimate", "invoice", "date", "page", "tel", "phone",
+        "email", "vat", "company reg", "account", "delivery", "address", "customer",
+        "subtotal", "total", "amount", "qty", "quantity", "unit", "price",
+    ]
+    for line in lines[:18]:
+        lower = line.lower()
+        if any(term in lower for term in skip_terms):
+            continue
+        if "@" in line or re.search(r"£|\d+\.\d{2}", line):
+            continue
+        if len(line) < 3 or len(line) > 90:
+            continue
+        # Prefer company-looking lines, but still allow a simple trading name.
+        return line.strip(" -|,.")
+    return ""
+
+
+def extract_quote_totals(text: str) -> Dict[str, Optional[float]]:
+    cleaned_text = normalise_quote_text(text)
+    result = {"net_total": None, "vat_total": None, "gross_total": None}
+    money = r"£?\s*([0-9]+(?:,[0-9]{3})*(?:\.\d{2})?)"
+    patterns = {
+        "net_total": [
+            rf"(?:sub\s*total|subtotal|net\s*total|goods\s*total|total\s*net)\s*[:\-]?\s*{money}",
+        ],
+        "vat_total": [
+            rf"(?:vat|v\.a\.t\.|tax)\s*(?:total|amount)?\s*[:\-]?\s*{money}",
+        ],
+        "gross_total": [
+            rf"(?:grand\s*total|total\s*due|amount\s*due|gross\s*total|total\s*inc\.?\s*vat|total\s*including\s*vat)\s*[:\-]?\s*{money}",
+            rf"(?:^|\n)\s*total\s*[:\-]?\s*{money}",
+        ],
+    }
+    for key, key_patterns in patterns.items():
+        for pattern in key_patterns:
+            matches = re.findall(pattern, cleaned_text, flags=re.IGNORECASE | re.MULTILINE)
+            if matches:
+                # Use the final occurrence as totals often appear at the bottom.
+                value = parse_money_value(matches[-1] if isinstance(matches[-1], str) else matches[-1][0])
+                if value is not None:
+                    result[key] = value
+                    break
+    if result["gross_total"] is None and result["net_total"] is not None and result["vat_total"] is not None:
+        result["gross_total"] = round(result["net_total"] + result["vat_total"], 2)
+    if result["vat_total"] is None and result["gross_total"] is not None and result["net_total"] is not None:
+        result["vat_total"] = round(result["gross_total"] - result["net_total"], 2)
+    return result
+
+
 def parse_quote_lines_from_text(text: str) -> List[Dict[str, Any]]:
-    lines = []
-    money_pattern = re.compile(r"£?\s*([0-9]+(?:,[0-9]{3})*(?:\.\d{2})?)")
-    for raw_line in text.splitlines():
+    """Best-effort quote line extraction. Always requires review before PO creation."""
+    cleaned_text = normalise_quote_text(text)
+    parsed_lines: List[Dict[str, Any]] = []
+    money_value = r"£?\s*[0-9]+(?:,[0-9]{3})*(?:\.\d{2})?"
+    skip_terms = [
+        "subtotal", "sub total", "vat", "total", "balance", "amount due", "grand total",
+        "quote", "quotation", "estimate", "invoice", "terms", "payment", "bank", "sort code",
+        "account", "delivery", "address", "page", "email", "telephone", "phone",
+    ]
+
+    for raw_line in cleaned_text.splitlines():
         cleaned = " ".join(raw_line.strip().split())
         if len(cleaned) < 8:
             continue
         lower = cleaned.lower()
-        if any(term in lower for term in ["subtotal", "sub total", "vat", "total", "balance", "quote", "quotation"]):
+        if any(term in lower for term in skip_terms):
             continue
-        amounts = money_pattern.findall(cleaned)
+        if not re.search(r"\d", cleaned) or not re.search(money_value, cleaned):
+            continue
+
+        # Pattern: description qty unit-price line-total
+        structured = re.match(
+            rf"^(?P<description>.+?)\s+(?P<quantity>\d+(?:\.\d+)?)\s+(?P<unit>{money_value})\s+(?P<total>{money_value})$",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        if structured:
+            description = structured.group("description").strip(" -|\t")
+            quantity = parse_money_value(structured.group("quantity")) or 1
+            unit_cost = parse_money_value(structured.group("unit")) or 0
+            line_total = parse_money_value(structured.group("total")) or 0
+            # If unit * qty differs significantly from final total, use total / qty as the safer unit cost.
+            if quantity and abs((quantity * unit_cost) - line_total) > 0.05:
+                unit_cost = round(line_total / quantity, 2)
+            if description and unit_cost > 0:
+                parsed_lines.append({
+                    "description": description[:220],
+                    "quantity": quantity,
+                    "unit_cost": unit_cost,
+                    "vat_rate": 20,
+                    "cost_category": "Materials",
+                })
+                if len(parsed_lines) >= 60:
+                    break
+                continue
+
+        amounts = re.findall(money_value, cleaned, flags=re.IGNORECASE)
         if not amounts:
             continue
-        # Use the final amount on the row as the line total. This is deliberately conservative.
-        try:
-            line_total = float(amounts[-1].replace(",", ""))
-        except Exception:
+        line_total = parse_money_value(amounts[-1])
+        if line_total is None or line_total <= 0:
             continue
-        if line_total <= 0:
+        description = re.sub(money_value, " ", cleaned, flags=re.IGNORECASE)
+        description = re.sub(r"\s{2,}", " ", description).strip(" -|\t")
+        # Avoid creating lines that are just codes or column headers.
+        if len(description) < 3 or description.lower() in {"qty", "quantity", "unit", "price"}:
             continue
-        description = money_pattern.sub("", cleaned).strip(" -|\t")
-        if not description or len(description) < 3:
-            description = cleaned
-        lines.append({
+        parsed_lines.append({
             "description": description[:220],
             "quantity": 1,
             "unit_cost": line_total,
             "vat_rate": 20,
             "cost_category": "Materials",
         })
-        if len(lines) >= 30:
+        if len(parsed_lines) >= 60:
             break
-    return lines
+
+    # De-duplicate identical description/value rows caused by PDF extraction artefacts.
+    unique_lines = []
+    seen = set()
+    for line in parsed_lines:
+        key = (line.get("description", "").lower(), float(line.get("quantity") or 0), float(line.get("unit_cost") or 0))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_lines.append(line)
+    return unique_lines
 
 
 async def extract_text_from_upload(file: UploadFile, content: bytes) -> str:
@@ -4773,14 +4922,62 @@ async def extract_text_from_upload(file: UploadFile, content: bytes) -> str:
         try:
             from pypdf import PdfReader
             reader = PdfReader(io.BytesIO(content))
-            return "\n".join(page.extract_text() or "" for page in reader.pages)
+            return normalise_quote_text("\n".join(page.extract_text() or "" for page in reader.pages))
         except Exception as exc:
             logger.warning("PDF text extraction failed: %s", exc)
             return ""
-    try:
-        return content.decode("utf-8", errors="ignore")
-    except Exception:
-        return ""
+    if filename.endswith(".docx") or "wordprocessingml" in content_type:
+        try:
+            from docx import Document
+            document = Document(io.BytesIO(content))
+            parts = [paragraph.text for paragraph in document.paragraphs if paragraph.text]
+            for table in document.tables:
+                for row in table.rows:
+                    parts.append(" | ".join(cell.text.strip() for cell in row.cells if cell.text.strip()))
+            return normalise_quote_text("\n".join(parts))
+        except Exception as exc:
+            logger.warning("DOCX text extraction failed: %s", exc)
+            return ""
+    if filename.endswith((".txt", ".csv")) or "text" in content_type or "csv" in content_type:
+        try:
+            return normalise_quote_text(content.decode("utf-8", errors="ignore"))
+        except Exception:
+            return ""
+    # JPG/PNG scanned quote OCR is deliberately not attempted in this patch.
+    return ""
+
+
+async def match_supplier_from_quote(supplier_name: str, supplier_email: str) -> Dict[str, Any]:
+    suppliers = await db.suppliers.find({"archived": {"$ne": True}}, {"_id": 0}).to_list(1000)
+    supplier_name_norm = (supplier_name or "").strip().lower()
+    supplier_email_norm = (supplier_email or "").strip().lower()
+    supplier_domain = supplier_email_norm.split("@")[-1] if "@" in supplier_email_norm else ""
+
+    best_match = None
+    best_score = 0
+    for supplier in suppliers:
+        score = 0
+        saved_name = (supplier.get("name") or "").strip().lower()
+        saved_emails = [
+            (supplier.get("orders_email") or "").strip().lower(),
+            (supplier.get("accounts_email") or "").strip().lower(),
+        ]
+        saved_domains = [email.split("@")[-1] for email in saved_emails if "@" in email]
+        if supplier_email_norm and supplier_email_norm in saved_emails:
+            score += 100
+        if supplier_domain and supplier_domain in saved_domains:
+            score += 60
+        if supplier_name_norm and saved_name:
+            if supplier_name_norm == saved_name:
+                score += 90
+            elif supplier_name_norm in saved_name or saved_name in supplier_name_norm:
+                score += 55
+        if score > best_score:
+            best_score = score
+            best_match = supplier
+    if best_match and best_score >= 50:
+        return {"matched_supplier_id": best_match.get("id"), "matched_supplier_name": best_match.get("name"), "match_score": best_score}
+    return {"matched_supplier_id": None, "matched_supplier_name": "", "match_score": 0}
 
 
 def generate_purchase_order_pdf_bytes(po: Dict[str, Any]) -> bytes:
@@ -5022,30 +5219,102 @@ async def send_purchase_order_email(po_id: str, admin: str = Depends(verify_admi
     po = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
+
     supplier_email = (po.get("supplier_email") or "").strip()
     if not supplier_email:
         raise HTTPException(status_code=400, detail="No supplier email address is saved against this purchase order")
 
+    pdf_bytes = generate_purchase_order_pdf_bytes(po)
+    po_number = po.get("po_number", "purchase_order")
+    subject = f"Purchase Order {po_number} - LDA Group"
+    filename = f"{po_number}.pdf"
+
+    body_text = f"""Hi,\n\nPlease find attached purchase order {po_number} for the following job:\n\nJob: {po.get('job_name', '')}\nRequired date: {po.get('required_date') or 'TBC'}\nDelivery address: {po.get('delivery_address') or 'TBC'}\n\nPlease confirm receipt and advise expected delivery date.\n\nKind regards,\nLDA Group\n"""
+
+    body_html = f"""
+    <p>Hi,</p>
+    <p>Please find attached purchase order <strong>{po_number}</strong> for the following job:</p>
+    <table style="border-collapse:collapse; font-family:Arial, sans-serif; font-size:14px;">
+      <tr><td style="padding:4px 12px 4px 0;"><strong>Job:</strong></td><td>{po.get('job_name', '')}</td></tr>
+      <tr><td style="padding:4px 12px 4px 0;"><strong>Required date:</strong></td><td>{po.get('required_date') or 'TBC'}</td></tr>
+      <tr><td style="padding:4px 12px 4px 0;"><strong>Delivery address:</strong></td><td>{po.get('delivery_address') or 'TBC'}</td></tr>
+    </table>
+    <p>Please confirm receipt and advise expected delivery date.</p>
+    <p>Kind regards,<br>LDA Group</p>
+    """.strip()
+
+    # Preferred route: Power Automate webhook over HTTPS.
+    # This avoids Render free-tier SMTP port restrictions on 25/465/587.
+    power_automate_url = os.environ.get("POWER_AUTOMATE_PO_EMAIL_URL", "").strip()
+    power_automate_secret = os.environ.get("POWER_AUTOMATE_PO_EMAIL_SECRET", "").strip()
+
+    if power_automate_url:
+        payload = {
+            "secret": power_automate_secret,
+            "po_id": po.get("id"),
+            "po_number": po_number,
+            "supplier_name": po.get("supplier_name", ""),
+            "supplier_email": supplier_email,
+            "reply_to": os.environ.get("PO_REPLY_TO_EMAIL", os.environ.get("SMTP_FROM_EMAIL", "info@ldagroup.co.uk")).strip(),
+            "subject": subject,
+            "body_text": body_text,
+            "body_html": body_html,
+            "pdf_filename": filename,
+            "pdf_base64": base64.b64encode(pdf_bytes).decode("utf-8"),
+            "job_id": po.get("job_id"),
+            "job_name": po.get("job_name", ""),
+            "required_date": po.get("required_date") or "",
+            "delivery_address": po.get("delivery_address") or "",
+            "net_total": po.get("net_total", 0),
+            "vat_total": po.get("vat_total", 0),
+            "gross_total": po.get("gross_total", 0),
+        }
+
+        try:
+            response = requests.post(power_automate_url, json=payload, timeout=60)
+        except Exception as exc:
+            logger.exception("Failed to call Power Automate PO email flow: %s", exc)
+            raise HTTPException(status_code=500, detail=f"Failed to call Power Automate PO email flow: {exc}")
+
+        if response.status_code < 200 or response.status_code >= 300:
+            response_text = response.text[:1000] if response.text else "No response body"
+            logger.error("Power Automate PO email flow failed: %s %s", response.status_code, response_text)
+            raise HTTPException(status_code=500, detail=f"Power Automate PO email flow failed: {response.status_code} - {response_text}")
+
+        await db.purchase_orders.update_one(
+            {"id": po_id},
+            {"$set": {
+                "status": "sent",
+                "sent_at": datetime.utcnow(),
+                "sent_by_user_id": admin,
+                "sent_by_name": admin,
+                "sent_to": supplier_email,
+                "email_subject": subject,
+                "email_method": "power_automate",
+                "updated_at": datetime.utcnow(),
+            }}
+        )
+        return {"message": "Purchase order email sent via Power Automate", "sent_to": supplier_email, "method": "power_automate"}
+
+    # Fallback route: SMTP. This is retained for paid Render instances or other hosts.
     smtp_host = os.environ.get("SMTP_HOST", "").strip()
     smtp_port = int(os.environ.get("SMTP_PORT", "587"))
     smtp_username = os.environ.get("SMTP_USERNAME", "").strip()
     smtp_password = os.environ.get("SMTP_PASSWORD", "").strip()
     smtp_from = os.environ.get("SMTP_FROM_EMAIL", smtp_username).strip()
     smtp_from_name = os.environ.get("SMTP_FROM_NAME", "LDA Group").strip()
+    smtp_reply_to = os.environ.get("SMTP_REPLY_TO", os.environ.get("PO_REPLY_TO_EMAIL", "")).strip()
     smtp_use_tls = os.environ.get("SMTP_USE_TLS", "true").lower() != "false"
     if not smtp_host or not smtp_from:
-        raise HTTPException(status_code=500, detail="SMTP email is not configured. Add SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD and SMTP_FROM_EMAIL in Render.")
-
-    pdf_bytes = generate_purchase_order_pdf_bytes(po)
-    subject = f"Purchase Order {po.get('po_number')} - LDA Group"
-    body = f"""Hi,\n\nPlease find attached purchase order {po.get('po_number')} for the following job:\n\nJob: {po.get('job_name', '')}\nRequired date: {po.get('required_date') or 'TBC'}\nDelivery address: {po.get('delivery_address') or 'TBC'}\n\nPlease confirm receipt and advise expected delivery date.\n\nKind regards,\nLDA Group\n"""
+        raise HTTPException(status_code=500, detail="Email is not configured. Add POWER_AUTOMATE_PO_EMAIL_URL and POWER_AUTOMATE_PO_EMAIL_SECRET in Render, or configure SMTP settings.")
 
     message = EmailMessage()
     message["From"] = f"{smtp_from_name} <{smtp_from}>"
     message["To"] = supplier_email
     message["Subject"] = subject
-    message.set_content(body)
-    filename = f"{po.get('po_number', 'purchase_order')}.pdf"
+    if smtp_reply_to:
+        message["Reply-To"] = smtp_reply_to
+    message.set_content(body_text)
     message.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename=filename)
 
     try:
@@ -5059,8 +5328,20 @@ async def send_purchase_order_email(po_id: str, admin: str = Depends(verify_admi
         logger.exception("Failed to send PO email: %s", exc)
         raise HTTPException(status_code=500, detail=f"Failed to send PO email: {exc}")
 
-    await db.purchase_orders.update_one({"id": po_id}, {"$set": {"status": "sent", "sent_at": datetime.utcnow(), "sent_by_user_id": admin, "sent_by_name": admin, "email_subject": subject, "updated_at": datetime.utcnow()}})
-    return {"message": "Purchase order email sent", "sent_to": supplier_email}
+    await db.purchase_orders.update_one(
+        {"id": po_id},
+        {"$set": {
+            "status": "sent",
+            "sent_at": datetime.utcnow(),
+            "sent_by_user_id": admin,
+            "sent_by_name": admin,
+            "sent_to": supplier_email,
+            "email_subject": subject,
+            "email_method": "smtp",
+            "updated_at": datetime.utcnow(),
+        }}
+    )
+    return {"message": "Purchase order email sent", "sent_to": supplier_email, "method": "smtp"}
 
 
 @api_router.post("/purchase-orders/{po_id}/assign-materials")
@@ -5106,31 +5387,92 @@ async def import_purchase_order_quote(
     job_id: Optional[str] = Query(None),
     admin: str = Depends(verify_admin),
 ):
+    """Upload a supplier quote and return structured data for PO review.
+
+    Patch 2 improves digital PDF/DOCX/TXT extraction, supplier matching, totals detection,
+    and line-item parsing. Scanned image OCR is still deliberately left for a later patch.
+    """
     content = await file.read()
-    if len(content) > 8 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="Quote file is too large. Maximum size is 8MB for this first version.")
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Quote file is too large. Maximum size is 10MB.")
+
+    filename = file.filename or "uploaded_quote"
+    content_type = file.content_type or "application/octet-stream"
     extracted_text = await extract_text_from_upload(file, content)
     lines = parse_quote_lines_from_text(extracted_text) if extracted_text else []
     quote_number = extract_quote_number(extracted_text) if extracted_text else ""
-    confidence = "medium" if extracted_text and lines else "low"
-    warning = "Digital text was extracted. Please review line items carefully."
+    supplier_name = extract_supplier_name_from_text(extracted_text) if extracted_text else ""
+    supplier_email = extract_email_from_text(extracted_text) if extracted_text else ""
+    quote_date = extract_first_date_for_patterns(extracted_text, [r"quote\s*date", r"quotation\s*date", r"date"]) if extracted_text else ""
+    expiry_date = extract_first_date_for_patterns(extracted_text, [r"valid\s*until", r"expiry\s*date", r"expires", r"quote\s*valid\s*until"]) if extracted_text else ""
+    totals = extract_quote_totals(extracted_text) if extracted_text else {"net_total": None, "vat_total": None, "gross_total": None}
+    supplier_match = await match_supplier_from_quote(supplier_name, supplier_email) if extracted_text else {"matched_supplier_id": None, "matched_supplier_name": "", "match_score": 0}
+
+    warnings = []
     if not extracted_text:
-        warning = "No readable text could be extracted. Scanned PDFs/images need the later OCR upgrade, but the file has been stored."
-    elif not lines:
-        warning = "Text was extracted, but line items could not be confidently detected. Please enter the PO lines manually."
+        warnings.append("No readable text could be extracted. Scanned PDFs/images need the later OCR upgrade, but the file has been stored.")
+    if extracted_text and not lines:
+        warnings.append("Text was extracted, but line items could not be confidently detected. Please enter the PO lines manually.")
+    if extracted_text and not supplier_match.get("matched_supplier_id"):
+        if supplier_name:
+            warnings.append("Supplier was detected but not matched to an existing supplier. Check or create the supplier before making the PO.")
+        else:
+            warnings.append("Supplier name could not be confidently detected.")
+    if extracted_text and not quote_number:
+        warnings.append("Quote reference could not be confidently detected.")
+
+    line_net_total = round(sum((float(line.get("quantity") or 0) * float(line.get("unit_cost") or 0)) for line in lines), 2)
+    extracted_net = totals.get("net_total")
+    extracted_gross = totals.get("gross_total")
+    totals_match = None
+    if lines and extracted_net is not None:
+        totals_match = abs(line_net_total - extracted_net) <= max(1.0, extracted_net * 0.03)
+        if not totals_match:
+            warnings.append("Extracted line total does not match the quote net total. Review quantities and prices before creating the PO.")
+
+    confidence_score = 0
+    if extracted_text:
+        confidence_score += 20
+    if lines:
+        confidence_score += 30
+    if supplier_match.get("matched_supplier_id"):
+        confidence_score += 20
+    elif supplier_name:
+        confidence_score += 10
+    if quote_number:
+        confidence_score += 10
+    if extracted_net is not None or extracted_gross is not None:
+        confidence_score += 15
+    if totals_match is True:
+        confidence_score += 5
+
+    if confidence_score >= 75:
+        confidence = "high"
+    elif confidence_score >= 45:
+        confidence = "medium"
+    else:
+        confidence = "low"
 
     upload_id = str(uuid.uuid4())
     upload_doc = {
         "id": upload_id,
-        "filename": file.filename,
-        "content_type": file.content_type,
+        "filename": filename,
+        "content_type": content_type,
         "size_bytes": len(content),
         "job_id": job_id,
         "uploaded_by": admin,
         "uploaded_at": datetime.utcnow(),
-        "extracted_text": extracted_text[:20000],
+        "extracted_text": extracted_text[:40000],
         "quote_number": quote_number,
+        "quote_date": quote_date,
+        "expiry_date": expiry_date,
+        "supplier_name": supplier_name,
+        "supplier_email": supplier_email,
+        "totals": totals,
+        "lines": lines,
         "confidence": confidence,
+        "confidence_score": confidence_score,
+        "warnings": warnings,
     }
     # Store content only for small files to avoid hitting MongoDB document limits.
     if len(content) <= 2 * 1024 * 1024:
@@ -5139,12 +5481,28 @@ async def import_purchase_order_quote(
 
     return {
         "upload_id": upload_id,
-        "filename": file.filename,
+        "filename": filename,
+        "content_type": content_type,
         "quote_number": quote_number,
+        "quote_date": quote_date,
+        "expiry_date": expiry_date,
+        "supplier_name": supplier_name,
+        "supplier_email": supplier_email,
+        "matched_supplier_id": supplier_match.get("matched_supplier_id"),
+        "matched_supplier_name": supplier_match.get("matched_supplier_name"),
+        "supplier_match_score": supplier_match.get("match_score", 0),
         "lines": lines,
+        "line_net_total": line_net_total,
+        "quote_net_total": totals.get("net_total"),
+        "quote_vat_total": totals.get("vat_total"),
+        "quote_gross_total": totals.get("gross_total"),
+        "totals_match": totals_match,
         "confidence": confidence,
-        "warning": warning,
-        "extracted_text_preview": extracted_text[:1000] if extracted_text else "",
+        "confidence_score": confidence_score,
+        "warnings": warnings,
+        "warning": " ".join(warnings) if warnings else "Quote imported. Please review extracted details before creating the PO.",
+        "extracted_text_preview": extracted_text[:1800] if extracted_text else "",
+        "extracted_text_length": len(extracted_text or ""),
     }
 
 

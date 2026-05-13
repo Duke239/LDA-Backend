@@ -5152,37 +5152,105 @@ async def extract_text_from_upload(file: UploadFile, content: bytes) -> str:
     return ""
 
 
+def normalise_supplier_match_name(value: str) -> str:
+    """Normalise supplier names for safer matching without over-matching short words like Test."""
+    value = (value or "").lower()
+    value = value.replace("&", " and ")
+    value = re.sub(r"\bt\s*/\s*a\b", " trading as ", value)
+    value = re.sub(r"[^a-z0-9\s]", " ", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
+def supplier_match_tokens(value: str) -> List[str]:
+    stop = {
+        "ltd", "limited", "plc", "llp", "company", "co", "the", "and", "trading", "as", "ta",
+        "fireplaces", "fireplace", "services", "service", "group", "uk", "gb", "estimate", "quote", "quotation",
+    }
+    tokens = []
+    for token in normalise_supplier_match_name(value).split():
+        if len(token) < 3:
+            continue
+        if token in stop:
+            continue
+        if token.isdigit():
+            continue
+        tokens.append(token)
+    return tokens
+
+
+def supplier_token_overlap(a: str, b: str) -> float:
+    a_tokens = set(supplier_match_tokens(a))
+    b_tokens = set(supplier_match_tokens(b))
+    if not a_tokens or not b_tokens:
+        return 0.0
+    shared = len(a_tokens & b_tokens)
+    return max(shared / len(a_tokens), shared / len(b_tokens))
+
+
 async def match_supplier_from_quote(supplier_name: str, supplier_email: str) -> Dict[str, Any]:
+    """Safely match an extracted supplier to an existing supplier.
+
+    Patch 2.2 deliberately avoids weak substring matches. A short supplier such as
+    "Test" must not match a real supplier quote unless the email is an exact match.
+    """
+    from difflib import SequenceMatcher
+
     suppliers = await db.suppliers.find({"archived": {"$ne": True}}, {"_id": 0}).to_list(1000)
-    supplier_name_norm = (supplier_name or "").strip().lower()
+    supplier_name_norm = normalise_supplier_match_name(supplier_name)
     supplier_email_norm = (supplier_email or "").strip().lower()
     supplier_domain = supplier_email_norm.split("@")[-1] if "@" in supplier_email_norm else ""
+
+    generic_domains = {
+        "gmail.com", "outlook.com", "hotmail.com", "live.com", "icloud.com", "yahoo.com", "aol.com",
+    }
 
     best_match = None
     best_score = 0
     for supplier in suppliers:
-        score = 0
-        saved_name = (supplier.get("name") or "").strip().lower()
+        saved_name_raw = supplier.get("name") or ""
+        saved_name_norm = normalise_supplier_match_name(saved_name_raw)
         saved_emails = [
             (supplier.get("orders_email") or "").strip().lower(),
             (supplier.get("accounts_email") or "").strip().lower(),
         ]
         saved_domains = [email.split("@")[-1] for email in saved_emails if "@" in email]
+
+        score = 0
+
+        # Exact mailbox match is safe.
         if supplier_email_norm and supplier_email_norm in saved_emails:
-            score += 100
-        if supplier_domain and supplier_domain in saved_domains:
-            score += 60
-        if supplier_name_norm and saved_name:
-            if supplier_name_norm == saved_name:
-                score += 90
-            elif supplier_name_norm in saved_name or saved_name in supplier_name_norm:
-                score += 55
+            score = max(score, 100)
+
+        # Domain match is only safe for business domains, or where the name is also similar.
+        overlap = supplier_token_overlap(supplier_name_norm, saved_name_norm)
+        ratio = SequenceMatcher(None, supplier_name_norm, saved_name_norm).ratio() if supplier_name_norm and saved_name_norm else 0
+
+        if supplier_domain and supplier_domain in saved_domains and supplier_domain not in generic_domains:
+            if overlap >= 0.35 or ratio >= 0.70:
+                score = max(score, 90)
+            else:
+                score = max(score, 65)
+
+        # Name matching must be strong. No raw substring matching.
+        if supplier_name_norm and saved_name_norm:
+            if supplier_name_norm == saved_name_norm:
+                score = max(score, 95)
+            elif ratio >= 0.86:
+                score = max(score, 88)
+            elif overlap >= 0.67 and len(set(supplier_match_tokens(supplier_name_norm)) & set(supplier_match_tokens(saved_name_norm))) >= 2:
+                score = max(score, 82)
+            elif overlap >= 0.50 and ratio >= 0.70:
+                score = max(score, 74)
+
         if score > best_score:
             best_score = score
             best_match = supplier
-    if best_match and best_score >= 50:
+
+    # Require a strong match. Anything lower should be a user review/create-supplier step.
+    if best_match and best_score >= 70:
         return {"matched_supplier_id": best_match.get("id"), "matched_supplier_name": best_match.get("name"), "match_score": best_score}
-    return {"matched_supplier_id": None, "matched_supplier_name": "", "match_score": 0}
+    return {"matched_supplier_id": None, "matched_supplier_name": "", "match_score": best_score if best_match else 0}
 
 
 def generate_purchase_order_pdf_bytes(po: Dict[str, Any]) -> bytes:

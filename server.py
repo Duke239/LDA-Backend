@@ -81,6 +81,30 @@ def uk_to_utc(uk_dt):
     return uk_dt.astimezone(pytz.utc)
 
 
+
+
+def format_uk_date_only(value):
+    """Format date-only values as DD-MM-YYYY for PO PDFs/emails/webhook payloads."""
+    if not value:
+        return "-"
+
+    try:
+        if isinstance(value, datetime):
+            return value.strftime("%d-%m-%Y")
+
+        value_str = str(value).strip()
+        if not value_str:
+            return "-"
+
+        # Handles ISO date strings like 2026-05-21 or 2026-05-21T00:00:00
+        if len(value_str) >= 10 and value_str[4] == "-" and value_str[7] == "-":
+            parsed = datetime.fromisoformat(value_str[:10])
+            return parsed.strftime("%d-%m-%Y")
+
+        return value_str
+    except Exception:
+        return str(value)
+
 def format_uk_datetime_for_export(value):
     """Format datetimes for CSV exports in UK local time (handles BST/GMT)."""
     if not value:
@@ -1133,6 +1157,86 @@ async def get_workers(
             worker["trades"] = [item.strip() for item in old_trade.split(",") if item.strip()] if old_trade else []
 
     return [Worker(**worker) for worker in workers]
+
+
+
+@api_router.get("/workers/export-csv")
+async def export_workers_csv(
+    include_archived: bool = Query(False),
+    worker_type: Optional[str] = Query(None),
+    division: Optional[str] = Query(None),
+    trade: Optional[str] = Query(None),
+    include_admins: bool = Query(True),
+    admin: str = Depends(verify_admin),
+):
+    """Download workers as a CSV file for admin records/backups."""
+    filter_dict = {"active": True}
+
+    if not include_archived:
+        filter_dict["archived"] = {"$ne": True}
+
+    if worker_type and worker_type != "all":
+        filter_dict["worker_type"] = worker_type
+
+    if division and division != "all":
+        filter_dict["division"] = division
+
+    if trade and trade != "all":
+        filter_dict["$or"] = [{"trades": trade}, {"trade": trade}]
+
+    if not include_admins:
+        filter_dict["role"] = {"$ne": "admin"}
+
+    workers = await db.workers.find(filter_dict, {"_id": 0}).sort("name", 1).to_list(5000)
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "name",
+        "email",
+        "phone",
+        "role",
+        "worker_type",
+        "division",
+        "trades",
+        "hourly_rate",
+        "gps_exempt",
+        "active",
+        "archived",
+        "created_date",
+    ])
+
+    for worker in workers:
+        trades = worker.get("trades") or []
+        if not trades and worker.get("trade"):
+            trades = [worker.get("trade")]
+        if isinstance(trades, list):
+            trades_text = ", ".join(str(item) for item in trades if item)
+        else:
+            trades_text = str(trades or "")
+
+        writer.writerow([
+            worker.get("name", ""),
+            worker.get("email", ""),
+            worker.get("phone", ""),
+            worker.get("role", ""),
+            worker.get("worker_type", "worker"),
+            worker.get("division", ""),
+            trades_text,
+            worker.get("hourly_rate", ""),
+            "true" if worker.get("gps_exempt") else "false",
+            "true" if worker.get("active", True) else "false",
+            "true" if worker.get("archived") else "false",
+            format_uk_datetime_for_export(worker.get("created_date")),
+        ])
+
+    output.seek(0)
+    filename = f"workers_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.csv"
+    return StreamingResponse(
+        io.BytesIO(("\ufeff" + output.getvalue()).encode("utf-8")),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
 
 @api_router.get("/workers/{worker_id}", response_model=Worker)
 async def get_worker(worker_id: str):
@@ -5451,7 +5555,7 @@ def generate_purchase_order_pdf_bytes(po: Dict[str, Any]) -> bytes:
             Paragraph(f"{po.get('supplier_name', '')}<br/>{po.get('supplier_email', '')}", styles["BodyText"]),
             Paragraph(f"{po.get('job_name', '')}<br/>{po.get('delivery_address') or ''}", styles["BodyText"]),
         ],
-        [Paragraph(f"<b>Supplier Quote Ref:</b> {po.get('supplier_quote_number') or '-'}", styles["BodyText"]), Paragraph(f"<b>Required Date:</b> {po.get('required_date') or '-'}", styles["BodyText"])],
+        [Paragraph(f"<b>Supplier Quote Ref:</b> {po.get('supplier_quote_number') or '-'}", styles["BodyText"]), Paragraph(f"<b>Required Date:</b> {format_uk_date_only(po.get('required_date'))}", styles["BodyText"])],
     ]
     detail_table = Table(detail_data, colWidths=[9*cm, 9*cm])
     detail_table.setStyle(TableStyle([
@@ -5511,6 +5615,201 @@ async def get_suppliers(include_archived: bool = Query(False), admin: str = Depe
     suppliers = await db.suppliers.find(filter_dict, {"_id": 0}).sort("name", 1).to_list(1000)
     return suppliers
 
+
+
+
+def normalise_supplier_import_value(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def normalise_supplier_match_key(value: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9]+", " ", str(value or "").lower())
+    noise = {"ltd", "limited", "plc", "uk", "the", "and", "t", "a", "ta", "t/a", "company", "co"}
+    tokens = [token for token in cleaned.split() if token and token not in noise]
+    return " ".join(tokens)
+
+
+def get_csv_value(row: Dict[str, Any], aliases: List[str]) -> str:
+    lowered = {str(key or "").strip().lower().replace(" ", "_"): value for key, value in row.items()}
+    for alias in aliases:
+        key = alias.strip().lower().replace(" ", "_")
+        if key in lowered and lowered[key] is not None:
+            return normalise_supplier_import_value(lowered[key])
+    return ""
+
+
+def parse_bool_csv(value: Any, default: bool = True) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return default
+    if text in {"true", "yes", "y", "1", "active"}:
+        return True
+    if text in {"false", "no", "n", "0", "inactive", "archived"}:
+        return False
+    return default
+
+
+@api_router.get("/suppliers/import-template")
+async def download_supplier_import_template(admin: str = Depends(verify_admin)):
+    """Download a CSV template for supplier bulk imports."""
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "supplier_name",
+        "contact_name",
+        "orders_email",
+        "accounts_email",
+        "phone",
+        "address",
+        "vat_number",
+        "payment_terms",
+        "notes",
+        "active",
+    ])
+    writer.writerow([
+        "Example Supplier Ltd",
+        "Sales Team",
+        "orders@example-supplier.co.uk",
+        "accounts@example-supplier.co.uk",
+        "0191 000 0000",
+        "Example address, Newcastle",
+        "123456789",
+        "30 days",
+        "Main supplier notes",
+        "true",
+    ])
+    output.seek(0)
+    return StreamingResponse(
+        io.BytesIO(("\ufeff" + output.getvalue()).encode("utf-8")),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=supplier_import_template.csv"},
+    )
+
+
+@api_router.post("/suppliers/import-csv")
+async def import_suppliers_csv(
+    file: UploadFile = File(...),
+    update_existing: bool = Query(True),
+    admin: str = Depends(verify_admin),
+):
+    """Bulk create/update suppliers from a CSV file."""
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Please upload a CSV file")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="The uploaded CSV file is empty")
+    if len(content) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="CSV file is too large. Maximum size is 5MB")
+
+    try:
+        decoded = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        decoded = content.decode("latin-1")
+
+    reader = csv.DictReader(io.StringIO(decoded))
+    if not reader.fieldnames:
+        raise HTTPException(status_code=400, detail="CSV file has no header row")
+
+    existing_suppliers = await db.suppliers.find({"archived": {"$ne": True}}, {"_id": 0}).to_list(10000)
+    by_email = {}
+    by_name = {}
+    for supplier in existing_suppliers:
+        for email_field in ["orders_email", "accounts_email"]:
+            email = str(supplier.get(email_field) or "").strip().lower()
+            if email:
+                by_email[email] = supplier
+        name_key = normalise_supplier_match_key(supplier.get("name", ""))
+        if name_key:
+            by_name[name_key] = supplier
+
+    created = 0
+    updated = 0
+    skipped = 0
+    errors = []
+    processed = []
+
+    for row_number, row in enumerate(reader, start=2):
+        try:
+            name = get_csv_value(row, ["supplier_name", "name", "supplier", "company", "company_name"])
+            orders_email = get_csv_value(row, ["orders_email", "order_email", "email", "supplier_email", "sales_email"])
+            accounts_email = get_csv_value(row, ["accounts_email", "account_email", "accounts", "accounts_contact_email"])
+            contact_name = get_csv_value(row, ["contact_name", "contact", "main_contact"])
+            phone = get_csv_value(row, ["phone", "telephone", "tel", "mobile"])
+            address = get_csv_value(row, ["address", "supplier_address", "registered_address"])
+            vat_number = get_csv_value(row, ["vat_number", "vat", "vat_no", "vat_registration", "vat_reg"])
+            payment_terms = get_csv_value(row, ["payment_terms", "terms"])
+            notes = get_csv_value(row, ["notes", "note", "comments"])
+            active = parse_bool_csv(get_csv_value(row, ["active", "status"]), default=True)
+
+            if not name:
+                skipped += 1
+                errors.append({"row": row_number, "message": "Missing supplier_name/name"})
+                continue
+
+            match = None
+            for email in [orders_email, accounts_email]:
+                email_key = email.strip().lower()
+                if email_key and email_key in by_email:
+                    match = by_email[email_key]
+                    break
+
+            if not match:
+                name_key = normalise_supplier_match_key(name)
+                if name_key and name_key in by_name:
+                    match = by_name[name_key]
+
+            supplier_doc = {
+                "name": name,
+                "contact_name": contact_name,
+                "orders_email": orders_email,
+                "accounts_email": accounts_email,
+                "phone": phone,
+                "address": address,
+                "vat_number": vat_number,
+                "payment_terms": payment_terms or "30 days",
+                "notes": notes,
+                "active": active,
+                "archived": False,
+            }
+
+            if match:
+                if not update_existing:
+                    skipped += 1
+                    processed.append({"row": row_number, "supplier_name": name, "action": "skipped_existing"})
+                    continue
+                update_doc = {k: v for k, v in supplier_doc.items() if v not in [None, ""] or k in ["active", "archived"]}
+                update_doc["updated_at"] = datetime.utcnow()
+                await db.suppliers.update_one({"id": match["id"]}, {"$set": update_doc})
+                updated += 1
+                processed.append({"row": row_number, "supplier_name": name, "action": "updated"})
+                # Keep lookup current for subsequent rows.
+                match.update(update_doc)
+            else:
+                supplier_obj = Supplier(**supplier_doc)
+                await db.suppliers.insert_one(supplier_obj.dict())
+                created += 1
+                processed.append({"row": row_number, "supplier_name": name, "action": "created"})
+                supplier_lookup = supplier_obj.dict()
+                for email in [supplier_obj.orders_email, supplier_obj.accounts_email]:
+                    email_key = str(email or "").strip().lower()
+                    if email_key:
+                        by_email[email_key] = supplier_lookup
+                name_key = normalise_supplier_match_key(supplier_obj.name)
+                if name_key:
+                    by_name[name_key] = supplier_lookup
+        except Exception as exc:
+            skipped += 1
+            errors.append({"row": row_number, "message": str(exc)})
+
+    return {
+        "message": "Supplier CSV import complete",
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "errors": errors,
+        "processed": processed[:100],
+    }
 
 @api_router.post("/suppliers", response_model=Supplier)
 async def create_supplier(supplier: SupplierCreate, admin: str = Depends(verify_admin)):
@@ -5672,14 +5971,30 @@ async def send_purchase_order_email(po_id: str, admin: str = Depends(verify_admi
     subject = f"Purchase Order {po_number} - LDA Group"
     filename = f"{po_number}.pdf"
 
-    body_text = f"""Hi,\n\nPlease find attached purchase order {po_number} for the following job:\n\nJob: {po.get('job_name', '')}\nRequired date: {po.get('required_date') or 'TBC'}\nDelivery address: {po.get('delivery_address') or 'TBC'}\n\nPlease confirm receipt and advise expected delivery date.\n\nKind regards,\nLDA Group\n"""
+    required_date_display = format_uk_date_only(po.get("required_date"))
+    if required_date_display == "-":
+        required_date_display = "TBC"
+
+    body_text = f"""Hi,
+
+Please find attached purchase order {po_number} for the following job:
+
+Job: {po.get('job_name', '')}
+Required date: {required_date_display}
+Delivery address: {po.get('delivery_address') or 'TBC'}
+
+Please confirm receipt and advise expected delivery date.
+
+Kind regards,
+LDA Group
+"""
 
     body_html = f"""
     <p>Hi,</p>
     <p>Please find attached purchase order <strong>{po_number}</strong> for the following job:</p>
     <table style="border-collapse:collapse; font-family:Arial, sans-serif; font-size:14px;">
       <tr><td style="padding:4px 12px 4px 0;"><strong>Job:</strong></td><td>{po.get('job_name', '')}</td></tr>
-      <tr><td style="padding:4px 12px 4px 0;"><strong>Required date:</strong></td><td>{po.get('required_date') or 'TBC'}</td></tr>
+      <tr><td style="padding:4px 12px 4px 0;"><strong>Required date:</strong></td><td>{required_date_display}</td></tr>
       <tr><td style="padding:4px 12px 4px 0;"><strong>Delivery address:</strong></td><td>{po.get('delivery_address') or 'TBC'}</td></tr>
     </table>
     <p>Please confirm receipt and advise expected delivery date.</p>
@@ -5706,7 +6021,7 @@ async def send_purchase_order_email(po_id: str, admin: str = Depends(verify_admi
             "pdf_base64": base64.b64encode(pdf_bytes).decode("utf-8"),
             "job_id": po.get("job_id"),
             "job_name": po.get("job_name", ""),
-            "required_date": po.get("required_date") or "",
+            "required_date": required_date_display,
             "delivery_address": po.get("delivery_address") or "",
             "net_total": po.get("net_total", 0),
             "vat_total": po.get("vat_total", 0),

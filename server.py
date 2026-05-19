@@ -736,6 +736,7 @@ OFFICE_LOGIN_ROLES = ["admin", "super_admin", "project_manager", "accounts", "of
 # This prevents the owner account from being locked out by role-based navigation.
 SUPER_ADMIN_EMAILS = {
     "duke.mcintyre@ldagroup.co.uk",
+    "dukemcintyre@ldagroup.co.uk",
 }
 
 def normalise_app_role(value: Optional[str]) -> str:
@@ -983,61 +984,18 @@ async def build_suspicious_flags(worker_id: Optional[str], job_id: Optional[str]
 # AUTHENTICATION ENDPOINTS
 @api_router.post("/admin/login")
 async def admin_login(login_data: AdminLogin):
-    """Admin login endpoint with specific user and role details."""
+    """Office/admin login endpoint.
 
-    # Built-in fallback Super Admin account.
-    # This prevents the app from locking you out when no database super user exists yet.
-    if login_data.username == ADMIN_USERNAME and login_data.password == ADMIN_PASSWORD:
-        return {
-            "success": True,
-            "message": "Super Admin login successful",
-            "user": {
-                "id": "built-in-super-admin",
-                "name": "LDA Super Admin",
-                "email": login_data.username,
-                "role": "super_admin",
-                "app_role": "super_admin",
-                "worker_type": "admin",
-                "division": "Management",
-                "active": True,
-            },
-        }
+    Returns the actual logged-in user so the frontend can display their name
+    and attach it to audit trail changes.
+    """
+    user = await find_office_user(login_data.username, login_data.password)
 
-    # Database users.
-    admin_user = await db.workers.find_one({
-        "email": login_data.username,
-        "password": login_data.password,
-        "active": True,
-        "archived": {"$ne": True},
-        "role": {"$in": ["admin", "super_admin", "project_manager", "accounts"]}
-    })
-
-    if admin_user:
-        app_role = (
-            admin_user.get("app_role")
-            or admin_user.get("system_role")
-            or admin_user.get("role")
-            or "admin"
-        )
-
-        # Backwards compatibility:
-        # Existing database users with role="admin" remain normal admin unless explicitly upgraded.
-        if app_role == "superadmin":
-            app_role = "super_admin"
-
+    if user:
         return {
             "success": True,
             "message": "Login successful",
-            "user": {
-                "id": admin_user.get("id"),
-                "name": admin_user.get("name", "Admin User"),
-                "email": admin_user.get("email", login_data.username),
-                "role": app_role,
-                "app_role": app_role,
-                "worker_type": admin_user.get("worker_type", "admin"),
-                "division": admin_user.get("division", ""),
-                "active": admin_user.get("active", True),
-            },
+            "user": user,
         }
 
     raise HTTPException(status_code=401, detail="Invalid admin credentials")
@@ -1046,244 +1004,6 @@ async def admin_login(login_data: AdminLogin):
 async def get_admin_me(admin: str = Depends(verify_admin)):
     """Return a lightweight current-user response for existing Basic auth sessions."""
     return {"success": True, "username": admin}
-
-# ==================== APP USER / SETTINGS ENDPOINTS ====================
-
-APP_USER_ROLES = ["super_admin", "admin", "project_manager", "accounts", "worker"]
-
-class AppUserCreate(BaseModel):
-    name: str
-    email: str
-    phone: str = ""
-    password: str = ""
-    app_role: str = "worker"
-    division: str = ""
-    trades: List[str] = []
-    hourly_rate: float = 15.0
-    gps_exempt: bool = False
-    active: bool = True
-
-class AppUserUpdate(BaseModel):
-    name: Optional[str] = None
-    email: Optional[str] = None
-    phone: Optional[str] = None
-    password: Optional[str] = None
-    app_role: Optional[str] = None
-    division: Optional[str] = None
-    trades: Optional[List[str]] = None
-    hourly_rate: Optional[float] = None
-    gps_exempt: Optional[bool] = None
-    active: Optional[bool] = None
-    archived: Optional[bool] = None
-
-class AppUserPasswordUpdate(BaseModel):
-    password: str
-
-
-def normalise_settings_role(value: Optional[str]) -> str:
-    role = normalise_app_role(value)
-    if role not in APP_USER_ROLES:
-        return "worker"
-    return role
-
-
-def worker_role_for_app_role(app_role: str) -> str:
-    app_role = normalise_settings_role(app_role)
-    if app_role in ["super_admin", "admin", "project_manager", "accounts"]:
-        return app_role
-    return "worker"
-
-
-def app_user_public_doc(worker: Dict[str, Any]) -> Dict[str, Any]:
-    if not worker:
-        return {}
-    email = str(worker.get("email", "")).strip().lower()
-    app_role = normalise_settings_role(worker.get("app_role") or worker.get("role") or "worker")
-    if email in SUPER_ADMIN_EMAILS:
-        app_role = "super_admin"
-    return {
-        "id": worker.get("id", ""),
-        "name": worker.get("name", ""),
-        "email": worker.get("email", ""),
-        "phone": worker.get("phone", ""),
-        "role": worker.get("role", "worker"),
-        "app_role": app_role,
-        "worker_type": worker.get("worker_type", "admin" if app_role != "worker" else "worker"),
-        "division": worker.get("division", ""),
-        "trades": worker.get("trades", []),
-        "hourly_rate": finance_to_number(worker.get("hourly_rate"), 15.0),
-        "gps_exempt": bool(worker.get("gps_exempt", False)),
-        "active": bool(worker.get("active", True)),
-        "archived": bool(worker.get("archived", False)),
-        "has_password": bool(worker.get("password")),
-        "created_date": worker.get("created_date"),
-        "updated_at": worker.get("updated_at"),
-    }
-
-
-async def get_super_admin_user(credentials: HTTPBasicCredentials = Depends(security)) -> Dict[str, Any]:
-    user = await find_office_user(credentials.username, credentials.password)
-    if user and normalise_app_role(user.get("role")) == "super_admin":
-        return user
-    raise HTTPException(status_code=403, detail="Super Admin access required")
-
-
-async def write_user_access_audit(action: str, target: Dict[str, Any], actor: Dict[str, Any], changes: Optional[List[Dict[str, Any]]] = None):
-    try:
-        now = datetime.utcnow().isoformat()
-        actor_name = actor.get("name") or actor.get("email") or "Super Admin"
-        target_name = target.get("name") or target.get("email") or "user"
-        for change in changes or [{}]:
-            field = change.get("field")
-            old_value = change.get("old_value")
-            new_value = change.get("new_value")
-            if action == "create":
-                description = f"{actor_name} created user access for {target_name}."
-            elif action == "archive":
-                description = f"{actor_name} archived user access for {target_name}."
-            elif action == "password":
-                description = f"{actor_name} reset the password for {target_name}."
-            elif field:
-                description = f"{actor_name} changed {target_name} {field.replace('_', ' ')} from {old_value} to {new_value}."
-            else:
-                description = f"{actor_name} updated user access for {target_name}."
-            await db.audit_logs.insert_one({
-                "id": str(uuid.uuid4()),
-                "record_type": "app_user",
-                "record_id": target.get("id"),
-                "project_id": None,
-                "project_name": None,
-                "action": action,
-                "field": field,
-                "field_label": field.replace("_", " ").title() if field else "User Access",
-                "old_value": old_value,
-                "new_value": new_value,
-                "changed_by": actor_name,
-                "changed_by_email": actor.get("email", ""),
-                "changed_by_role": actor.get("role", "super_admin"),
-                "changed_at": now,
-                "description": description,
-            })
-    except Exception as exc:
-        logger.warning("Could not write user access audit log: %s", exc)
-
-
-@api_router.get("/app-users")
-async def get_app_users(super_admin: Dict[str, Any] = Depends(get_super_admin_user)):
-    """List all app users/workers for Settings > User Access."""
-    users = await db.workers.find({}, {"_id": 0}).sort("name", 1).to_list(5000)
-    return [app_user_public_doc(user) for user in users]
-
-
-@api_router.post("/app-users")
-async def create_app_user(user: AppUserCreate, super_admin: Dict[str, Any] = Depends(get_super_admin_user)):
-    """Create a worker/app user from Settings > User Access."""
-    existing = await db.workers.find_one({"email": {"$regex": f"^{re.escape(user.email.strip())}$", "$options": "i"}})
-    if existing:
-        raise HTTPException(status_code=400, detail="A user with this email already exists")
-
-    app_role = normalise_settings_role(user.app_role)
-    now = datetime.utcnow()
-    doc = {
-        "id": str(uuid.uuid4()),
-        "name": user.name.strip(),
-        "email": user.email.strip(),
-        "phone": user.phone.strip(),
-        "password": user.password,
-        "role": worker_role_for_app_role(app_role),
-        "app_role": app_role,
-        "worker_type": "admin" if app_role != "worker" else "worker",
-        "division": user.division,
-        "trades": user.trades or [],
-        "hourly_rate": user.hourly_rate,
-        "gps_exempt": user.gps_exempt,
-        "active": user.active,
-        "archived": False,
-        "created_date": now,
-        "updated_at": now,
-    }
-    await db.workers.insert_one(doc)
-    public_doc = app_user_public_doc(doc)
-    await write_user_access_audit("create", public_doc, super_admin)
-    return public_doc
-
-
-@api_router.put("/app-users/{user_id}")
-async def update_app_user(user_id: str, update: AppUserUpdate, super_admin: Dict[str, Any] = Depends(get_super_admin_user)):
-    existing = await db.workers.find_one({"id": user_id}, {"_id": 0})
-    if not existing:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    update_data = {k: v for k, v in update.dict().items() if v is not None}
-    if not update_data:
-        return app_user_public_doc(existing)
-
-    # Owner protection: Duke must never be downgraded or locked out from Settings.
-    existing_email = str(existing.get("email", "")).strip().lower()
-    if existing_email in SUPER_ADMIN_EMAILS:
-        if "app_role" in update_data and normalise_settings_role(update_data["app_role"]) != "super_admin":
-            raise HTTPException(status_code=400, detail="The owner account cannot be downgraded from Super Admin")
-        if update_data.get("active") is False or update_data.get("archived") is True:
-            raise HTTPException(status_code=400, detail="The owner account cannot be deactivated or archived")
-
-    if "email" in update_data:
-        duplicate = await db.workers.find_one({
-            "id": {"$ne": user_id},
-            "email": {"$regex": f"^{re.escape(str(update_data['email']).strip())}$", "$options": "i"},
-        })
-        if duplicate:
-            raise HTTPException(status_code=400, detail="Another user already has this email")
-        update_data["email"] = str(update_data["email"]).strip()
-
-    if "app_role" in update_data:
-        app_role = normalise_settings_role(update_data["app_role"])
-        update_data["app_role"] = app_role
-        update_data["role"] = worker_role_for_app_role(app_role)
-        update_data["worker_type"] = "admin" if app_role != "worker" else "worker"
-
-    update_data["updated_at"] = datetime.utcnow()
-
-    audit_changes = []
-    for key, new_value in update_data.items():
-        if key == "updated_at":
-            continue
-        old_value = existing.get(key)
-        if str(old_value or "") != str(new_value or ""):
-            audit_changes.append({"field": key, "old_value": old_value, "new_value": new_value})
-
-    await db.workers.update_one({"id": user_id}, {"$set": update_data})
-    updated = await db.workers.find_one({"id": user_id}, {"_id": 0})
-    public_doc = app_user_public_doc(updated)
-    await write_user_access_audit("update", public_doc, super_admin, audit_changes or None)
-    return public_doc
-
-
-@api_router.put("/app-users/{user_id}/password")
-async def update_app_user_password(user_id: str, update: AppUserPasswordUpdate, super_admin: Dict[str, Any] = Depends(get_super_admin_user)):
-    if not update.password:
-        raise HTTPException(status_code=400, detail="Password is required")
-    existing = await db.workers.find_one({"id": user_id}, {"_id": 0})
-    if not existing:
-        raise HTTPException(status_code=404, detail="User not found")
-    await db.workers.update_one({"id": user_id}, {"$set": {"password": update.password, "updated_at": datetime.utcnow()}})
-    updated = await db.workers.find_one({"id": user_id}, {"_id": 0})
-    public_doc = app_user_public_doc(updated)
-    await write_user_access_audit("password", public_doc, super_admin)
-    return {"success": True, "message": "Password updated", "user": public_doc}
-
-
-@api_router.put("/app-users/{user_id}/archive")
-async def archive_app_user(user_id: str, super_admin: Dict[str, Any] = Depends(get_super_admin_user)):
-    existing = await db.workers.find_one({"id": user_id}, {"_id": 0})
-    if not existing:
-        raise HTTPException(status_code=404, detail="User not found")
-    if str(existing.get("email", "")).strip().lower() in SUPER_ADMIN_EMAILS:
-        raise HTTPException(status_code=400, detail="The owner account cannot be archived")
-    await db.workers.update_one({"id": user_id}, {"$set": {"archived": True, "active": False, "updated_at": datetime.utcnow()}})
-    updated = await db.workers.find_one({"id": user_id}, {"_id": 0})
-    public_doc = app_user_public_doc(updated)
-    await write_user_access_audit("archive", public_doc, super_admin)
-    return {"success": True, "message": "User archived", "user": public_doc}
 
 # SURVEYOR AUTHENTICATION ENDPOINTS
 @api_router.post("/surveyors/register")

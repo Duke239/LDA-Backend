@@ -554,6 +554,10 @@ class PurchaseOrder(BaseModel):
     job_number: Optional[int] = None
     division: str = ""
     status: str = "draft"
+    project_section_id: str = ""
+    project_section_name: str = ""
+    requested_from: str = "purchase_orders"
+    expected_payment_date: Optional[str] = None
     requested_by_user_id: str = ""
     requested_by_name: str = ""
     approved_by_user_id: Optional[str] = None
@@ -582,6 +586,7 @@ class PurchaseOrder(BaseModel):
     updated_at: Optional[datetime] = None
 
 class PurchaseOrderCreate(BaseModel):
+    po_number: Optional[str] = None
     supplier_id: str
     supplier_name: str = ""
     supplier_email: str = ""
@@ -596,6 +601,11 @@ class PurchaseOrderCreate(BaseModel):
     source_type: str = "manual"
     source_upload_id: Optional[str] = None
     source_file_name: str = ""
+    status: str = "draft"
+    project_section_id: str = ""
+    project_section_name: str = ""
+    requested_from: str = "purchase_orders"
+    expected_payment_date: Optional[str] = None
     extraction_status: str = "not_required"
     extraction_confidence: str = ""
     lines: List[PurchaseOrderLine] = []
@@ -604,6 +614,7 @@ class PurchaseOrderCreate(BaseModel):
     gross_total: float = 0.0
 
 class PurchaseOrderUpdate(BaseModel):
+    po_number: Optional[str] = None
     supplier_id: Optional[str] = None
     supplier_name: Optional[str] = None
     supplier_email: Optional[str] = None
@@ -619,6 +630,10 @@ class PurchaseOrderUpdate(BaseModel):
     source_type: Optional[str] = None
     source_upload_id: Optional[str] = None
     source_file_name: Optional[str] = None
+    project_section_id: Optional[str] = None
+    project_section_name: Optional[str] = None
+    requested_from: Optional[str] = None
+    expected_payment_date: Optional[str] = None
     extraction_status: Optional[str] = None
     extraction_confidence: Optional[str] = None
     lines: Optional[List[PurchaseOrderLine]] = None
@@ -6749,13 +6764,24 @@ async def create_purchase_order(po_data: PurchaseOrderCreate, admin: str = Depen
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    po_dict["po_number"] = await next_po_number()
+    manual_po_number = str(po_dict.get("po_number") or "").strip()
+    if manual_po_number:
+        existing_po = await db.purchase_orders.find_one({
+            "po_number": {"$regex": f"^{re.escape(manual_po_number)}$", "$options": "i"}
+        })
+        if existing_po:
+            raise HTTPException(status_code=400, detail="A purchase order with this PO number already exists")
+        po_dict["po_number"] = manual_po_number
+    else:
+        po_dict["po_number"] = await next_po_number()
+
     po_dict["supplier_name"] = po_dict.get("supplier_name") or supplier.get("name", "")
     po_dict["supplier_email"] = po_dict.get("supplier_email") or supplier.get("orders_email") or supplier.get("accounts_email") or ""
     po_dict["job_name"] = po_dict.get("job_name") or job.get("display_name") or job.get("name", "")
     po_dict["job_number"] = po_dict.get("job_number") or job.get("job_number")
     po_dict["division"] = po_dict.get("division") or job.get("division", "")
     po_dict["delivery_address"] = po_dict.get("delivery_address") or job.get("location", "")
+    po_dict["status"] = po_dict.get("status") or "draft"
     po_dict["requested_by_user_id"] = admin
     po_dict["requested_by_name"] = admin
     po_dict = calculate_po_totals(po_dict)
@@ -6771,6 +6797,35 @@ async def update_purchase_order(po_id: str, po_update: PurchaseOrderUpdate, admi
     if not existing:
         raise HTTPException(status_code=404, detail="Purchase order not found")
     update_dict = {k: v for k, v in po_update.dict().items() if v is not None}
+
+    if "po_number" in update_dict:
+        new_po_number = str(update_dict.get("po_number") or "").strip()
+        if not new_po_number:
+            raise HTTPException(status_code=400, detail="PO number cannot be blank")
+        duplicate_po = await db.purchase_orders.find_one({
+            "id": {"$ne": po_id},
+            "po_number": {"$regex": f"^{re.escape(new_po_number)}$", "$options": "i"},
+        })
+        if duplicate_po:
+            raise HTTPException(status_code=400, detail="Another purchase order already uses this PO number")
+        update_dict["po_number"] = new_po_number
+
+    if "supplier_id" in update_dict:
+        supplier = await db.suppliers.find_one({"id": update_dict["supplier_id"]}) or {}
+        if not supplier:
+            raise HTTPException(status_code=404, detail="Supplier not found")
+        update_dict["supplier_name"] = update_dict.get("supplier_name") or supplier.get("name", "")
+        update_dict["supplier_email"] = update_dict.get("supplier_email") or supplier.get("orders_email") or supplier.get("accounts_email") or ""
+
+    if "job_id" in update_dict:
+        job = await db.jobs.find_one({"id": update_dict["job_id"]}) or {}
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        update_dict["job_name"] = update_dict.get("job_name") or job.get("display_name") or job.get("name", "")
+        update_dict["job_number"] = update_dict.get("job_number") or job.get("job_number")
+        update_dict["division"] = update_dict.get("division") or job.get("division", "")
+        update_dict["delivery_address"] = update_dict.get("delivery_address") or existing.get("delivery_address") or job.get("location", "")
+
     if "lines" in update_dict:
         temp = calculate_po_totals({"lines": update_dict["lines"]})
         update_dict["lines"] = temp["lines"]

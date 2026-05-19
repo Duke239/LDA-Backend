@@ -1038,6 +1038,161 @@ class AppUserPasswordUpdate(BaseModel):
     password: str
 
 
+# ==================== ROLE PERMISSIONS SETTINGS ====================
+
+APP_SECTIONS = [
+    "dashboard",
+    "workers",
+    "jobs",
+    "project-management",
+    "schedule",
+    "purchase-orders",
+    "finance",
+    "time-reports",
+    "materials-reports",
+    "settings",
+]
+
+ROLE_PERMISSION_ROLES = ["super_admin", "admin", "project_manager", "accounts", "worker"]
+
+DEFAULT_ROLE_PERMISSIONS = {
+    "super_admin": {section: True for section in APP_SECTIONS},
+    "admin": {
+        "dashboard": True,
+        "workers": True,
+        "jobs": True,
+        "project-management": False,
+        "schedule": False,
+        "purchase-orders": True,
+        "finance": False,
+        "time-reports": True,
+        "materials-reports": True,
+        "settings": False,
+    },
+    "project_manager": {
+        "dashboard": False,
+        "workers": False,
+        "jobs": False,
+        "project-management": True,
+        "schedule": True,
+        "purchase-orders": False,
+        "finance": False,
+        "time-reports": False,
+        "materials-reports": False,
+        "settings": False,
+    },
+    "accounts": {
+        "dashboard": False,
+        "workers": False,
+        "jobs": False,
+        "project-management": False,
+        "schedule": False,
+        "purchase-orders": False,
+        "finance": True,
+        "time-reports": False,
+        "materials-reports": False,
+        "settings": False,
+    },
+    "worker": {section: False for section in APP_SECTIONS},
+}
+DEFAULT_ROLE_PERMISSIONS["worker"]["dashboard"] = False
+
+class RolePermissionsUpdate(BaseModel):
+    permissions: Dict[str, bool] = {}
+
+
+def normalise_permission_role(value: Optional[str]) -> str:
+    role = normalise_app_role(value)
+    if role == "office_admin":
+        role = "admin"
+    if role not in ROLE_PERMISSION_ROLES:
+        role = "worker"
+    return role
+
+
+def normalise_permission_map(role: str, permissions: Optional[Dict[str, Any]] = None) -> Dict[str, bool]:
+    role = normalise_permission_role(role)
+    default_map = DEFAULT_ROLE_PERMISSIONS.get(role, DEFAULT_ROLE_PERMISSIONS["worker"])
+    cleaned = {section: bool(default_map.get(section, False)) for section in APP_SECTIONS}
+
+    if isinstance(permissions, dict):
+        for section in APP_SECTIONS:
+            if section in permissions:
+                cleaned[section] = bool(permissions.get(section))
+
+    # Safety rules. Super Admin always has everything. Settings is Super Admin only.
+    if role == "super_admin":
+        cleaned = {section: True for section in APP_SECTIONS}
+    else:
+        cleaned["settings"] = False
+
+    return cleaned
+
+
+async def get_role_permissions_doc(role: str) -> Dict[str, Any]:
+    role = normalise_permission_role(role)
+    if role == "super_admin":
+        return {
+            "role": "super_admin",
+            "permissions": normalise_permission_map("super_admin"),
+            "is_default": True,
+            "protected": True,
+        }
+
+    doc = await db.role_permissions.find_one({"role": role}, {"_id": 0})
+    permissions = normalise_permission_map(role, (doc or {}).get("permissions"))
+    return {
+        "role": role,
+        "permissions": permissions,
+        "is_default": not bool(doc),
+        "protected": False,
+        "updated_at": (doc or {}).get("updated_at"),
+        "updated_by": (doc or {}).get("updated_by", ""),
+        "updated_by_email": (doc or {}).get("updated_by_email", ""),
+    }
+
+
+async def write_role_permissions_audit(role: str, actor: Dict[str, Any], changes: Optional[List[Dict[str, Any]]] = None, action: str = "update"):
+    try:
+        now = datetime.utcnow().isoformat()
+        actor_name = actor.get("name") or actor.get("email") or "Super Admin"
+        role_label = normalise_permission_role(role).replace("_", " ").title()
+        if not changes:
+            changes = [{"field": "permissions", "old_value": "", "new_value": "updated"}]
+
+        for change in changes:
+            section = str(change.get("field") or "permissions")
+            section_label = section.replace("-", " ").replace("_", " ").title()
+            old_value = change.get("old_value")
+            new_value = change.get("new_value")
+            if action == "reset":
+                description = f"{actor_name} reset role permissions to defaults."
+            else:
+                enabled_text = "enabled" if bool(new_value) else "disabled"
+                description = f"{actor_name} {enabled_text} {section_label} access for {role_label} users."
+
+            await db.audit_logs.insert_one({
+                "id": str(uuid.uuid4()),
+                "record_type": "role_permissions",
+                "record_id": normalise_permission_role(role),
+                "project_id": None,
+                "project_name": None,
+                "action": action,
+                "field": section,
+                "field_label": section_label,
+                "old_value": old_value,
+                "new_value": new_value,
+                "changed_by": actor_name,
+                "changed_by_email": actor.get("email", ""),
+                "changed_by_role": actor.get("role", "super_admin"),
+                "changed_at": now,
+                "description": description,
+            })
+    except Exception as exc:
+        logger.warning("Could not write role permission audit log: %s", exc)
+
+
+
 def normalise_settings_role(value: Optional[str]) -> str:
     role = normalise_app_role(value)
     if role not in APP_USER_ROLES:
@@ -1244,6 +1399,80 @@ async def archive_app_user(user_id: str, super_admin: Dict[str, Any] = Depends(g
     public_doc = app_user_public_doc(updated)
     await write_user_access_audit("archive", public_doc, super_admin)
     return {"success": True, "message": "User archived", "user": public_doc}
+
+
+@api_router.get("/role-permissions")
+@api_router.get("/role-permissions/")
+async def get_role_permissions(super_admin: Optional[Dict[str, Any]] = None):
+    """Return the current role-to-section permission matrix.
+
+    This endpoint is readable by the app so the sidebar can build itself from saved settings.
+    Updating permissions remains Super Admin only.
+    """
+    result = {}
+    for role in ROLE_PERMISSION_ROLES:
+        doc = await get_role_permissions_doc(role)
+        result[role] = doc["permissions"]
+    return {
+        "sections": APP_SECTIONS,
+        "roles": ROLE_PERMISSION_ROLES,
+        "permissions": result,
+        "protected_roles": ["super_admin"],
+    }
+
+
+@api_router.put("/role-permissions/{role}")
+async def update_role_permissions(role: str, update: RolePermissionsUpdate, super_admin: Dict[str, Any] = Depends(get_super_admin_user)):
+    """Update access permissions for one role. Super Admin is protected."""
+    role = normalise_permission_role(role)
+    if role == "super_admin":
+        raise HTTPException(status_code=400, detail="Super Admin permissions are protected and cannot be restricted")
+
+    existing_doc = await get_role_permissions_doc(role)
+    existing_permissions = existing_doc.get("permissions", {})
+    new_permissions = normalise_permission_map(role, update.permissions)
+
+    # Settings must remain Super Admin only.
+    new_permissions["settings"] = False
+
+    changes = []
+    for section in APP_SECTIONS:
+        old_value = bool(existing_permissions.get(section, False))
+        new_value = bool(new_permissions.get(section, False))
+        if old_value != new_value:
+            changes.append({"field": section, "old_value": old_value, "new_value": new_value})
+
+    now = datetime.utcnow()
+    await db.role_permissions.update_one(
+        {"role": role},
+        {"$set": {
+            "role": role,
+            "permissions": new_permissions,
+            "updated_at": now,
+            "updated_by": super_admin.get("name") or super_admin.get("email") or "Super Admin",
+            "updated_by_email": super_admin.get("email", ""),
+            "updated_by_role": super_admin.get("role", "super_admin"),
+        }},
+        upsert=True,
+    )
+
+    if changes:
+        await write_role_permissions_audit(role, super_admin, changes, action="update")
+
+    updated_doc = await get_role_permissions_doc(role)
+    return updated_doc
+
+
+@api_router.post("/role-permissions/reset-defaults")
+async def reset_role_permissions(super_admin: Dict[str, Any] = Depends(get_super_admin_user)):
+    """Reset editable role permissions back to defaults."""
+    await db.role_permissions.delete_many({"role": {"$ne": "super_admin"}})
+    await write_role_permissions_audit("all", super_admin, action="reset")
+    result = {}
+    for role in ROLE_PERMISSION_ROLES:
+        doc = await get_role_permissions_doc(role)
+        result[role] = doc["permissions"]
+    return {"success": True, "message": "Role permissions reset to defaults", "permissions": result}
 
 # SURVEYOR AUTHENTICATION ENDPOINTS
 @api_router.post("/surveyors/register")

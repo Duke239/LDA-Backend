@@ -190,6 +190,7 @@ class Worker(BaseModel):
     trades: List[str] = []  # Multiple trades: Roofer, Plasterer, Plumber, Builder, etc.
     hourly_rate: float = 15.0  # Default £15/hour
     password: Optional[str] = None  # For admin users
+    app_role: Optional[str] = None  # super_admin, admin, project_manager, accounts
     active: bool = True
     archived: bool = False
     gps_exempt: bool = False
@@ -206,6 +207,7 @@ class WorkerCreate(BaseModel):
     hourly_rate: float = 15.0
     gps_exempt: bool = False
     password: Optional[str] = None
+    app_role: Optional[str] = None
 
 class WorkerUpdate(BaseModel):
     name: Optional[str] = None
@@ -217,6 +219,7 @@ class WorkerUpdate(BaseModel):
     trades: Optional[List[str]] = None
     hourly_rate: Optional[float] = None
     password: Optional[str] = None
+    app_role: Optional[str] = None
     active: Optional[bool] = None
     archived: Optional[bool] = None
     gps_exempt: Optional[bool] = None
@@ -727,28 +730,77 @@ def convert_decimals_to_float(obj):
         return obj
 
 # Security functions
+OFFICE_LOGIN_ROLES = ["admin", "super_admin", "project_manager", "accounts", "office_admin"]
+
+def normalise_app_role(value: Optional[str]) -> str:
+    role = str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if role in ["super", "superadmin", "owner"]:
+        return "super_admin"
+    if role in ["pm", "project", "project_manager", "project_managers"]:
+        return "project_manager"
+    if role in ["account", "accounts", "finance"]:
+        return "accounts"
+    if role in ["office", "office_admin", "administrator", "admin"]:
+        return "admin"
+    return role or "admin"
+
+def public_user_from_worker(worker: Dict[str, Any]) -> Dict[str, Any]:
+    role = normalise_app_role(worker.get("app_role") or worker.get("role") or "admin")
+    return {
+        "id": worker.get("id", ""),
+        "name": worker.get("name") or worker.get("email") or "Office User",
+        "email": worker.get("email", ""),
+        "role": role,
+        "worker_role": worker.get("role", ""),
+        "worker_type": worker.get("worker_type", ""),
+        "division": worker.get("division", ""),
+        "trades": worker.get("trades", []),
+    }
+
+def builtin_super_admin_user(username: str = ADMIN_USERNAME) -> Dict[str, Any]:
+    return {
+        "id": "built_in_admin",
+        "name": "LDA Super Admin",
+        "email": username if "@" in str(username) else "",
+        "role": "super_admin",
+        "worker_role": "admin",
+        "worker_type": "admin",
+        "division": "Management",
+        "trades": [],
+    }
+
+async def find_office_user(username: str, password: str) -> Optional[Dict[str, Any]]:
+    if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+        return builtin_super_admin_user(username)
+
+    worker = await db.workers.find_one({
+        "email": username,
+        "password": password,
+        "active": True,
+        "archived": {"$ne": True},
+        "$or": [
+            {"role": {"$in": OFFICE_LOGIN_ROLES}},
+            {"app_role": {"$in": OFFICE_LOGIN_ROLES}},
+        ],
+    }, {"_id": 0})
+
+    if worker:
+        return public_user_from_worker(worker)
+
+    return None
+
 async def verify_admin(credentials: HTTPBasicCredentials = Depends(security)):
-    """Verify admin credentials"""
-    is_correct_username = secrets.compare_digest(credentials.username, ADMIN_USERNAME)
-    is_correct_password = secrets.compare_digest(credentials.password, ADMIN_PASSWORD)
+    """Verify an office/admin login.
 
-    if is_correct_username and is_correct_password:
-        return credentials.username
-
-    # Check if it's an admin user in the database
+    The frontend still uses Basic auth for existing protected endpoints.
+    This now accepts named office users as well as the legacy built-in admin.
+    """
     try:
-        admin_user = await db.workers.find_one({
-            "email": credentials.username,
-            "role": "admin",
-            "password": credentials.password,
-            "active": True,
-            "archived": {"$ne": True}
-        })
-
-        if admin_user:
-            return credentials.username
+        user = await find_office_user(credentials.username, credentials.password)
+        if user:
+            return user.get("email") or credentials.username
     except Exception as e:
-        print(f"Error checking admin user: {e}")
+        print(f"Error checking office user: {e}")
 
     raise HTTPException(
         status_code=401,
@@ -894,23 +946,26 @@ async def build_suspicious_flags(worker_id: Optional[str], job_id: Optional[str]
 # AUTHENTICATION ENDPOINTS
 @api_router.post("/admin/login")
 async def admin_login(login_data: AdminLogin):
-    """Admin login endpoint"""
-    if login_data.username == ADMIN_USERNAME and login_data.password == ADMIN_PASSWORD:
-        return {"success": True, "message": "Admin login successful"}
+    """Office/admin login endpoint.
 
-    # Check if it's an admin user in the database
-    admin_user = await db.workers.find_one({
-        "email": login_data.username,
-        "role": "admin",
-        "password": login_data.password,
-        "active": True,
-        "archived": {"$ne": True}
-    })
+    Returns the actual logged-in user so the frontend can display their name
+    and attach it to audit trail changes.
+    """
+    user = await find_office_user(login_data.username, login_data.password)
 
-    if admin_user:
-        return {"success": True, "message": "Admin login successful"}
+    if user:
+        return {
+            "success": True,
+            "message": "Login successful",
+            "user": user,
+        }
 
     raise HTTPException(status_code=401, detail="Invalid admin credentials")
+
+@api_router.get("/admin/me")
+async def get_admin_me(admin: str = Depends(verify_admin)):
+    """Return a lightweight current-user response for existing Basic auth sessions."""
+    return {"success": True, "username": admin}
 
 # SURVEYOR AUTHENTICATION ENDPOINTS
 @api_router.post("/surveyors/register")
@@ -4529,8 +4584,10 @@ class DashboardFinanceRecordBase(BaseModel):
     # Lightweight audit fields. The frontend sends the logged-in user details
     # where available, and the backend preserves them.
     created_by: Optional[str] = None
+    created_by_email: Optional[str] = None
     created_by_role: Optional[str] = None
     updated_by: Optional[str] = None
+    updated_by_email: Optional[str] = None
     updated_by_role: Optional[str] = None
 
 
@@ -4559,8 +4616,10 @@ class DashboardFinanceRecordUpdate(BaseModel):
     linked_marker_id: Optional[str] = None
     source_marker_id: Optional[str] = None
     created_by: Optional[str] = None
+    created_by_email: Optional[str] = None
     created_by_role: Optional[str] = None
     updated_by: Optional[str] = None
+    updated_by_email: Optional[str] = None
     updated_by_role: Optional[str] = None
     archived: Optional[bool] = None
 
@@ -4603,8 +4662,10 @@ def serialize_dashboard_finance_record(record: Dict[str, Any]) -> Dict[str, Any]
         "linked_marker_id": record.get("linked_marker_id"),
         "source_marker_id": record.get("source_marker_id"),
         "created_by": record.get("created_by"),
+        "created_by_email": record.get("created_by_email"),
         "created_by_role": record.get("created_by_role"),
         "updated_by": record.get("updated_by"),
+        "updated_by_email": record.get("updated_by_email"),
         "updated_by_role": record.get("updated_by_role"),
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
@@ -4641,6 +4702,114 @@ async def backfill_dashboard_project_name(data: Dict[str, Any]) -> Dict[str, Any
                 or "Unnamed project"
             )
     return data
+
+
+FINANCE_AUDIT_FIELD_LABELS = {
+    "project_name": "project name",
+    "type": "finance type",
+    "description": "description",
+    "expected_date": "expected date",
+    "expected_amount": "expected amount",
+    "anticipated_date": "anticipated / due date",
+    "anticipated_amount": "anticipated amount",
+    "status": "status",
+    "received_date": "received date",
+    "received_amount": "received amount",
+    "notes": "notes",
+    "linked_marker_id": "linked marker",
+    "source_marker_id": "source marker",
+}
+
+FINANCE_AUDIT_TRACKED_FIELDS = list(FINANCE_AUDIT_FIELD_LABELS.keys())
+FINANCE_MONEY_FIELDS = {"expected_amount", "anticipated_amount", "received_amount"}
+
+def audit_actor_from_data(data: Dict[str, Any], existing: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    existing = existing or {}
+    name = (data.get("updated_by") or data.get("created_by") or existing.get("updated_by") or existing.get("created_by") or "Unknown user")
+    email = (data.get("updated_by_email") or data.get("created_by_email") or existing.get("updated_by_email") or existing.get("created_by_email") or "")
+    role = (data.get("updated_by_role") or data.get("created_by_role") or existing.get("updated_by_role") or existing.get("created_by_role") or "unknown")
+    return {
+        "name": str(name).strip() or "Unknown user",
+        "email": str(email).strip(),
+        "role": str(role).strip() or "unknown",
+    }
+
+def normalise_audit_compare_value(value: Any) -> Any:
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        return round(value, 2)
+    if isinstance(value, int):
+        return value
+    return str(value).strip()
+
+def format_audit_value(field: str, value: Any) -> str:
+    if value is None or value == "":
+        return "blank"
+    if field in FINANCE_MONEY_FIELDS:
+        try:
+            return f"£{float(value):,.2f}"
+        except Exception:
+            return str(value)
+    if field == "status":
+        return str(value).replace("_", " ").title()
+    return str(value)
+
+def audit_record_label(record: Dict[str, Any]) -> str:
+    project = record.get("project_name") or "Unallocated project"
+    description = record.get("description") or record.get("type") or "finance record"
+    return f"{project} – {description}"
+
+def build_audit_description(action: str, field: Optional[str], old_value: Any, new_value: Any, record: Dict[str, Any], actor: Dict[str, str]) -> str:
+    actor_name = actor.get("name") or "Unknown user"
+    label = audit_record_label(record)
+    if action == "create":
+        return f"{actor_name} created {label}."
+    if action == "delete":
+        return f"{actor_name} archived {label}."
+    field_label = FINANCE_AUDIT_FIELD_LABELS.get(field or "", field or "field")
+    return f"{actor_name} changed {label} {field_label} from {format_audit_value(field or '', old_value)} to {format_audit_value(field or '', new_value)}."
+
+async def insert_finance_audit_log(action: str, record_id: str, record: Dict[str, Any], actor: Dict[str, str], field: Optional[str] = None, old_value: Any = None, new_value: Any = None) -> Dict[str, Any]:
+    now = datetime.utcnow().isoformat()
+    log = {
+        "id": str(uuid.uuid4()),
+        "record_type": "finance_dashboard_record",
+        "record_id": record_id,
+        "project_id": record.get("project_id"),
+        "project_name": record.get("project_name"),
+        "action": action,
+        "field": field,
+        "field_label": FINANCE_AUDIT_FIELD_LABELS.get(field or "", field),
+        "old_value": old_value,
+        "new_value": new_value,
+        "changed_by": actor.get("name"),
+        "changed_by_email": actor.get("email"),
+        "changed_by_role": actor.get("role"),
+        "changed_at": now,
+        "description": build_audit_description(action, field, old_value, new_value, record, actor),
+    }
+    await db.audit_logs.insert_one(log)
+    log.pop("_id", None)
+    return log
+
+async def insert_finance_update_audit_logs(existing: Dict[str, Any], updated: Dict[str, Any], update_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    actor = audit_actor_from_data(update_data, existing)
+    logs = []
+    for field in FINANCE_AUDIT_TRACKED_FIELDS:
+        if field not in update_data:
+            continue
+        old_value = existing.get(field)
+        new_value = updated.get(field)
+        if normalise_audit_compare_value(old_value) == normalise_audit_compare_value(new_value):
+            continue
+        logs.append(await insert_finance_audit_log("update", updated.get("id"), updated, actor, field, old_value, new_value))
+    return logs
+
+def serialize_audit_log(log: Dict[str, Any]) -> Dict[str, Any]:
+    log = dict(log or {})
+    log.pop("_id", None)
+    return log
 
 
 @api_router.get("/finance-records")
@@ -4695,10 +4864,13 @@ async def create_dashboard_finance_record(record: DashboardFinanceRecordCreate):
     data["archived"] = False
 
     created_by = (data.get("created_by") or "").strip()
+    created_by_email = (data.get("created_by_email") or "").strip()
     created_by_role = (data.get("created_by_role") or "").strip()
     data["created_by"] = created_by or "Unknown user"
+    data["created_by_email"] = created_by_email
     data["created_by_role"] = created_by_role or "unknown"
     data["updated_by"] = (data.get("updated_by") or data["created_by"]).strip() or data["created_by"]
+    data["updated_by_email"] = (data.get("updated_by_email") or data["created_by_email"]).strip()
     data["updated_by_role"] = (data.get("updated_by_role") or data["created_by_role"]).strip() or data["created_by_role"]
 
     if data.get("anticipated_amount") is None:
@@ -4710,6 +4882,7 @@ async def create_dashboard_finance_record(record: DashboardFinanceRecordCreate):
     data = await backfill_dashboard_project_name(data)
 
     await db.finance_dashboard_records.insert_one(data)
+    await insert_finance_audit_log("create", data["id"], data, audit_actor_from_data(data))
 
     serialized = serialize_dashboard_finance_record(data)
     serialized["status"] = calculate_dashboard_finance_status(serialized)
@@ -4732,14 +4905,16 @@ async def update_dashboard_finance_record(record_id: str, update: DashboardFinan
     update_data["updated_at"] = datetime.utcnow().isoformat()
 
     # Do not accidentally blank out audit fields when the frontend has no user context.
-    for audit_key in ["created_by", "created_by_role", "updated_by", "updated_by_role"]:
+    for audit_key in ["created_by", "created_by_email", "created_by_role", "updated_by", "updated_by_email", "updated_by_role"]:
         if audit_key in update_data and (update_data[audit_key] is None or str(update_data[audit_key]).strip() == ""):
             update_data.pop(audit_key, None)
 
     if not update_data.get("updated_by"):
-        update_data["updated_by"] = "Unknown user"
+        update_data["updated_by"] = existing.get("updated_by") or existing.get("created_by") or "Unknown user"
+    if not update_data.get("updated_by_email"):
+        update_data["updated_by_email"] = existing.get("updated_by_email") or existing.get("created_by_email") or ""
     if not update_data.get("updated_by_role"):
-        update_data["updated_by_role"] = "unknown"
+        update_data["updated_by_role"] = existing.get("updated_by_role") or existing.get("created_by_role") or "unknown"
 
     if update_data.get("project_id") and not update_data.get("project_name"):
         update_data = await backfill_dashboard_project_name(update_data)
@@ -4750,6 +4925,7 @@ async def update_dashboard_finance_record(record_id: str, update: DashboardFinan
     )
 
     updated = await db.finance_dashboard_records.find_one({"id": record_id}, {"_id": 0})
+    await insert_finance_update_audit_logs(existing, updated, update_data)
     serialized = serialize_dashboard_finance_record(updated)
     serialized["status"] = calculate_dashboard_finance_status(serialized)
 
@@ -4758,6 +4934,7 @@ async def update_dashboard_finance_record(record_id: str, update: DashboardFinan
 
 @api_router.delete("/finance-records/{record_id}")
 async def delete_dashboard_finance_record(record_id: str):
+    existing = await db.finance_dashboard_records.find_one({"id": record_id, "archived": {"$ne": True}}, {"_id": 0})
     result = await db.finance_dashboard_records.update_one(
         {"id": record_id, "archived": {"$ne": True}},
         {"$set": {"archived": True, "updated_at": datetime.utcnow().isoformat()}},
@@ -4766,7 +4943,51 @@ async def delete_dashboard_finance_record(record_id: str):
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Finance record not found")
 
+    if existing:
+        await insert_finance_audit_log("delete", record_id, existing, audit_actor_from_data({}, existing))
+
     return {"success": True, "message": "Finance record deleted"}
+
+
+@api_router.get("/finance-records/{record_id}/audit-logs")
+async def get_dashboard_finance_record_audit_logs(record_id: str):
+    logs = await db.audit_logs.find({
+        "record_type": "finance_dashboard_record",
+        "record_id": record_id,
+    }, {"_id": 0}).sort("changed_at", -1).to_list(500)
+    return [serialize_audit_log(log) for log in logs]
+
+
+@api_router.get("/audit-logs")
+async def get_audit_logs(
+    record_type: Optional[str] = Query(None),
+    record_id: Optional[str] = Query(None),
+    project_id: Optional[str] = Query(None),
+    changed_by_email: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    limit: int = Query(200),
+):
+    query: Dict[str, Any] = {}
+    if record_type:
+        query["record_type"] = record_type
+    if record_id:
+        query["record_id"] = record_id
+    if project_id:
+        query["project_id"] = project_id
+    if changed_by_email:
+        query["changed_by_email"] = changed_by_email
+    if start_date or end_date:
+        date_query: Dict[str, Any] = {}
+        if start_date:
+            date_query["$gte"] = start_date
+        if end_date:
+            date_query["$lte"] = end_date
+        query["changed_at"] = date_query
+
+    safe_limit = max(1, min(1000, limit))
+    logs = await db.audit_logs.find(query, {"_id": 0}).sort("changed_at", -1).to_list(safe_limit)
+    return [serialize_audit_log(log) for log in logs]
 
 
 @api_router.get("/finance-dashboard")

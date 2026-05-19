@@ -6401,6 +6401,437 @@ async def get_job_purchase_orders(job_id: str, admin: str = Depends(verify_admin
     return {"purchase_orders": purchase_orders, "committed_value": committed_value, "actual_value": actual_value}
 
 
+
+# ==================== FINANCE MATERIAL SPEND DASHBOARD ENDPOINTS ====================
+# These routes feed Finance > Material Spend. They combine actual material entries,
+# purchase order commitments and forecast material allowances from Gantt sections.
+
+MATERIAL_PO_CASH_OUT_STATUSES = {
+    "draft",
+    "raised",
+    "sent",
+    "sent_to_supplier",
+    "awaiting_delivery",
+    "part_delivered",
+    "delivered",
+    "awaiting_invoice",
+    "invoiced",
+    "part_paid",
+    "disputed",
+}
+
+MATERIAL_PO_PAID_STATUSES = {"paid"}
+MATERIAL_PO_CANCELLED_STATUSES = {"cancelled", "void", "archived"}
+
+
+def finance_material_parse_date(value: Any) -> Optional[date]:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")[:10]).date()
+    except Exception:
+        return None
+
+
+def finance_material_iso(value: Any) -> str:
+    parsed = finance_material_parse_date(value)
+    return parsed.isoformat() if parsed else ""
+
+
+def finance_material_date_in_range(value: Any, start_date: Optional[str], end_date: Optional[str]) -> bool:
+    parsed = finance_material_parse_date(value)
+    if not parsed:
+        return False
+    start = finance_material_parse_date(start_date) if start_date else None
+    end = finance_material_parse_date(end_date) if end_date else None
+    if start and parsed < start:
+        return False
+    if end and parsed > end:
+        return False
+    return True
+
+
+def finance_material_to_float(value: Any, fallback: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return fallback
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def finance_material_money(value: Any) -> float:
+    return round(finance_material_to_float(value), 2)
+
+
+def normalise_po_status(value: Any) -> str:
+    return str(value or "draft").strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def material_receipt_present(material: Dict[str, Any]) -> bool:
+    receipt_keys = [
+        "receipt_url",
+        "receipt_file_url",
+        "receipt_file_id",
+        "receipt_image",
+        "receipt_photo",
+        "receipt_attachment",
+        "attachment_url",
+        "file_url",
+    ]
+    if any(material.get(key) for key in receipt_keys):
+        return True
+    reference = str(material.get("reference") or material.get("receipt_number") or "").strip()
+    return bool(reference)
+
+
+def get_material_allowance_for_job(job: Dict[str, Any]) -> float:
+    sections = job.get("gantt_sections") or []
+    material_total = 0.0
+    for section in sections:
+        material_total += finance_material_to_float(section.get("material_value"))
+    if material_total <= 0:
+        material_total = finance_material_to_float(job.get("material_allowance") or job.get("materials_allowance"))
+    return round(material_total, 2)
+
+
+def get_section_forecast_material_value(section: Dict[str, Any]) -> float:
+    material_value = finance_material_to_float(section.get("material_value"))
+    if material_value > 0:
+        return round(material_value, 2)
+    # Fallback for older sections where only a total section value exists.
+    # We deliberately keep this fallback conservative so it does not inflate material forecast.
+    return 0.0
+
+
+async def build_material_spend_dashboard_data(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    job_id: Optional[str] = None,
+    supplier: Optional[str] = None,
+    status: Optional[str] = None,
+    spend_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    today = datetime.utcnow().date()
+    if not start_date:
+        start_date = today.isoformat()
+    if not end_date:
+        end_date = (today + timedelta(days=27)).isoformat()
+
+    jobs = await db.jobs.find({"archived": {"$ne": True}}, {"_id": 0}).to_list(5000)
+    job_lookup = {job.get("id"): job for job in jobs if job.get("id")}
+
+    rows: List[Dict[str, Any]] = []
+
+    # 1) Actual material entries
+    material_query: Dict[str, Any] = {"archived": {"$ne": True}}
+    if job_id:
+        material_query["job_id"] = job_id
+    if supplier:
+        material_query["supplier"] = {"$regex": supplier, "$options": "i"}
+
+    materials = await db.materials.find(material_query, {"_id": 0}).to_list(10000)
+    for material in materials:
+        job = job_lookup.get(material.get("job_id"), {})
+        material_date = finance_material_iso(material.get("purchase_date") or material.get("date") or material.get("created_date"))
+        net = finance_material_money(material.get("net_total"))
+        if net <= 0:
+            net = finance_material_money(finance_material_to_float(material.get("cost")) * finance_material_to_float(material.get("quantity"), 1.0))
+        vat = finance_material_money(material.get("vat_total") or material.get("vat"))
+        gross = finance_material_money(material.get("gross_total") or (net + vat))
+        row_status = str(material.get("status") or "approved").strip().lower().replace(" ", "_")
+        receipt_ok = material_receipt_present(material)
+
+        rows.append({
+            "id": material.get("id") or str(uuid.uuid4()),
+            "date": material_date,
+            "type": "actual",
+            "type_label": "Actual",
+            "job_id": material.get("job_id", ""),
+            "job_name": job.get("name") or job.get("display_name") or material.get("job_name") or "Unknown job",
+            "job_client": job.get("client", ""),
+            "supplier": material.get("supplier") or "Unknown supplier",
+            "description": material.get("name") or material.get("description") or "Material entry",
+            "net": net,
+            "vat": vat,
+            "gross": gross,
+            "status": row_status,
+            "due_date": "",
+            "paid_date": material_date,
+            "source": "Material Entry",
+            "source_id": material.get("id"),
+            "receipt": receipt_ok,
+            "receipt_reference": material.get("reference") or material.get("receipt_number") or "",
+            "notes": material.get("notes", ""),
+        })
+
+    # 2) Purchase orders / committed spend
+    po_query: Dict[str, Any] = {}
+    if job_id:
+        po_query["job_id"] = job_id
+    if supplier:
+        po_query["supplier_name"] = {"$regex": supplier, "$options": "i"}
+    purchase_orders = await db.purchase_orders.find(po_query, {"_id": 0}).to_list(10000)
+
+    for po in purchase_orders:
+        po_status = normalise_po_status(po.get("status"))
+        if po_status in MATERIAL_PO_CANCELLED_STATUSES:
+            continue
+        po_date = finance_material_iso(po.get("created_at") or po.get("approved_at") or po.get("sent_at"))
+        due_date = finance_material_iso(po.get("expected_payment_date") or po.get("payment_due_date") or po.get("invoice_due_date") or po.get("required_date") or po.get("created_at"))
+        paid_date = finance_material_iso(po.get("paid_date") or po.get("payment_date"))
+        net = finance_material_money(po.get("net_total"))
+        vat = finance_material_money(po.get("vat_total"))
+        gross = finance_material_money(po.get("gross_total") or (net + vat))
+        row_type = "po_paid" if po_status in MATERIAL_PO_PAID_STATUSES else "po"
+        source_label = po.get("po_number") or "Purchase Order"
+
+        rows.append({
+            "id": po.get("id") or str(uuid.uuid4()),
+            "date": po_date,
+            "type": row_type,
+            "type_label": "PO Paid" if row_type == "po_paid" else "PO",
+            "job_id": po.get("job_id", ""),
+            "job_name": po.get("job_name") or (job_lookup.get(po.get("job_id"), {}) or {}).get("name") or "Unknown job",
+            "job_client": (job_lookup.get(po.get("job_id"), {}) or {}).get("client", ""),
+            "supplier": po.get("supplier_name") or "Unknown supplier",
+            "description": po.get("supplier_quote_number") or po.get("notes") or source_label,
+            "net": net,
+            "vat": vat,
+            "gross": gross,
+            "status": po_status,
+            "due_date": due_date,
+            "paid_date": paid_date,
+            "source": source_label,
+            "source_id": po.get("id"),
+            "receipt": bool(po.get("supplier_quote_number") or po.get("source_file_name")),
+            "receipt_reference": po.get("supplier_quote_number") or po.get("source_file_name") or "",
+            "notes": po.get("notes", ""),
+        })
+
+    # 3) Forecast material spend from Gantt section material allowances
+    for job in jobs:
+        if job_id and job.get("id") != job_id:
+            continue
+        for section in job.get("gantt_sections") or []:
+            section_material = get_section_forecast_material_value(section)
+            if section_material <= 0:
+                continue
+            forecast_date = finance_material_iso(section.get("start_date") or section.get("end_date") or job.get("planned_start_date"))
+            if not forecast_date:
+                continue
+            rows.append({
+                "id": f"forecast-{job.get('id')}-{section.get('id') or section.get('name')}",
+                "date": forecast_date,
+                "type": "forecast",
+                "type_label": "Forecast",
+                "job_id": job.get("id", ""),
+                "job_name": job.get("name") or job.get("display_name") or "Unknown job",
+                "job_client": job.get("client", ""),
+                "supplier": "Various",
+                "description": f"{section.get('name') or 'Gantt section'} material allowance",
+                "net": section_material,
+                "vat": 0.0,
+                "gross": section_material,
+                "status": "forecast",
+                "due_date": forecast_date,
+                "paid_date": "",
+                "source": "Forecast",
+                "source_id": section.get("id"),
+                "receipt": None,
+                "receipt_reference": "",
+                "notes": "Forecast from Gantt section material allowance",
+            })
+
+    # Apply display filters after all sources are normalised.
+    filtered_rows = []
+    for row in rows:
+        row_date_for_range = row.get("due_date") or row.get("date") or row.get("paid_date")
+        if not finance_material_date_in_range(row_date_for_range, start_date, end_date):
+            continue
+        if spend_type and spend_type != "all" and row.get("type") != spend_type:
+            continue
+        if status and status != "all" and row.get("status") != status:
+            continue
+        if supplier and supplier.lower() not in str(row.get("supplier", "")).lower():
+            continue
+        filtered_rows.append(row)
+
+    filtered_rows.sort(key=lambda item: (item.get("due_date") or item.get("date") or "", item.get("job_name") or ""))
+
+    # Summaries use sensible time windows independent of the active filter where needed.
+    uk_now = get_uk_time()
+    month_start = uk_now.replace(day=1).date()
+    month_end = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    month_start_iso = month_start.isoformat()
+    month_end_iso = month_end.isoformat()
+
+    actual_this_month = sum(row["gross"] for row in rows if row.get("type") == "actual" and finance_material_date_in_range(row.get("date"), month_start_iso, month_end_iso))
+    po_this_month = sum(row["gross"] for row in rows if row.get("type") in ["po", "po_paid"] and finance_material_date_in_range(row.get("date"), month_start_iso, month_end_iso))
+    due_next_4_weeks = sum(row["gross"] for row in rows if row.get("type") == "po" and finance_material_date_in_range(row.get("due_date"), today.isoformat(), (today + timedelta(days=27)).isoformat()))
+    unreceipted_spend = sum(row["gross"] for row in rows if row.get("type") == "actual" and row.get("receipt") is False)
+    forecast_next_4_weeks = sum(row["gross"] for row in rows if row.get("type") == "forecast" and finance_material_date_in_range(row.get("date"), today.isoformat(), (today + timedelta(days=27)).isoformat()))
+
+    job_summary: Dict[str, Dict[str, Any]] = {}
+    for job in jobs:
+        if job_id and job.get("id") != job_id:
+            continue
+        allowance = get_material_allowance_for_job(job)
+        job_summary[job.get("id")] = {
+            "job_id": job.get("id"),
+            "job_name": job.get("name") or job.get("display_name") or "Unknown job",
+            "client": job.get("client", ""),
+            "allowance": allowance,
+            "actual_spend": 0.0,
+            "po_commitments": 0.0,
+            "forecast_spend": 0.0,
+            "total_committed": 0.0,
+            "variance": allowance,
+            "percent_used": 0.0,
+        }
+
+    for row in rows:
+        jid = row.get("job_id")
+        if not jid or jid not in job_summary:
+            continue
+        if row.get("type") == "actual":
+            job_summary[jid]["actual_spend"] += row.get("gross", 0.0)
+        elif row.get("type") == "po":
+            job_summary[jid]["po_commitments"] += row.get("gross", 0.0)
+        elif row.get("type") == "forecast":
+            job_summary[jid]["forecast_spend"] += row.get("gross", 0.0)
+
+    jobs_over_allowance = 0
+    for item in job_summary.values():
+        item["actual_spend"] = round(item["actual_spend"], 2)
+        item["po_commitments"] = round(item["po_commitments"], 2)
+        item["forecast_spend"] = round(item["forecast_spend"], 2)
+        item["total_committed"] = round(item["actual_spend"] + item["po_commitments"] + item["forecast_spend"], 2)
+        item["variance"] = round(item["allowance"] - item["total_committed"], 2)
+        item["percent_used"] = round((item["total_committed"] / item["allowance"] * 100.0), 1) if item["allowance"] > 0 else 0.0
+        if item["allowance"] > 0 and item["total_committed"] > item["allowance"]:
+            jobs_over_allowance += 1
+
+    supplier_summary: Dict[str, float] = {}
+    for row in rows:
+        if row.get("type") in ["actual", "po", "po_paid"]:
+            supplier_summary[row.get("supplier") or "Unknown supplier"] = supplier_summary.get(row.get("supplier") or "Unknown supplier", 0.0) + row.get("gross", 0.0)
+    top_suppliers = [
+        {"supplier": supplier_name, "gross": round(total, 2)}
+        for supplier_name, total in sorted(supplier_summary.items(), key=lambda item: item[1], reverse=True)[:8]
+    ]
+
+    forecast_income = 0.0
+    finance_records = await db.finance_dashboard_records.find({"archived": {"$ne": True}}, {"_id": 0}).to_list(5000)
+    for record in finance_records:
+        record_date = record.get("anticipated_date") or record.get("expected_date")
+        if finance_material_date_in_range(record_date, start_date, end_date):
+            forecast_income += finance_material_to_float(record.get("anticipated_amount") or record.get("expected_amount"))
+
+    forecast_material_spend = sum(row.get("gross", 0.0) for row in filtered_rows if row.get("type") in ["forecast", "po"])
+    supplier_payments_due = sum(row.get("gross", 0.0) for row in filtered_rows if row.get("type") == "po")
+
+    attention = [
+        {
+            "type": "missing_receipts",
+            "title": "Transactions missing receipts",
+            "count": len([row for row in rows if row.get("type") == "actual" and row.get("receipt") is False]),
+            "value": round(unreceipted_spend, 2),
+            "detail": "Upload receipts for actual material entries.",
+        },
+        {
+            "type": "pos_due",
+            "title": "POs due or awaiting delivery",
+            "count": len([row for row in rows if row.get("type") == "po" and normalise_po_status(row.get("status")) not in MATERIAL_PO_PAID_STATUSES]),
+            "value": round(due_next_4_weeks, 2),
+            "detail": "Check supplier delivery and invoice status.",
+        },
+        {
+            "type": "over_allowance",
+            "title": "Jobs over material allowance",
+            "count": jobs_over_allowance,
+            "value": round(sum(abs(item["variance"]) for item in job_summary.values() if item["variance"] < 0), 2),
+            "detail": "Review job material allowance variances.",
+        },
+    ]
+
+    return {
+        "start_date": start_date,
+        "end_date": end_date,
+        "summary": {
+            "actual_spend_this_month": round(actual_this_month, 2),
+            "purchase_orders_this_month": round(po_this_month, 2),
+            "supplier_payments_due": round(due_next_4_weeks, 2),
+            "unreceipted_spend": round(unreceipted_spend, 2),
+            "forecast_spend_next_4_weeks": round(forecast_next_4_weeks, 2),
+            "jobs_over_allowance": jobs_over_allowance,
+            "forecast_income": round(forecast_income, 2),
+            "forecast_material_spend": round(forecast_material_spend, 2),
+            "supplier_payments_due_filtered": round(supplier_payments_due, 2),
+            "net_forecast_position": round(forecast_income - forecast_material_spend, 2),
+        },
+        "rows": filtered_rows,
+        "top_suppliers": top_suppliers,
+        "job_summary": list(job_summary.values()),
+        "attention": attention,
+    }
+
+
+@api_router.get("/finance/material-spend-dashboard")
+async def get_finance_material_spend_dashboard(
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    job_id: Optional[str] = Query(None),
+    supplier: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    type: Optional[str] = Query(None),
+):
+    return await build_material_spend_dashboard_data(start_date, end_date, job_id, supplier, status, type)
+
+
+@api_router.get("/finance/material-spend-dashboard/export.csv")
+async def export_finance_material_spend_dashboard_csv(
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    job_id: Optional[str] = Query(None),
+    supplier: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    type: Optional[str] = Query(None),
+):
+    data = await build_material_spend_dashboard_data(start_date, end_date, job_id, supplier, status, type)
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["LDA Group - Finance Material Spend Export"])
+    writer.writerow(["Date range", data.get("start_date"), "to", data.get("end_date")])
+    writer.writerow([])
+    writer.writerow(["Date", "Type", "Job", "Supplier", "Description", "Net", "VAT", "Gross", "Status", "Due Date", "Paid Date", "Source", "Receipt"])
+    for row in data.get("rows", []):
+        writer.writerow([
+            row.get("date", ""),
+            row.get("type_label", row.get("type", "")),
+            row.get("job_name", ""),
+            row.get("supplier", ""),
+            row.get("description", ""),
+            row.get("net", 0),
+            row.get("vat", 0),
+            row.get("gross", 0),
+            row.get("status", ""),
+            row.get("due_date", ""),
+            row.get("paid_date", ""),
+            row.get("source", ""),
+            "yes" if row.get("receipt") is True else "no" if row.get("receipt") is False else "n/a",
+        ])
+    output.seek(0)
+    filename = f"finance_material_spend_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.csv"
+    return StreamingResponse(
+        io.BytesIO(output.getvalue().encode("utf-8-sig")),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
 # ==================== SYSTEM STATUS & API INFO ====================
 
 @api_router.get("/system/status")

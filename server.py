@@ -732,6 +732,12 @@ def convert_decimals_to_float(obj):
 # Security functions
 OFFICE_LOGIN_ROLES = ["admin", "super_admin", "project_manager", "accounts", "office_admin"]
 
+# Users in this list always receive full Super Admin access when they log in successfully.
+# This prevents the owner account from being locked out by role-based navigation.
+SUPER_ADMIN_EMAILS = {
+    "dukemcintyre@ldagroup.co.uk",
+}
+
 def normalise_app_role(value: Optional[str]) -> str:
     role = str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
     if role in ["super", "superadmin", "owner"]:
@@ -745,7 +751,13 @@ def normalise_app_role(value: Optional[str]) -> str:
     return role or "admin"
 
 def public_user_from_worker(worker: Dict[str, Any]) -> Dict[str, Any]:
+    email = str(worker.get("email", "")).strip().lower()
     role = normalise_app_role(worker.get("app_role") or worker.get("role") or "admin")
+
+    # Hard owner override: Duke must always have full app access.
+    if email in SUPER_ADMIN_EMAILS:
+        role = "super_admin"
+
     return {
         "id": worker.get("id", ""),
         "name": worker.get("name") or worker.get("email") or "Office User",
@@ -758,10 +770,12 @@ def public_user_from_worker(worker: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 def builtin_super_admin_user(username: str = ADMIN_USERNAME) -> Dict[str, Any]:
+    username_value = str(username or "").strip()
+    email = username_value if "@" in username_value else ""
     return {
         "id": "built_in_admin",
-        "name": "LDA Super Admin",
-        "email": username if "@" in str(username) else "",
+        "name": "Duke Mcintyre" if email.lower() in SUPER_ADMIN_EMAILS else "LDA Super Admin",
+        "email": email,
         "role": "super_admin",
         "worker_role": "admin",
         "worker_type": "admin",
@@ -770,11 +784,34 @@ def builtin_super_admin_user(username: str = ADMIN_USERNAME) -> Dict[str, Any]:
     }
 
 async def find_office_user(username: str, password: str) -> Optional[Dict[str, Any]]:
-    if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
-        return builtin_super_admin_user(username)
+    username_clean = str(username or "").strip()
+    username_lower = username_clean.lower()
 
+    # Legacy built-in login remains Super Admin.
+    if username_clean == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+        return builtin_super_admin_user(username_clean)
+
+    # Duke owner fallback: allows Duke to regain full access with the legacy admin password
+    # even if no database user has been upgraded to super_admin yet.
+    if username_lower in SUPER_ADMIN_EMAILS and password == ADMIN_PASSWORD:
+        return builtin_super_admin_user(username_clean)
+
+    # Owner email override: if Duke has a worker/admin login record, let him in as Super Admin
+    # even if the worker role is currently stored as admin/worker/project_manager/accounts.
+    if username_lower in SUPER_ADMIN_EMAILS:
+        worker = await db.workers.find_one({
+            "email": {"$regex": f"^{re.escape(username_clean)}$", "$options": "i"},
+            "password": password,
+            "active": True,
+            "archived": {"$ne": True},
+        }, {"_id": 0})
+
+        if worker:
+            return public_user_from_worker(worker)
+
+    # Standard office users are limited to approved office roles.
     worker = await db.workers.find_one({
-        "email": username,
+        "email": {"$regex": f"^{re.escape(username_clean)}$", "$options": "i"},
         "password": password,
         "active": True,
         "archived": {"$ne": True},

@@ -983,18 +983,61 @@ async def build_suspicious_flags(worker_id: Optional[str], job_id: Optional[str]
 # AUTHENTICATION ENDPOINTS
 @api_router.post("/admin/login")
 async def admin_login(login_data: AdminLogin):
-    """Office/admin login endpoint.
+    """Admin login endpoint with specific user and role details."""
 
-    Returns the actual logged-in user so the frontend can display their name
-    and attach it to audit trail changes.
-    """
-    user = await find_office_user(login_data.username, login_data.password)
+    # Built-in fallback Super Admin account.
+    # This prevents the app from locking you out when no database super user exists yet.
+    if login_data.username == ADMIN_USERNAME and login_data.password == ADMIN_PASSWORD:
+        return {
+            "success": True,
+            "message": "Super Admin login successful",
+            "user": {
+                "id": "built-in-super-admin",
+                "name": "LDA Super Admin",
+                "email": login_data.username,
+                "role": "super_admin",
+                "app_role": "super_admin",
+                "worker_type": "admin",
+                "division": "Management",
+                "active": True,
+            },
+        }
 
-    if user:
+    # Database users.
+    admin_user = await db.workers.find_one({
+        "email": login_data.username,
+        "password": login_data.password,
+        "active": True,
+        "archived": {"$ne": True},
+        "role": {"$in": ["admin", "super_admin", "project_manager", "accounts"]}
+    })
+
+    if admin_user:
+        app_role = (
+            admin_user.get("app_role")
+            or admin_user.get("system_role")
+            or admin_user.get("role")
+            or "admin"
+        )
+
+        # Backwards compatibility:
+        # Existing database users with role="admin" remain normal admin unless explicitly upgraded.
+        if app_role == "superadmin":
+            app_role = "super_admin"
+
         return {
             "success": True,
             "message": "Login successful",
-            "user": user,
+            "user": {
+                "id": admin_user.get("id"),
+                "name": admin_user.get("name", "Admin User"),
+                "email": admin_user.get("email", login_data.username),
+                "role": app_role,
+                "app_role": app_role,
+                "worker_type": admin_user.get("worker_type", "admin"),
+                "division": admin_user.get("division", ""),
+                "active": admin_user.get("active", True),
+            },
         }
 
     raise HTTPException(status_code=401, detail="Invalid admin credentials")

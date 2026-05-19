@@ -6779,6 +6779,7 @@ async def build_material_spend_dashboard_data(
     }
 
 
+@api_router.get("/finance/material-spend")
 @api_router.get("/finance/material-spend-dashboard")
 async def get_finance_material_spend_dashboard(
     start_date: Optional[str] = Query(None),
@@ -6791,6 +6792,7 @@ async def get_finance_material_spend_dashboard(
     return await build_material_spend_dashboard_data(start_date, end_date, job_id, supplier, status, type)
 
 
+@api_router.get("/finance/material-spend/export.csv")
 @api_router.get("/finance/material-spend-dashboard/export.csv")
 async def export_finance_material_spend_dashboard_csv(
     start_date: Optional[str] = Query(None),

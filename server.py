@@ -1097,8 +1097,17 @@ DEFAULT_ROLE_PERMISSIONS = {
 }
 DEFAULT_ROLE_PERMISSIONS["worker"]["dashboard"] = False
 
+DEFAULT_ROLE_LANDING_PAGES = {
+    "super_admin": "dashboard",
+    "admin": "dashboard",
+    "project_manager": "project-management",
+    "accounts": "finance",
+    "worker": "dashboard",
+}
+
 class RolePermissionsUpdate(BaseModel):
     permissions: Dict[str, bool] = {}
+    landing_page: Optional[str] = None
 
 
 def normalise_permission_role(value: Optional[str]) -> str:
@@ -1129,21 +1138,47 @@ def normalise_permission_map(role: str, permissions: Optional[Dict[str, Any]] = 
     return cleaned
 
 
+def normalise_landing_page(role: str, landing_page: Optional[str], permissions: Dict[str, bool]) -> str:
+    role = normalise_permission_role(role)
+    if role == "super_admin":
+        return landing_page if landing_page in APP_SECTIONS else DEFAULT_ROLE_LANDING_PAGES["super_admin"]
+
+    requested = str(landing_page or "").strip()
+    default_page = DEFAULT_ROLE_LANDING_PAGES.get(role, "dashboard")
+
+    # The landing page must be one of the visible sections for that role.
+    if requested in APP_SECTIONS and permissions.get(requested):
+        return requested
+    if default_page in APP_SECTIONS and permissions.get(default_page):
+        return default_page
+
+    for section in APP_SECTIONS:
+        if permissions.get(section):
+            return section
+
+    return "dashboard"
+
+
 async def get_role_permissions_doc(role: str) -> Dict[str, Any]:
     role = normalise_permission_role(role)
     if role == "super_admin":
+        permissions = normalise_permission_map("super_admin")
+        landing_page = normalise_landing_page("super_admin", DEFAULT_ROLE_LANDING_PAGES["super_admin"], permissions)
         return {
             "role": "super_admin",
-            "permissions": normalise_permission_map("super_admin"),
+            "permissions": permissions,
+            "landing_page": landing_page,
             "is_default": True,
             "protected": True,
         }
 
     doc = await db.role_permissions.find_one({"role": role}, {"_id": 0})
     permissions = normalise_permission_map(role, (doc or {}).get("permissions"))
+    landing_page = normalise_landing_page(role, (doc or {}).get("landing_page"), permissions)
     return {
         "role": role,
         "permissions": permissions,
+        "landing_page": landing_page,
         "is_default": not bool(doc),
         "protected": False,
         "updated_at": (doc or {}).get("updated_at"),
@@ -1168,8 +1203,11 @@ async def write_role_permissions_audit(role: str, actor: Dict[str, Any], changes
             if action == "reset":
                 description = f"{actor_name} reset role permissions to defaults."
             else:
-                enabled_text = "enabled" if bool(new_value) else "disabled"
-                description = f"{actor_name} {enabled_text} {section_label} access for {role_label} users."
+                if section == "landing_page":
+                    description = f"{actor_name} changed the default landing page for {role_label} users from {old_value} to {new_value}."
+                else:
+                    enabled_text = "enabled" if bool(new_value) else "disabled"
+                    description = f"{actor_name} {enabled_text} {section_label} access for {role_label} users."
 
             await db.audit_logs.insert_one({
                 "id": str(uuid.uuid4()),
@@ -1410,13 +1448,16 @@ async def get_role_permissions(super_admin: Optional[Dict[str, Any]] = None):
     Updating permissions remains Super Admin only.
     """
     result = {}
+    landing_pages = {}
     for role in ROLE_PERMISSION_ROLES:
         doc = await get_role_permissions_doc(role)
         result[role] = doc["permissions"]
+        landing_pages[role] = doc.get("landing_page") or normalise_landing_page(role, None, doc["permissions"])
     return {
         "sections": APP_SECTIONS,
         "roles": ROLE_PERMISSION_ROLES,
         "permissions": result,
+        "landing_pages": landing_pages,
         "protected_roles": ["super_admin"],
     }
 
@@ -1434,6 +1475,9 @@ async def update_role_permissions(role: str, update: RolePermissionsUpdate, supe
 
     # Settings must remain Super Admin only.
     new_permissions["settings"] = False
+    existing_landing_page = existing_doc.get("landing_page") or normalise_landing_page(role, None, existing_permissions)
+    requested_landing_page = update.landing_page if update.landing_page is not None else existing_landing_page
+    new_landing_page = normalise_landing_page(role, requested_landing_page, new_permissions)
 
     changes = []
     for section in APP_SECTIONS:
@@ -1442,12 +1486,16 @@ async def update_role_permissions(role: str, update: RolePermissionsUpdate, supe
         if old_value != new_value:
             changes.append({"field": section, "old_value": old_value, "new_value": new_value})
 
+    if existing_landing_page != new_landing_page:
+        changes.append({"field": "landing_page", "old_value": existing_landing_page, "new_value": new_landing_page})
+
     now = datetime.utcnow()
     await db.role_permissions.update_one(
         {"role": role},
         {"$set": {
             "role": role,
             "permissions": new_permissions,
+            "landing_page": new_landing_page,
             "updated_at": now,
             "updated_by": super_admin.get("name") or super_admin.get("email") or "Super Admin",
             "updated_by_email": super_admin.get("email", ""),
@@ -1469,10 +1517,12 @@ async def reset_role_permissions(super_admin: Dict[str, Any] = Depends(get_super
     await db.role_permissions.delete_many({"role": {"$ne": "super_admin"}})
     await write_role_permissions_audit("all", super_admin, action="reset")
     result = {}
+    landing_pages = {}
     for role in ROLE_PERMISSION_ROLES:
         doc = await get_role_permissions_doc(role)
         result[role] = doc["permissions"]
-    return {"success": True, "message": "Role permissions reset to defaults", "permissions": result}
+        landing_pages[role] = doc.get("landing_page")
+    return {"success": True, "message": "Role permissions reset to defaults", "permissions": result, "landing_pages": landing_pages}
 
 # SURVEYOR AUTHENTICATION ENDPOINTS
 @api_router.post("/surveyors/register")

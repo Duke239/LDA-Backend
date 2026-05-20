@@ -556,6 +556,8 @@ class PurchaseOrder(BaseModel):
     status: str = "draft"
     requested_by_user_id: str = ""
     requested_by_name: str = ""
+    requested_by_email: str = ""
+    requested_by_role: str = ""
     approved_by_user_id: Optional[str] = None
     approved_by_name: Optional[str] = None
     approved_at: Optional[datetime] = None
@@ -602,6 +604,10 @@ class PurchaseOrderCreate(BaseModel):
     net_total: float = 0.0
     vat_total: float = 0.0
     gross_total: float = 0.0
+    requested_by_user_id: str = ""
+    requested_by_name: str = ""
+    requested_by_email: str = ""
+    requested_by_role: str = ""
 
 class PurchaseOrderUpdate(BaseModel):
     supplier_id: Optional[str] = None
@@ -625,6 +631,10 @@ class PurchaseOrderUpdate(BaseModel):
     net_total: Optional[float] = None
     vat_total: Optional[float] = None
     gross_total: Optional[float] = None
+    requested_by_user_id: Optional[str] = None
+    requested_by_name: Optional[str] = None
+    requested_by_email: Optional[str] = None
+    requested_by_role: Optional[str] = None
 
 class PurchaseOrderBulkDeleteRequest(BaseModel):
     po_ids: List[str]
@@ -637,6 +647,14 @@ class PurchaseOrderApprovalResponseRequest(BaseModel):
     responder_email: str = ""
     comments: str = ""
     reason: str = ""
+
+class PurchaseOrderRequesterActionResponseRequest(BaseModel):
+    secret: str = ""
+    decision: str = ""  # Send email to supplier and assign materials / Assign materials to job only
+    selected_option: str = ""
+    responder_name: str = ""
+    responder_email: str = ""
+    comments: str = ""
 
 class AdminLogin(BaseModel):
     username: str
@@ -7149,6 +7167,8 @@ async def send_po_approval_notification(po: Dict[str, Any], requested_by: str = 
             "delivery_address": po.get("delivery_address", ""),
             "status": po.get("status", "draft"),
             "requested_by": po.get("requested_by_name") or requested_by or "Admin",
+            "requested_by_email": po.get("requested_by_email", ""),
+            "requested_by_role": po.get("requested_by_role", ""),
             "net_total": po.get("net_total", 0),
             "vat_total": po.get("vat_total", 0),
             "gross_total": po.get("gross_total", 0),
@@ -7197,6 +7217,119 @@ async def send_po_approval_notification(po: Dict[str, Any], requested_by: str = 
     return {"sent": True, "method": "smtp", "to": approval_email}
 
 
+
+def build_po_requester_options_payload(po: Dict[str, Any]) -> Dict[str, Any]:
+    """Build the email body sent to the person who raised an approved PO."""
+    po_number = po.get("po_number", "purchase_order")
+    subject = f"PO {po_number} approved - choose next action"
+    required_date_display = format_uk_date_only(po.get("required_date"))
+    if required_date_display == "-":
+        required_date_display = "TBC"
+
+    body_text = f"""Hi {po.get('requested_by_name') or ''},
+
+Purchase order {po_number} has been approved.
+
+Supplier: {po.get('supplier_name', '')}
+Job: {po.get('job_name', '')}
+Required date: {required_date_display}
+Gross total: £{float(po.get('gross_total') or 0):,.2f}
+
+Please choose whether to send the PO to the supplier and assign the materials to the job, or assign the materials to the job only.
+
+LDA Group
+"""
+
+    body_html = f"""
+    <div style="font-family:Arial, sans-serif; font-size:14px; color:#111827;">
+      <p>Hi {po.get('requested_by_name') or ''},</p>
+      <p>Purchase order <strong>{po_number}</strong> has been approved.</p>
+      <table style="border-collapse:collapse; font-family:Arial, sans-serif; font-size:14px;">
+        <tr><td style="padding:4px 14px 4px 0;"><strong>Supplier:</strong></td><td>{po.get('supplier_name', '')}</td></tr>
+        <tr><td style="padding:4px 14px 4px 0;"><strong>Job:</strong></td><td>{po.get('job_name', '')}</td></tr>
+        <tr><td style="padding:4px 14px 4px 0;"><strong>Required date:</strong></td><td>{required_date_display}</td></tr>
+        <tr><td style="padding:4px 14px 4px 0;"><strong>Gross total:</strong></td><td><strong>£{float(po.get('gross_total') or 0):,.2f}</strong></td></tr>
+      </table>
+      <p>Please choose the next action:</p>
+      <ul>
+        <li><strong>Send email to supplier and assign materials</strong> - sends the approved PO to the supplier and commits the PO line items to the job materials.</li>
+        <li><strong>Assign materials to job only</strong> - commits the PO line items to the job materials without emailing the supplier.</li>
+      </ul>
+    </div>
+    """.strip()
+
+    return {
+        "subject": subject,
+        "body_text": body_text,
+        "body_html": body_html,
+        "required_date_display": required_date_display,
+    }
+
+
+async def send_po_requester_options_notification(po: Dict[str, Any]) -> Dict[str, Any]:
+    """After a PO is approved, ask the requester what should happen next."""
+    requester_email = (po.get("requested_by_email") or "").strip()
+    if not requester_email:
+        return {"sent": False, "method": "not_configured", "to": "", "error": "No requester email is saved against this PO"}
+
+    power_automate_url = os.environ.get("POWER_AUTOMATE_PO_REQUESTER_OPTIONS_URL", "").strip()
+    power_automate_secret = os.environ.get("POWER_AUTOMATE_PO_REQUESTER_OPTIONS_SECRET", os.environ.get("PO_APPROVAL_CALLBACK_SECRET", "")).strip()
+    if not power_automate_url:
+        return {"sent": False, "method": "not_configured", "to": requester_email, "error": "POWER_AUTOMATE_PO_REQUESTER_OPTIONS_URL is not configured"}
+
+    notification = build_po_requester_options_payload(po)
+    po_number = po.get("po_number", "purchase_order")
+    try:
+        pdf_bytes = generate_purchase_order_pdf_bytes(po)
+    except Exception as exc:
+        logger.warning("Could not generate requester options PDF attachment for %s: %s", po_number, exc)
+        pdf_bytes = b""
+
+    public_backend_url = (
+        os.environ.get("PUBLIC_BACKEND_URL")
+        or os.environ.get("BACKEND_PUBLIC_URL")
+        or os.environ.get("REACT_APP_BACKEND_URL")
+        or ""
+    ).strip().rstrip("/")
+    callback_url = f"{public_backend_url}/api/purchase-orders/{po.get('id')}/requester-action-response" if public_backend_url and po.get("id") else ""
+
+    payload = {
+        "secret": power_automate_secret,
+        "callback_secret": power_automate_secret,
+        "requester_action_callback_url": callback_url,
+        "notification_type": "purchase_order_requester_action_required",
+        "to": requester_email,
+        "po_id": po.get("id"),
+        "po_number": po_number,
+        "supplier_id": po.get("supplier_id", ""),
+        "supplier_name": po.get("supplier_name", ""),
+        "supplier_email": po.get("supplier_email", ""),
+        "job_id": po.get("job_id", ""),
+        "job_name": po.get("job_name", ""),
+        "required_date": notification["required_date_display"],
+        "gross_total": po.get("gross_total", 0),
+        "requested_by_name": po.get("requested_by_name", ""),
+        "requested_by_email": requester_email,
+        "subject": notification["subject"],
+        "body_text": notification["body_text"],
+        "body_html": notification["body_html"],
+        "pdf_filename": f"{po_number}.pdf",
+        "pdf_base64": base64.b64encode(pdf_bytes).decode("utf-8") if pdf_bytes else "",
+        "options": "Send email to supplier and assign materials, Assign materials to job only",
+    }
+
+    try:
+        response = requests.post(power_automate_url, json=payload, timeout=30)
+    except Exception as exc:
+        logger.exception("Failed to call requester options Power Automate flow: %s", exc)
+        raise RuntimeError(f"Failed to call requester options flow: {exc}")
+
+    if response.status_code < 200 or response.status_code >= 300:
+        raise RuntimeError(f"Requester options Power Automate flow failed: {response.status_code} - {response.text[:500]}")
+
+    return {"sent": True, "method": "power_automate", "to": requester_email}
+
+
 @api_router.delete("/purchase-orders/bulk-delete")
 async def bulk_delete_purchase_orders(request: PurchaseOrderBulkDeleteRequest, super_admin: Dict[str, Any] = Depends(get_super_admin_user)):
     selected_ids = parse_po_id_list(po_ids=request.po_ids)
@@ -7236,8 +7369,11 @@ async def create_purchase_order(po_data: PurchaseOrderCreate, admin: str = Depen
     po_dict["job_number"] = po_dict.get("job_number") or job.get("job_number")
     po_dict["division"] = po_dict.get("division") or job.get("division", "")
     po_dict["delivery_address"] = po_dict.get("delivery_address") or job.get("location", "")
-    po_dict["requested_by_user_id"] = admin
-    po_dict["requested_by_name"] = admin
+    po_dict["requested_by_user_id"] = po_dict.get("requested_by_user_id") or admin
+    po_dict["requested_by_name"] = po_dict.get("requested_by_name") or admin
+    po_dict["requested_by_email"] = po_dict.get("requested_by_email") or (admin if "@" in str(admin) else "")
+    po_dict["requested_by_role"] = po_dict.get("requested_by_role") or ""
+    po_dict["status"] = po_dict.get("status") or "pending_approval"
     po_dict = calculate_po_totals(po_dict)
 
     po_obj = PurchaseOrder(**po_dict)
@@ -7360,12 +7496,40 @@ async def update_purchase_order_from_approval_response(po_id: str, response: Pur
     await db.purchase_orders.update_one({"id": po_id}, {"$set": update})
     updated = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
 
+    requester_notification_result = {"sent": False, "method": "not_required", "to": ""}
+    if new_status == "approved":
+        try:
+            requester_notification_result = await send_po_requester_options_notification(updated)
+            await db.purchase_orders.update_one(
+                {"id": po_id},
+                {"$set": {
+                    "requester_options_notification_sent": bool(requester_notification_result.get("sent")),
+                    "requester_options_notification_method": requester_notification_result.get("method", "unknown"),
+                    "requester_options_notification_to": requester_notification_result.get("to", ""),
+                    "requester_options_notification_at": datetime.utcnow() if requester_notification_result.get("sent") else None,
+                    "requester_options_notification_error": requester_notification_result.get("error", "") if not requester_notification_result.get("sent") else "",
+                }}
+            )
+        except Exception as exc:
+            logger.exception("Requester options notification failed for PO %s: %s", po_id, exc)
+            await db.purchase_orders.update_one(
+                {"id": po_id},
+                {"$set": {
+                    "requester_options_notification_sent": False,
+                    "requester_options_notification_method": "failed",
+                    "requester_options_notification_to": updated.get("requested_by_email", ""),
+                    "requester_options_notification_error": str(exc)[:1000],
+                }}
+            )
+            requester_notification_result = {"sent": False, "method": "failed", "to": updated.get("requested_by_email", ""), "error": str(exc)}
+
     return {
         "success": True,
         "message": f"Purchase order {updated.get('po_number', po_id)} marked as {new_status}",
         "po_id": po_id,
         "po_number": updated.get("po_number"),
         "status": updated.get("status"),
+        "requester_options_notification": requester_notification_result,
     }
 
 
@@ -7381,7 +7545,34 @@ async def approve_purchase_order(po_id: str, admin: str = Depends(verify_admin))
     result = await db.purchase_orders.update_one({"id": po_id}, {"$set": update})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Purchase order not found")
-    return {"message": "Purchase order approved"}
+
+    updated = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
+    requester_notification_result = {"sent": False, "method": "not_configured", "to": ""}
+    try:
+        requester_notification_result = await send_po_requester_options_notification(updated)
+        await db.purchase_orders.update_one(
+            {"id": po_id},
+            {"$set": {
+                "requester_options_notification_sent": bool(requester_notification_result.get("sent")),
+                "requester_options_notification_method": requester_notification_result.get("method", "unknown"),
+                "requester_options_notification_to": requester_notification_result.get("to", ""),
+                "requester_options_notification_at": datetime.utcnow() if requester_notification_result.get("sent") else None,
+                "requester_options_notification_error": requester_notification_result.get("error", "") if not requester_notification_result.get("sent") else "",
+            }}
+        )
+    except Exception as exc:
+        logger.exception("Requester options notification failed for PO %s: %s", po_id, exc)
+        await db.purchase_orders.update_one(
+            {"id": po_id},
+            {"$set": {
+                "requester_options_notification_sent": False,
+                "requester_options_notification_method": "failed",
+                "requester_options_notification_to": (updated or {}).get("requested_by_email", ""),
+                "requester_options_notification_error": str(exc)[:1000],
+            }}
+        )
+
+    return {"message": "Purchase order approved", "requester_options_notification": requester_notification_result}
 
 
 @api_router.post("/purchase-orders/{po_id}/mark-sent")
@@ -7402,11 +7593,101 @@ async def download_purchase_order_pdf(po_id: str, admin: str = Depends(verify_ad
     return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename={filename}"})
 
 
+
+@api_router.post("/purchase-orders/{po_id}/requester-action-response")
+async def update_purchase_order_from_requester_action_response(po_id: str, response: PurchaseOrderRequesterActionResponseRequest):
+    """Handle the post-approval requester choice from Power Automate.
+
+    Options:
+    - Send email to supplier and assign materials
+    - Assign materials to job only
+    """
+    expected_secret = (
+        os.environ.get("POWER_AUTOMATE_PO_REQUESTER_OPTIONS_SECRET")
+        or os.environ.get("PO_APPROVAL_CALLBACK_SECRET")
+        or ""
+    ).strip()
+
+    if expected_secret and not secrets.compare_digest(str(response.secret or ""), expected_secret):
+        raise HTTPException(status_code=403, detail="Invalid requester action callback secret")
+
+    decision_raw = (response.decision or response.selected_option or "").strip().lower()
+    decision_key = decision_raw.replace("&", "and").replace("+", "and")
+    decision_key = re.sub(r"[^a-z0-9]+", "_", decision_key).strip("_")
+
+    send_supplier = any(token in decision_key for token in [
+        "send_email_to_supplier_and_assign_materials",
+        "send_to_supplier_and_assign_materials",
+        "send_email_supplier_assign_materials",
+        "send_supplier",
+    ])
+    assign_only = any(token in decision_key for token in [
+        "assign_materials_to_job_only",
+        "assign_materials_only",
+        "assign_only",
+    ])
+
+    if not send_supplier and not assign_only:
+        raise HTTPException(status_code=400, detail="Requester action must be supplier email + materials, or assign materials only")
+
+    po = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+    if po.get("status") == "rejected":
+        raise HTTPException(status_code=400, detail="Rejected purchase orders cannot be actioned")
+    if po.get("status") not in ["approved", "sent", "materials_assigned", "received", "invoiced", "closed"]:
+        raise HTTPException(status_code=400, detail="Purchase order must be approved before requester actions can be completed")
+
+    responder_name = response.responder_name or response.responder_email or po.get("requested_by_name") or "Requester"
+    responder_email = response.responder_email or po.get("requested_by_email") or ""
+
+    email_result = None
+    material_result = None
+
+    if send_supplier:
+        email_result = await send_purchase_order_email(po_id, admin=responder_email or responder_name)
+
+    try:
+        material_result = await assign_purchase_order_materials(po_id, admin=responder_email or responder_name)
+    except HTTPException as exc:
+        if exc.status_code == 400 and "already been assigned" in str(exc.detail).lower():
+            material_result = {"message": "PO materials were already assigned to the job", "materials_created": 0, "already_assigned": True}
+        else:
+            raise
+
+    await db.purchase_orders.update_one(
+        {"id": po_id},
+        {"$set": {
+            "requester_action_response": "send_supplier_and_assign_materials" if send_supplier else "assign_materials_only",
+            "requester_action_response_at": datetime.utcnow(),
+            "requester_action_response_by": responder_name,
+            "requester_action_response_email": responder_email,
+            "requester_action_response_comments": response.comments or "",
+            "updated_at": datetime.utcnow(),
+        }}
+    )
+
+    updated = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
+    return {
+        "success": True,
+        "po_id": po_id,
+        "po_number": updated.get("po_number"),
+        "status": updated.get("status"),
+        "decision": response.decision or response.selected_option,
+        "email_result": email_result,
+        "material_result": material_result,
+    }
+
+
+
 @api_router.post("/purchase-orders/{po_id}/send-email")
 async def send_purchase_order_email(po_id: str, admin: str = Depends(verify_admin)):
     po = await db.purchase_orders.find_one({"id": po_id}, {"_id": 0})
     if not po:
         raise HTTPException(status_code=404, detail="Purchase order not found")
+
+    if po.get("status") in ["draft", "pending_approval", "rejected", "cancelled"]:
+        raise HTTPException(status_code=400, detail="Purchase order must be approved before it can be emailed to the supplier")
 
     supplier_email = (po.get("supplier_email") or "").strip()
     if not supplier_email:

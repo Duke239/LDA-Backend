@@ -7001,6 +7001,182 @@ async def export_purchase_orders_pdf(
     return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename={filename}"})
 
 
+def build_po_approval_notification_payload(po: Dict[str, Any], requested_by: str = "") -> Dict[str, Any]:
+    """Build a compact approval notification payload for Power Automate/SMTP."""
+    po_number = po.get("po_number") or "Purchase Order"
+    required_date_display = format_uk_date_only(po.get("required_date"))
+    if required_date_display == "-":
+        required_date_display = "TBC"
+
+    subject = f"PO Approval Required - {po_number} - {po.get('job_name', '')}"
+    lines = po.get("lines") or []
+    line_summary = "\n".join(
+        f"- {line.get('description', '')} | Qty: {line.get('quantity', '')} | Net: £{float(line.get('net_total') or 0):,.2f}"
+        for line in lines[:10]
+    )
+    if len(lines) > 10:
+        line_summary += f"\n- plus {len(lines) - 10} more line(s)"
+
+    body_text = f"""A purchase order has been created and requires approval.
+
+PO Number: {po_number}
+Supplier: {po.get('supplier_name', '')}
+Job: {po.get('job_name', '')}
+Required Date: {required_date_display}
+Requested By: {po.get('requested_by_name') or requested_by or 'Admin'}
+
+Net Total: £{float(po.get('net_total') or 0):,.2f}
+VAT Total: £{float(po.get('vat_total') or 0):,.2f}
+Gross Total: £{float(po.get('gross_total') or 0):,.2f}
+
+Line Summary:
+{line_summary or '-'}
+
+Notes:
+{po.get('notes') or '-'}
+"""
+
+    line_rows = "".join(
+        f"""
+        <tr>
+          <td style=\"padding:6px 8px; border-bottom:1px solid #e5e7eb;\">{line.get('description', '')}</td>
+          <td style=\"padding:6px 8px; border-bottom:1px solid #e5e7eb; text-align:right;\">{line.get('quantity', '')}</td>
+          <td style=\"padding:6px 8px; border-bottom:1px solid #e5e7eb; text-align:right;\">£{float(line.get('net_total') or 0):,.2f}</td>
+        </tr>
+        """
+        for line in lines[:10]
+    ) or "<tr><td colspan=\"3\" style=\"padding:6px 8px;\">No line items</td></tr>"
+
+    body_html = f"""
+    <div style=\"font-family:Arial, sans-serif; color:#111827;\">
+      <h2 style=\"margin:0 0 12px;\">Purchase Order Approval Required</h2>
+      <p>A purchase order has been created and requires approval.</p>
+      <table style=\"border-collapse:collapse; font-size:14px; margin-bottom:14px;\">
+        <tr><td style=\"padding:4px 14px 4px 0;\"><strong>PO Number:</strong></td><td>{po_number}</td></tr>
+        <tr><td style=\"padding:4px 14px 4px 0;\"><strong>Supplier:</strong></td><td>{po.get('supplier_name', '')}</td></tr>
+        <tr><td style=\"padding:4px 14px 4px 0;\"><strong>Job:</strong></td><td>{po.get('job_name', '')}</td></tr>
+        <tr><td style=\"padding:4px 14px 4px 0;\"><strong>Required Date:</strong></td><td>{required_date_display}</td></tr>
+        <tr><td style=\"padding:4px 14px 4px 0;\"><strong>Requested By:</strong></td><td>{po.get('requested_by_name') or requested_by or 'Admin'}</td></tr>
+      </table>
+      <table style=\"border-collapse:collapse; font-size:14px; margin-bottom:14px; min-width:360px;\">
+        <tr><td style=\"padding:4px 14px 4px 0;\"><strong>Net Total:</strong></td><td>£{float(po.get('net_total') or 0):,.2f}</td></tr>
+        <tr><td style=\"padding:4px 14px 4px 0;\"><strong>VAT Total:</strong></td><td>£{float(po.get('vat_total') or 0):,.2f}</td></tr>
+        <tr><td style=\"padding:4px 14px 4px 0;\"><strong>Gross Total:</strong></td><td><strong>£{float(po.get('gross_total') or 0):,.2f}</strong></td></tr>
+      </table>
+      <h3 style=\"font-size:15px; margin:14px 0 6px;\">Line Summary</h3>
+      <table style=\"border-collapse:collapse; font-size:13px; width:100%; max-width:720px;\">
+        <thead>
+          <tr style=\"background:#f3f4f6;\">
+            <th style=\"padding:7px 8px; text-align:left;\">Description</th>
+            <th style=\"padding:7px 8px; text-align:right;\">Qty</th>
+            <th style=\"padding:7px 8px; text-align:right;\">Net</th>
+          </tr>
+        </thead>
+        <tbody>{line_rows}</tbody>
+      </table>
+      <p style=\"margin-top:14px;\"><strong>Notes:</strong><br>{po.get('notes') or '-'}</p>
+    </div>
+    """.strip()
+
+    return {
+        "subject": subject,
+        "body_text": body_text,
+        "body_html": body_html,
+        "required_date_display": required_date_display,
+    }
+
+
+async def send_po_approval_notification(po: Dict[str, Any], requested_by: str = "") -> Dict[str, Any]:
+    """Send an internal PO approval notification without blocking PO creation on failure.
+
+    Preferred configuration:
+    - POWER_AUTOMATE_PO_APPROVAL_URL
+    - POWER_AUTOMATE_PO_APPROVAL_SECRET (optional)
+
+    Fallback configuration:
+    - SMTP_HOST / SMTP_PORT / SMTP_USERNAME / SMTP_PASSWORD / SMTP_FROM_EMAIL
+
+    Recipient defaults to info@ldagroup.co.uk and can be overridden with PO_APPROVAL_NOTIFY_EMAIL.
+    """
+    approval_email = os.environ.get("PO_APPROVAL_NOTIFY_EMAIL", "info@ldagroup.co.uk").strip() or "info@ldagroup.co.uk"
+    notification = build_po_approval_notification_payload(po, requested_by=requested_by)
+    po_number = po.get("po_number", "purchase_order")
+
+    try:
+        pdf_bytes = generate_purchase_order_pdf_bytes(po)
+    except Exception as exc:
+        logger.warning("Could not generate PO approval PDF attachment for %s: %s", po_number, exc)
+        pdf_bytes = b""
+
+    power_automate_url = os.environ.get("POWER_AUTOMATE_PO_APPROVAL_URL", "").strip()
+    power_automate_secret = os.environ.get("POWER_AUTOMATE_PO_APPROVAL_SECRET", "").strip()
+
+    if power_automate_url:
+        payload = {
+            "secret": power_automate_secret,
+            "notification_type": "purchase_order_approval_required",
+            "to": approval_email,
+            "po_id": po.get("id"),
+            "po_number": po_number,
+            "supplier_id": po.get("supplier_id", ""),
+            "supplier_name": po.get("supplier_name", ""),
+            "supplier_email": po.get("supplier_email", ""),
+            "job_id": po.get("job_id", ""),
+            "job_name": po.get("job_name", ""),
+            "job_number": po.get("job_number", ""),
+            "division": po.get("division", ""),
+            "required_date": notification["required_date_display"],
+            "delivery_address": po.get("delivery_address", ""),
+            "status": po.get("status", "draft"),
+            "requested_by": po.get("requested_by_name") or requested_by or "Admin",
+            "net_total": po.get("net_total", 0),
+            "vat_total": po.get("vat_total", 0),
+            "gross_total": po.get("gross_total", 0),
+            "subject": notification["subject"],
+            "body_text": notification["body_text"],
+            "body_html": notification["body_html"],
+            "pdf_filename": f"{po_number}.pdf",
+            "pdf_base64": base64.b64encode(pdf_bytes).decode("utf-8") if pdf_bytes else "",
+        }
+
+        response = requests.post(power_automate_url, json=payload, timeout=20)
+        if response.status_code < 200 or response.status_code >= 300:
+            raise RuntimeError(f"Power Automate approval notification failed: {response.status_code} - {response.text[:500]}")
+        return {"sent": True, "method": "power_automate", "to": approval_email}
+
+    smtp_host = os.environ.get("SMTP_HOST", "").strip()
+    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+    smtp_username = os.environ.get("SMTP_USERNAME", "").strip()
+    smtp_password = os.environ.get("SMTP_PASSWORD", "").strip()
+    smtp_from = os.environ.get("SMTP_FROM_EMAIL", smtp_username).strip()
+    smtp_from_name = os.environ.get("SMTP_FROM_NAME", "LDA Group").strip()
+    smtp_reply_to = os.environ.get("SMTP_REPLY_TO", os.environ.get("PO_REPLY_TO_EMAIL", "")).strip()
+    smtp_use_tls = os.environ.get("SMTP_USE_TLS", "true").lower() != "false"
+
+    if not smtp_host or not smtp_from:
+        return {"sent": False, "method": "not_configured", "to": approval_email}
+
+    message = EmailMessage()
+    message["From"] = f"{smtp_from_name} <{smtp_from}>"
+    message["To"] = approval_email
+    message["Subject"] = notification["subject"]
+    if smtp_reply_to:
+        message["Reply-To"] = smtp_reply_to
+    message.set_content(notification["body_text"])
+    message.add_alternative(notification["body_html"], subtype="html")
+    if pdf_bytes:
+        message.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename=f"{po_number}.pdf")
+
+    with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as smtp:
+        if smtp_use_tls:
+            smtp.starttls()
+        if smtp_username and smtp_password:
+            smtp.login(smtp_username, smtp_password)
+        smtp.send_message(message)
+
+    return {"sent": True, "method": "smtp", "to": approval_email}
+
+
 @api_router.delete("/purchase-orders/bulk-delete")
 async def bulk_delete_purchase_orders(request: PurchaseOrderBulkDeleteRequest, super_admin: Dict[str, Any] = Depends(get_super_admin_user)):
     selected_ids = parse_po_id_list(po_ids=request.po_ids)
@@ -7045,7 +7221,33 @@ async def create_purchase_order(po_data: PurchaseOrderCreate, admin: str = Depen
     po_dict = calculate_po_totals(po_dict)
 
     po_obj = PurchaseOrder(**po_dict)
-    await db.purchase_orders.insert_one(po_obj.dict())
+    po_doc = po_obj.dict()
+    await db.purchase_orders.insert_one(po_doc)
+
+    try:
+        notification_result = await send_po_approval_notification(po_doc, requested_by=admin)
+        await db.purchase_orders.update_one(
+            {"id": po_obj.id},
+            {"$set": {
+                "approval_notification_sent": bool(notification_result.get("sent")),
+                "approval_notification_method": notification_result.get("method", "unknown"),
+                "approval_notification_to": notification_result.get("to", "info@ldagroup.co.uk"),
+                "approval_notification_at": datetime.utcnow() if notification_result.get("sent") else None,
+                "approval_notification_error": "" if notification_result.get("sent") else "Approval notification email is not configured",
+            }}
+        )
+    except Exception as exc:
+        logger.exception("PO approval notification failed for %s: %s", po_obj.po_number, exc)
+        await db.purchase_orders.update_one(
+            {"id": po_obj.id},
+            {"$set": {
+                "approval_notification_sent": False,
+                "approval_notification_method": "failed",
+                "approval_notification_to": os.environ.get("PO_APPROVAL_NOTIFY_EMAIL", "info@ldagroup.co.uk"),
+                "approval_notification_error": str(exc)[:1000],
+            }}
+        )
+
     return po_obj
 
 

@@ -7362,7 +7362,14 @@ async def create_purchase_order(po_data: PurchaseOrderCreate, admin: str = Depen
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    po_dict["po_number"] = await next_po_number()
+    requested_po_number = str(po_dict.get("po_number") or "").strip()
+    if requested_po_number:
+        duplicate_po = await db.purchase_orders.find_one({"po_number": requested_po_number})
+        if duplicate_po:
+            raise HTTPException(status_code=400, detail="A purchase order with this PO number already exists")
+        po_dict["po_number"] = requested_po_number
+    else:
+        po_dict["po_number"] = await next_po_number()
     po_dict["supplier_name"] = po_dict.get("supplier_name") or supplier.get("name", "")
     po_dict["supplier_email"] = po_dict.get("supplier_email") or supplier.get("orders_email") or supplier.get("accounts_email") or ""
     po_dict["job_name"] = po_dict.get("job_name") or job.get("display_name") or job.get("name", "")

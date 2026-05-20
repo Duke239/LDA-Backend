@@ -554,10 +554,6 @@ class PurchaseOrder(BaseModel):
     job_number: Optional[int] = None
     division: str = ""
     status: str = "draft"
-    project_section_id: str = ""
-    project_section_name: str = ""
-    requested_from: str = "purchase_orders"
-    expected_payment_date: Optional[str] = None
     requested_by_user_id: str = ""
     requested_by_name: str = ""
     approved_by_user_id: Optional[str] = None
@@ -586,7 +582,6 @@ class PurchaseOrder(BaseModel):
     updated_at: Optional[datetime] = None
 
 class PurchaseOrderCreate(BaseModel):
-    po_number: Optional[str] = None
     supplier_id: str
     supplier_name: str = ""
     supplier_email: str = ""
@@ -601,11 +596,6 @@ class PurchaseOrderCreate(BaseModel):
     source_type: str = "manual"
     source_upload_id: Optional[str] = None
     source_file_name: str = ""
-    status: str = "draft"
-    project_section_id: str = ""
-    project_section_name: str = ""
-    requested_from: str = "purchase_orders"
-    expected_payment_date: Optional[str] = None
     extraction_status: str = "not_required"
     extraction_confidence: str = ""
     lines: List[PurchaseOrderLine] = []
@@ -614,7 +604,6 @@ class PurchaseOrderCreate(BaseModel):
     gross_total: float = 0.0
 
 class PurchaseOrderUpdate(BaseModel):
-    po_number: Optional[str] = None
     supplier_id: Optional[str] = None
     supplier_name: Optional[str] = None
     supplier_email: Optional[str] = None
@@ -630,10 +619,6 @@ class PurchaseOrderUpdate(BaseModel):
     source_type: Optional[str] = None
     source_upload_id: Optional[str] = None
     source_file_name: Optional[str] = None
-    project_section_id: Optional[str] = None
-    project_section_name: Optional[str] = None
-    requested_from: Optional[str] = None
-    expected_payment_date: Optional[str] = None
     extraction_status: Optional[str] = None
     extraction_confidence: Optional[str] = None
     lines: Optional[List[PurchaseOrderLine]] = None
@@ -6764,24 +6749,13 @@ async def create_purchase_order(po_data: PurchaseOrderCreate, admin: str = Depen
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    manual_po_number = str(po_dict.get("po_number") or "").strip()
-    if manual_po_number:
-        existing_po = await db.purchase_orders.find_one({
-            "po_number": {"$regex": f"^{re.escape(manual_po_number)}$", "$options": "i"}
-        })
-        if existing_po:
-            raise HTTPException(status_code=400, detail="A purchase order with this PO number already exists")
-        po_dict["po_number"] = manual_po_number
-    else:
-        po_dict["po_number"] = await next_po_number()
-
+    po_dict["po_number"] = await next_po_number()
     po_dict["supplier_name"] = po_dict.get("supplier_name") or supplier.get("name", "")
     po_dict["supplier_email"] = po_dict.get("supplier_email") or supplier.get("orders_email") or supplier.get("accounts_email") or ""
     po_dict["job_name"] = po_dict.get("job_name") or job.get("display_name") or job.get("name", "")
     po_dict["job_number"] = po_dict.get("job_number") or job.get("job_number")
     po_dict["division"] = po_dict.get("division") or job.get("division", "")
     po_dict["delivery_address"] = po_dict.get("delivery_address") or job.get("location", "")
-    po_dict["status"] = po_dict.get("status") or "draft"
     po_dict["requested_by_user_id"] = admin
     po_dict["requested_by_name"] = admin
     po_dict = calculate_po_totals(po_dict)
@@ -6797,35 +6771,6 @@ async def update_purchase_order(po_id: str, po_update: PurchaseOrderUpdate, admi
     if not existing:
         raise HTTPException(status_code=404, detail="Purchase order not found")
     update_dict = {k: v for k, v in po_update.dict().items() if v is not None}
-
-    if "po_number" in update_dict:
-        new_po_number = str(update_dict.get("po_number") or "").strip()
-        if not new_po_number:
-            raise HTTPException(status_code=400, detail="PO number cannot be blank")
-        duplicate_po = await db.purchase_orders.find_one({
-            "id": {"$ne": po_id},
-            "po_number": {"$regex": f"^{re.escape(new_po_number)}$", "$options": "i"},
-        })
-        if duplicate_po:
-            raise HTTPException(status_code=400, detail="Another purchase order already uses this PO number")
-        update_dict["po_number"] = new_po_number
-
-    if "supplier_id" in update_dict:
-        supplier = await db.suppliers.find_one({"id": update_dict["supplier_id"]}) or {}
-        if not supplier:
-            raise HTTPException(status_code=404, detail="Supplier not found")
-        update_dict["supplier_name"] = update_dict.get("supplier_name") or supplier.get("name", "")
-        update_dict["supplier_email"] = update_dict.get("supplier_email") or supplier.get("orders_email") or supplier.get("accounts_email") or ""
-
-    if "job_id" in update_dict:
-        job = await db.jobs.find_one({"id": update_dict["job_id"]}) or {}
-        if not job:
-            raise HTTPException(status_code=404, detail="Job not found")
-        update_dict["job_name"] = update_dict.get("job_name") or job.get("display_name") or job.get("name", "")
-        update_dict["job_number"] = update_dict.get("job_number") or job.get("job_number")
-        update_dict["division"] = update_dict.get("division") or job.get("division", "")
-        update_dict["delivery_address"] = update_dict.get("delivery_address") or existing.get("delivery_address") or job.get("location", "")
-
     if "lines" in update_dict:
         temp = calculate_po_totals({"lines": update_dict["lines"]})
         update_dict["lines"] = temp["lines"]
@@ -7052,6 +6997,8 @@ async def assign_purchase_order_materials(po_id: str, admin: str = Depends(verif
             "source_type": "purchase_order",
             "purchase_order_id": po_id,
             "purchase_order_line_id": line.get("id"),
+            "job_section_id": line.get("job_section_id") or po.get("project_section_id") or "",
+            "job_section_name": line.get("job_section_name") or po.get("project_section_name") or "",
             "status": "committed",
         }
         materials_to_insert.append(material)
@@ -7347,18 +7294,88 @@ async def build_material_spend_dashboard_data(
     status: Optional[str] = None,
     spend_type: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """Build Finance > Material Spend without double-counting forecast allowances.
+
+    Forecast material values from Gantt sections are allowances. When a PO or an
+    actual material entry is linked to the same Gantt section, that value should
+    reduce the remaining forecast rather than sit on top of it.
+
+    Example:
+      section forecast material = £567.00
+      linked PO net value        = £34.81
+      remaining forecast         = £532.19
+      total exposure             = £567.00, not £601.81
+    """
     today = datetime.utcnow().date()
     if not start_date:
         start_date = today.isoformat()
     if not end_date:
         end_date = (today + timedelta(days=27)).isoformat()
 
+    def safe_text(value: Any) -> str:
+        return str(value or "").strip()
+
+    def section_key(job_value: Any, section_id: Any = "", section_name: Any = "") -> Optional[str]:
+        job_value = safe_text(job_value)
+        section_id = safe_text(section_id)
+        section_name = safe_text(section_name).lower()
+        if not job_value:
+            return None
+        if section_id:
+            return f"{job_value}::id::{section_id}"
+        if section_name:
+            return f"{job_value}::name::{section_name}"
+        return None
+
+    def section_keys_for_section(job_value: Any, section: Dict[str, Any]) -> List[str]:
+        keys = []
+        by_id = section_key(job_value, section.get("id"), "")
+        by_name = section_key(job_value, "", section.get("name"))
+        if by_id:
+            keys.append(by_id)
+        if by_name and by_name not in keys:
+            keys.append(by_name)
+        return keys
+
+    def add_deduction(target: Dict[str, float], keys: List[str], amount: float) -> None:
+        amount = round(max(0.0, finance_material_to_float(amount)), 2)
+        if amount <= 0:
+            return
+        for key in keys:
+            if key:
+                target[key] = round(target.get(key, 0.0) + amount, 2)
+
+    def get_line_net(line: Dict[str, Any]) -> float:
+        if line.get("source_line_net_total") not in [None, ""]:
+            return finance_material_money(line.get("source_line_net_total"))
+        if line.get("net_total") not in [None, ""] and finance_material_to_float(line.get("net_total")) > 0:
+            return finance_material_money(line.get("net_total"))
+        return finance_material_money(finance_material_to_float(line.get("quantity"), 1.0) * finance_material_to_float(line.get("unit_cost")))
+
+    def get_line_vat(line: Dict[str, Any]) -> float:
+        if line.get("source_line_vat_total") not in [None, ""]:
+            return finance_material_money(line.get("source_line_vat_total"))
+        if line.get("vat_total") not in [None, ""] and finance_material_to_float(line.get("vat_total")) > 0:
+            return finance_material_money(line.get("vat_total"))
+        return finance_material_money(get_line_net(line) * (finance_material_to_float(line.get("vat_rate")) / 100.0))
+
+    def get_line_gross(line: Dict[str, Any]) -> float:
+        if line.get("source_line_gross_total") not in [None, ""]:
+            return finance_material_money(line.get("source_line_gross_total"))
+        if line.get("gross_total") not in [None, ""] and finance_material_to_float(line.get("gross_total")) > 0:
+            return finance_material_money(line.get("gross_total"))
+        return finance_material_money(get_line_net(line) + get_line_vat(line))
+
     jobs = await db.jobs.find({"archived": {"$ne": True}}, {"_id": 0}).to_list(5000)
     job_lookup = {job.get("id"): job for job in jobs if job.get("id")}
 
     rows: List[Dict[str, Any]] = []
+    actual_net_by_section: Dict[str, float] = {}
+    po_net_by_section: Dict[str, float] = {}
 
-    # 1) Actual material entries
+    # 1) Actual material entries.
+    # Materials created from a PO assignment are skipped here because the PO row
+    # already represents that commitment. This avoids PO + assigned material double-counting.
     material_query: Dict[str, Any] = {"archived": {"$ne": True}}
     if job_id:
         material_query["job_id"] = job_id
@@ -7367,6 +7384,9 @@ async def build_material_spend_dashboard_data(
 
     materials = await db.materials.find(material_query, {"_id": 0}).to_list(10000)
     for material in materials:
+        if material.get("purchase_order_id") or str(material.get("source_type") or "").lower() == "purchase_order":
+            continue
+
         job = job_lookup.get(material.get("job_id"), {})
         material_date = finance_material_iso(material.get("purchase_date") or material.get("date") or material.get("created_date"))
         net = finance_material_money(material.get("net_total"))
@@ -7376,6 +7396,18 @@ async def build_material_spend_dashboard_data(
         gross = finance_material_money(material.get("gross_total") or (net + vat))
         row_status = str(material.get("status") or "approved").strip().lower().replace(" ", "_")
         receipt_ok = material_receipt_present(material)
+
+        section_keys = []
+        material_section_id = material.get("job_section_id") or material.get("project_section_id") or material.get("section_id")
+        material_section_name = material.get("job_section_name") or material.get("project_section_name") or material.get("section_name")
+        key = section_key(material.get("job_id"), material_section_id, material_section_name)
+        if key:
+            section_keys.append(key)
+            # Add a name fallback too where available, so older rows still match if an ID changed.
+            name_key = section_key(material.get("job_id"), "", material_section_name)
+            if name_key and name_key not in section_keys:
+                section_keys.append(name_key)
+            add_deduction(actual_net_by_section, section_keys, net)
 
         rows.append({
             "id": material.get("id") or str(uuid.uuid4()),
@@ -7395,12 +7427,16 @@ async def build_material_spend_dashboard_data(
             "paid_date": material_date,
             "source": "Material Entry",
             "source_id": material.get("id"),
+            "job_section_id": safe_text(material_section_id),
+            "job_section_name": safe_text(material_section_name),
             "receipt": receipt_ok,
             "receipt_reference": material.get("reference") or material.get("receipt_number") or "",
             "notes": material.get("notes", ""),
+            "exposure_net": net,
+            "cash_out_gross": gross,
         })
 
-    # 2) Purchase orders / committed spend
+    # 2) Purchase orders / committed spend.
     po_query: Dict[str, Any] = {}
     if job_id:
         po_query["job_id"] = job_id
@@ -7421,6 +7457,38 @@ async def build_material_spend_dashboard_data(
         row_type = "po_paid" if po_status in MATERIAL_PO_PAID_STATUSES else "po"
         source_label = po.get("po_number") or "Purchase Order"
 
+        # Deduct linked PO line values from their Gantt section forecast.
+        # This is the important double-counting fix.
+        linked_line_total = 0.0
+        lines = po.get("lines") or []
+        for line in lines:
+            line_net = get_line_net(line)
+            if line_net <= 0:
+                continue
+            line_section_id = line.get("job_section_id") or line.get("project_section_id") or po.get("project_section_id")
+            line_section_name = line.get("job_section_name") or line.get("project_section_name") or po.get("project_section_name")
+            keys = []
+            by_id = section_key(po.get("job_id"), line_section_id, "")
+            by_name = section_key(po.get("job_id"), "", line_section_name)
+            if by_id:
+                keys.append(by_id)
+            if by_name and by_name not in keys:
+                keys.append(by_name)
+            if keys:
+                add_deduction(po_net_by_section, keys, line_net)
+                linked_line_total += line_net
+
+        # If the PO has a top-level project section but no line-level links, deduct the whole PO.
+        if linked_line_total <= 0 and (po.get("project_section_id") or po.get("project_section_name")):
+            keys = []
+            by_id = section_key(po.get("job_id"), po.get("project_section_id"), "")
+            by_name = section_key(po.get("job_id"), "", po.get("project_section_name"))
+            if by_id:
+                keys.append(by_id)
+            if by_name and by_name not in keys:
+                keys.append(by_name)
+            add_deduction(po_net_by_section, keys, net)
+
         rows.append({
             "id": po.get("id") or str(uuid.uuid4()),
             "date": po_date,
@@ -7439,12 +7507,17 @@ async def build_material_spend_dashboard_data(
             "paid_date": paid_date,
             "source": source_label,
             "source_id": po.get("id"),
+            "job_section_id": safe_text(po.get("project_section_id")),
+            "job_section_name": safe_text(po.get("project_section_name")),
             "receipt": bool(po.get("supplier_quote_number") or po.get("source_file_name")),
             "receipt_reference": po.get("supplier_quote_number") or po.get("source_file_name") or "",
             "notes": po.get("notes", ""),
+            "exposure_net": net,
+            "cash_out_gross": gross,
         })
 
-    # 3) Forecast material spend from Gantt section material allowances
+    # 3) Remaining forecast material spend from Gantt section material allowances.
+    # This is now a REMAINING forecast, not the original forecast plus POs.
     for job in jobs:
         if job_id and job.get("id") != job_id:
             continue
@@ -7455,27 +7528,53 @@ async def build_material_spend_dashboard_data(
             forecast_date = finance_material_iso(section.get("start_date") or section.get("end_date") or job.get("planned_start_date"))
             if not forecast_date:
                 continue
+
+            keys = section_keys_for_section(job.get("id"), section)
+            actual_deducted = round(max(actual_net_by_section.get(key, 0.0) for key in keys) if keys else 0.0, 2)
+            po_deducted = round(max(po_net_by_section.get(key, 0.0) for key in keys) if keys else 0.0, 2)
+            remaining_forecast = round(max(0.0, section_material - actual_deducted - po_deducted), 2)
+            covered_value = round(min(section_material, actual_deducted + po_deducted), 2)
+
+            if remaining_forecast <= 0:
+                continue
+
+            forecast_notes = [
+                f"Original material allowance: £{section_material:,.2f}",
+            ]
+            if po_deducted > 0:
+                forecast_notes.append(f"Less linked POs: £{po_deducted:,.2f}")
+            if actual_deducted > 0:
+                forecast_notes.append(f"Less linked actual spend: £{actual_deducted:,.2f}")
+
             rows.append({
                 "id": f"forecast-{job.get('id')}-{section.get('id') or section.get('name')}",
                 "date": forecast_date,
                 "type": "forecast",
-                "type_label": "Forecast",
+                "type_label": "Remaining Forecast",
                 "job_id": job.get("id", ""),
                 "job_name": job.get("name") or job.get("display_name") or "Unknown job",
                 "job_client": job.get("client", ""),
                 "supplier": "Various",
-                "description": f"{section.get('name') or 'Gantt section'} material allowance",
-                "net": section_material,
+                "description": f"{section.get('name') or 'Gantt section'} remaining material forecast",
+                "net": remaining_forecast,
                 "vat": 0.0,
-                "gross": section_material,
+                "gross": remaining_forecast,
                 "status": "forecast",
                 "due_date": forecast_date,
                 "paid_date": "",
                 "source": "Forecast",
                 "source_id": section.get("id"),
+                "job_section_id": safe_text(section.get("id")),
+                "job_section_name": safe_text(section.get("name")),
                 "receipt": None,
                 "receipt_reference": "",
-                "notes": "Forecast from Gantt section material allowance",
+                "notes": " | ".join(forecast_notes),
+                "forecast_original_net": section_material,
+                "forecast_deducted_po_net": po_deducted,
+                "forecast_deducted_actual_net": actual_deducted,
+                "forecast_covered_net": covered_value,
+                "exposure_net": remaining_forecast,
+                "cash_out_gross": remaining_forecast,
             })
 
     # Apply display filters after all sources are normalised.
@@ -7484,8 +7583,11 @@ async def build_material_spend_dashboard_data(
         row_date_for_range = row.get("due_date") or row.get("date") or row.get("paid_date")
         if not finance_material_date_in_range(row_date_for_range, start_date, end_date):
             continue
-        if spend_type and spend_type != "all" and row.get("type") != spend_type:
-            continue
+        if spend_type and spend_type != "all":
+            if spend_type == "po" and row.get("type") not in ["po", "po_paid"]:
+                continue
+            if spend_type != "po" and row.get("type") != spend_type:
+                continue
         if status and status != "all" and row.get("status") != status:
             continue
         if supplier and supplier.lower() not in str(row.get("supplier", "")).lower():
@@ -7501,11 +7603,11 @@ async def build_material_spend_dashboard_data(
     month_start_iso = month_start.isoformat()
     month_end_iso = month_end.isoformat()
 
-    actual_this_month = sum(row["gross"] for row in rows if row.get("type") == "actual" and finance_material_date_in_range(row.get("date"), month_start_iso, month_end_iso))
-    po_this_month = sum(row["gross"] for row in rows if row.get("type") in ["po", "po_paid"] and finance_material_date_in_range(row.get("date"), month_start_iso, month_end_iso))
-    due_next_4_weeks = sum(row["gross"] for row in rows if row.get("type") == "po" and finance_material_date_in_range(row.get("due_date"), today.isoformat(), (today + timedelta(days=27)).isoformat()))
-    unreceipted_spend = sum(row["gross"] for row in rows if row.get("type") == "actual" and row.get("receipt") is False)
-    forecast_next_4_weeks = sum(row["gross"] for row in rows if row.get("type") == "forecast" and finance_material_date_in_range(row.get("date"), today.isoformat(), (today + timedelta(days=27)).isoformat()))
+    actual_this_month = sum(row.get("exposure_net", row.get("net", 0.0)) for row in rows if row.get("type") == "actual" and finance_material_date_in_range(row.get("date"), month_start_iso, month_end_iso))
+    po_this_month = sum(row.get("exposure_net", row.get("net", 0.0)) for row in rows if row.get("type") in ["po", "po_paid"] and finance_material_date_in_range(row.get("date"), month_start_iso, month_end_iso))
+    due_next_4_weeks = sum(row.get("cash_out_gross", row.get("gross", 0.0)) for row in rows if row.get("type") == "po" and finance_material_date_in_range(row.get("due_date"), today.isoformat(), (today + timedelta(days=27)).isoformat()))
+    unreceipted_spend = sum(row.get("exposure_net", row.get("net", 0.0)) for row in rows if row.get("type") == "actual" and row.get("receipt") is False)
+    forecast_next_4_weeks = sum(row.get("exposure_net", row.get("net", 0.0)) for row in rows if row.get("type") == "forecast" and finance_material_date_in_range(row.get("date"), today.isoformat(), (today + timedelta(days=27)).isoformat()))
 
     job_summary: Dict[str, Dict[str, Any]] = {}
     for job in jobs:
@@ -7529,12 +7631,13 @@ async def build_material_spend_dashboard_data(
         jid = row.get("job_id")
         if not jid or jid not in job_summary:
             continue
+        exposure_value = row.get("exposure_net", row.get("net", 0.0))
         if row.get("type") == "actual":
-            job_summary[jid]["actual_spend"] += row.get("gross", 0.0)
+            job_summary[jid]["actual_spend"] += exposure_value
         elif row.get("type") == "po":
-            job_summary[jid]["po_commitments"] += row.get("gross", 0.0)
+            job_summary[jid]["po_commitments"] += exposure_value
         elif row.get("type") == "forecast":
-            job_summary[jid]["forecast_spend"] += row.get("gross", 0.0)
+            job_summary[jid]["forecast_spend"] += exposure_value
 
     jobs_over_allowance = 0
     for item in job_summary.values():
@@ -7550,7 +7653,7 @@ async def build_material_spend_dashboard_data(
     supplier_summary: Dict[str, float] = {}
     for row in rows:
         if row.get("type") in ["actual", "po", "po_paid"]:
-            supplier_summary[row.get("supplier") or "Unknown supplier"] = supplier_summary.get(row.get("supplier") or "Unknown supplier", 0.0) + row.get("gross", 0.0)
+            supplier_summary[row.get("supplier") or "Unknown supplier"] = supplier_summary.get(row.get("supplier") or "Unknown supplier", 0.0) + row.get("cash_out_gross", row.get("gross", 0.0))
     top_suppliers = [
         {"supplier": supplier_name, "gross": round(total, 2)}
         for supplier_name, total in sorted(supplier_summary.items(), key=lambda item: item[1], reverse=True)[:8]
@@ -7563,8 +7666,8 @@ async def build_material_spend_dashboard_data(
         if finance_material_date_in_range(record_date, start_date, end_date):
             forecast_income += finance_material_to_float(record.get("anticipated_amount") or record.get("expected_amount"))
 
-    forecast_material_spend = sum(row.get("gross", 0.0) for row in filtered_rows if row.get("type") in ["forecast", "po"])
-    supplier_payments_due = sum(row.get("gross", 0.0) for row in filtered_rows if row.get("type") == "po")
+    forecast_material_spend = sum(row.get("exposure_net", row.get("net", 0.0)) for row in filtered_rows if row.get("type") in ["forecast", "po", "actual"])
+    supplier_payments_due = sum(row.get("cash_out_gross", row.get("gross", 0.0)) for row in filtered_rows if row.get("type") == "po")
 
     attention = [
         {

@@ -231,6 +231,11 @@ class Job(BaseModel):
     location: str
     client: str
     quoted_cost: float
+    original_quoted_cost: Optional[float] = None
+    approved_variations_total: float = 0.0
+    pending_variations_total: float = 0.0
+    rejected_variations_total: float = 0.0
+    current_contract_value: Optional[float] = None
     status: str = "active"  # active, completed, cancelled
     archived: bool = False
     gps_required: bool = False  # If true, location is mandatory for clock in/out
@@ -257,6 +262,11 @@ class JobCreate(BaseModel):
     location: str
     client: str
     quoted_cost: float
+    original_quoted_cost: Optional[float] = None
+    approved_variations_total: float = 0.0
+    pending_variations_total: float = 0.0
+    rejected_variations_total: float = 0.0
+    current_contract_value: Optional[float] = None
     gps_required: bool = True
     include_in_gantt: bool = False
     planned_start_date: Optional[str] = None
@@ -275,6 +285,11 @@ class JobUpdate(BaseModel):
     location: Optional[str] = None
     client: Optional[str] = None
     quoted_cost: Optional[float] = None
+    original_quoted_cost: Optional[float] = None
+    approved_variations_total: Optional[float] = None
+    pending_variations_total: Optional[float] = None
+    rejected_variations_total: Optional[float] = None
+    current_contract_value: Optional[float] = None
     status: Optional[str] = None
     archived: Optional[bool] = None
     gps_required: Optional[bool] = None
@@ -655,6 +670,99 @@ class PurchaseOrderRequesterActionResponseRequest(BaseModel):
     responder_name: str = ""
     responder_email: str = ""
     comments: str = ""
+
+
+# ==================== VARIATION SYSTEM MODELS ====================
+
+class Variation(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    variation_number: str = ""
+    job_id: str
+    job_name: str = ""
+    job_number: Optional[int] = None
+    client_name: str = ""
+    client_email: str = ""
+    title: str
+    client_instruction_summary: str = ""
+    description: str = ""
+    scope_of_works: str = ""
+    material_value: float = 0.0
+    labour_value: float = 0.0
+    subcontractor_value: float = 0.0
+    other_value: float = 0.0
+    net_total: float = 0.0
+    vat_rate: float = 20.0
+    vat_total: float = 0.0
+    gross_total: float = 0.0
+    required_date: Optional[str] = None
+    status: str = "pending_client_approval"  # draft, pending_client_approval, approved, rejected, cancelled
+    approval_token: str = ""
+    approval_link: str = ""
+    approval_sent_at: Optional[datetime] = None
+    approval_notification_status: str = "not_sent"
+    approved_by_name: str = ""
+    approved_by_email: str = ""
+    approved_at: Optional[datetime] = None
+    rejected_by_name: str = ""
+    rejected_by_email: str = ""
+    rejected_at: Optional[datetime] = None
+    rejection_reason: str = ""
+    client_signature: str = ""
+    client_comments: str = ""
+    add_to_gantt_on_approval: bool = True
+    added_to_gantt: bool = False
+    gantt_section_id: str = ""
+    created_by_user_id: str = ""
+    created_by_name: str = ""
+    created_by_email: str = ""
+    created_by_role: str = ""
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: Optional[datetime] = None
+    archived: bool = False
+
+class VariationCreate(BaseModel):
+    job_id: str
+    title: str
+    client_email: str = ""
+    client_instruction_summary: str = ""
+    description: str = ""
+    scope_of_works: str = ""
+    material_value: float = 0.0
+    labour_value: float = 0.0
+    subcontractor_value: float = 0.0
+    other_value: float = 0.0
+    vat_rate: float = 20.0
+    required_date: Optional[str] = None
+    status: str = "pending_client_approval"
+    add_to_gantt_on_approval: bool = True
+    created_by_user_id: str = ""
+    created_by_name: str = ""
+    created_by_email: str = ""
+    created_by_role: str = ""
+
+class VariationUpdate(BaseModel):
+    title: Optional[str] = None
+    client_email: Optional[str] = None
+    client_instruction_summary: Optional[str] = None
+    description: Optional[str] = None
+    scope_of_works: Optional[str] = None
+    material_value: Optional[float] = None
+    labour_value: Optional[float] = None
+    subcontractor_value: Optional[float] = None
+    other_value: Optional[float] = None
+    vat_rate: Optional[float] = None
+    required_date: Optional[str] = None
+    status: Optional[str] = None
+    add_to_gantt_on_approval: Optional[bool] = None
+    archived: Optional[bool] = None
+
+class VariationApprovalResponse(BaseModel):
+    decision: str = "approve"  # approve / reject
+    name: str = ""
+    email: str = ""
+    signature: str = ""
+    comments: str = ""
+    reason: str = ""
 
 class AdminLogin(BaseModel):
     username: str
@@ -1075,6 +1183,7 @@ APP_SECTIONS = [
     "workers",
     "jobs",
     "project-management",
+    "variations",
     "schedule",
     "purchase-orders",
     "finance",
@@ -1092,6 +1201,7 @@ DEFAULT_ROLE_PERMISSIONS = {
         "workers": True,
         "jobs": True,
         "project-management": False,
+        "variations": True,
         "schedule": False,
         "purchase-orders": True,
         "finance": False,
@@ -1104,6 +1214,7 @@ DEFAULT_ROLE_PERMISSIONS = {
         "workers": False,
         "jobs": False,
         "project-management": True,
+        "variations": True,
         "schedule": True,
         "purchase-orders": False,
         "finance": False,
@@ -1116,6 +1227,7 @@ DEFAULT_ROLE_PERMISSIONS = {
         "workers": False,
         "jobs": False,
         "project-management": False,
+        "variations": True,
         "schedule": False,
         "purchase-orders": False,
         "finance": True,
@@ -4845,7 +4957,14 @@ def normalise_finance_marker(marker: Dict[str, Any]) -> Dict[str, Any]:
 def finance_contract_value(job: Dict[str, Any], sections: Optional[List[Dict[str, Any]]] = None) -> float:
     section_source = sections if sections is not None else (job.get("gantt_sections") or [])
     section_total = sum(section_finance_values(section).get("section_value", 0.0) for section in section_source)
-    return round(finance_to_number(job.get("quoted_cost")) or section_total, 2)
+    current_contract = finance_to_number(job.get("current_contract_value"))
+    if current_contract > 0:
+        return round(current_contract, 2)
+    base_value = finance_to_number(job.get("original_quoted_cost")) or finance_to_number(job.get("quoted_cost"))
+    approved_variations = finance_to_number(job.get("approved_variations_total"))
+    if base_value > 0 or approved_variations > 0:
+        return round(base_value + approved_variations, 2)
+    return round(section_total, 2)
 
 
 def finance_deposit_marker_value(job: Dict[str, Any], marker: Dict[str, Any], contract_value: Optional[float] = None) -> float:
@@ -8699,6 +8818,437 @@ async def api_info_endpoint():
         },
         "total_endpoints": 50
     }
+
+
+# ==================== VARIATION SYSTEM HELPERS & ENDPOINTS ====================
+
+VARIATION_ACTIVE_STATUSES = {"draft", "pending_client_approval", "approved", "rejected", "cancelled"}
+VARIATION_PENDING_STATUSES = {"draft", "pending_client_approval"}
+
+
+def variation_public_base_url() -> str:
+    return os.environ.get("PUBLIC_FRONTEND_URL", os.environ.get("FRONTEND_URL", "")).rstrip("/")
+
+
+def variation_backend_base_url() -> str:
+    return os.environ.get("PUBLIC_BACKEND_URL", os.environ.get("BACKEND_URL", "")).rstrip("/")
+
+
+def calculate_variation_totals(data: Dict[str, Any]) -> Dict[str, float]:
+    material = finance_to_number(data.get("material_value"))
+    labour = finance_to_number(data.get("labour_value"))
+    subcontractor = finance_to_number(data.get("subcontractor_value"))
+    other = finance_to_number(data.get("other_value"))
+    net = round(material + labour + subcontractor + other, 2)
+    vat_rate = finance_to_number(data.get("vat_rate"), 20.0)
+    vat = round(net * (vat_rate / 100.0), 2)
+    return {
+        "material_value": round(material, 2),
+        "labour_value": round(labour, 2),
+        "subcontractor_value": round(subcontractor, 2),
+        "other_value": round(other, 2),
+        "net_total": net,
+        "vat_rate": vat_rate,
+        "vat_total": vat,
+        "gross_total": round(net + vat, 2),
+    }
+
+
+async def next_variation_number(job_id: str) -> str:
+    job = await db.jobs.find_one({"id": job_id}, {"_id": 0}) or {}
+    prefix = job.get("job_number") or job.get("display_name") or job.get("name") or "VAR"
+    prefix = str(prefix).replace(":", "").replace("/", "-")
+    count = await db.variations.count_documents({"job_id": job_id})
+    return f"VO-{prefix}-{str(count + 1).zfill(3)}"
+
+
+def build_variation_approval_link(token: str) -> str:
+    frontend = variation_public_base_url()
+    if frontend:
+        return f"{frontend}/variation-approval/{token}"
+    backend = variation_backend_base_url()
+    if backend:
+        return f"{backend}/api/variations/public/{token}"
+    return f"/api/variations/public/{token}"
+
+
+async def recalculate_job_variation_totals(job_id: str) -> Dict[str, Any]:
+    job = await db.jobs.find_one({"id": job_id}, {"_id": 0})
+    if not job:
+        return {}
+    variations = await db.variations.find({"job_id": job_id, "archived": {"$ne": True}}, {"_id": 0}).to_list(5000)
+    approved_total = round(sum(finance_to_number(v.get("net_total")) for v in variations if v.get("status") == "approved"), 2)
+    pending_total = round(sum(finance_to_number(v.get("net_total")) for v in variations if v.get("status") in VARIATION_PENDING_STATUSES), 2)
+    rejected_total = round(sum(finance_to_number(v.get("net_total")) for v in variations if v.get("status") == "rejected"), 2)
+    original_value = finance_to_number(job.get("original_quoted_cost")) or finance_to_number(job.get("quoted_cost"))
+    current_value = round(original_value + approved_total, 2)
+    patch = {
+        "original_quoted_cost": original_value,
+        "approved_variations_total": approved_total,
+        "pending_variations_total": pending_total,
+        "rejected_variations_total": rejected_total,
+        "current_contract_value": current_value,
+        "updated_at": datetime.utcnow(),
+    }
+    await db.jobs.update_one({"id": job_id}, {"$set": patch})
+    return {**job, **patch}
+
+
+async def create_or_update_variation_finance_record(variation: Dict[str, Any]) -> None:
+    try:
+        if variation.get("status") != "approved":
+            return
+        job = await db.jobs.find_one({"id": variation.get("job_id")}, {"_id": 0}) or {}
+        expected_date = variation.get("required_date") or datetime.utcnow().date().isoformat()
+        record_id = f"variation-{variation.get('id')}"
+        record = {
+            "id": record_id,
+            "project_id": variation.get("job_id"),
+            "project_name": variation.get("job_name") or job.get("name") or "",
+            "type": "variation",
+            "description": variation.get("title") or "Approved variation",
+            "expected_date": expected_date,
+            "expected_amount": finance_to_number(variation.get("net_total")),
+            "anticipated_date": expected_date,
+            "anticipated_amount": finance_to_number(variation.get("net_total")),
+            "status": "expected",
+            "source": "variation",
+            "source_id": variation.get("id"),
+            "notes": variation.get("scope_of_works") or variation.get("description") or "",
+            "created_by": variation.get("created_by_name", ""),
+            "created_by_email": variation.get("created_by_email", ""),
+            "created_by_role": variation.get("created_by_role", ""),
+            "updated_by": variation.get("approved_by_name") or variation.get("created_by_name", ""),
+            "updated_by_email": variation.get("approved_by_email") or variation.get("created_by_email", ""),
+            "updated_by_role": "client" if variation.get("approved_by_email") else variation.get("created_by_role", ""),
+            "updated_at": datetime.utcnow(),
+            "archived": False,
+        }
+        existing = await db.finance_dashboard_records.find_one({"id": record_id})
+        if existing:
+            await db.finance_dashboard_records.update_one({"id": record_id}, {"$set": record})
+        else:
+            record["created_at"] = datetime.utcnow()
+            await db.finance_dashboard_records.insert_one(record)
+    except Exception as exc:
+        logger.warning("Could not create variation finance record: %s", exc)
+
+
+async def add_variation_to_gantt(variation_id: str) -> Dict[str, Any]:
+    variation = await db.variations.find_one({"id": variation_id}, {"_id": 0})
+    if not variation:
+        raise HTTPException(status_code=404, detail="Variation not found")
+    job = await db.jobs.find_one({"id": variation.get("job_id")}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if variation.get("added_to_gantt") and variation.get("gantt_section_id"):
+        return variation
+    section_id = variation.get("gantt_section_id") or f"variation-section-{variation_id}"
+    sections = job.get("gantt_sections") or []
+    if not any(section.get("id") == section_id for section in sections):
+        start_date = variation.get("required_date") or job.get("planned_end_date") or job.get("planned_start_date") or ""
+        new_section = {
+            "id": section_id,
+            "name": f"Variation - {variation.get('title') or variation.get('variation_number')}",
+            "start_date": start_date,
+            "end_date": start_date,
+            "status": "planned",
+            "notes": "\n".join([variation.get("client_instruction_summary", ""), variation.get("scope_of_works", "")]).strip(),
+            "required_trades": [],
+            "assigned_worker_ids": [],
+            "sent_to_schedule": False,
+            "schedule_entry_ids": [],
+            "schedule_status": "not_scheduled",
+            "labour_value": finance_to_number(variation.get("labour_value")),
+            "material_value": finance_to_number(variation.get("material_value")),
+            "subcontractor_value": finance_to_number(variation.get("subcontractor_value")),
+            "other_value": finance_to_number(variation.get("other_value")),
+            "section_value": finance_to_number(variation.get("net_total")),
+            "progress_percent": 0,
+            "variation_id": variation_id,
+            "variation_number": variation.get("variation_number", ""),
+        }
+        sections.append(new_section)
+        await db.jobs.update_one({"id": job.get("id")}, {"$set": {"gantt_sections": sections, "include_in_gantt": True, "updated_at": datetime.utcnow()}})
+    patch = {"added_to_gantt": True, "gantt_section_id": section_id, "updated_at": datetime.utcnow()}
+    await db.variations.update_one({"id": variation_id}, {"$set": patch})
+    return await db.variations.find_one({"id": variation_id}, {"_id": 0})
+
+
+async def approve_variation(variation_id: str, approver: Dict[str, Any], signature: str = "", comments: str = "") -> Dict[str, Any]:
+    variation = await db.variations.find_one({"id": variation_id}, {"_id": 0})
+    if not variation:
+        raise HTTPException(status_code=404, detail="Variation not found")
+    patch = {
+        "status": "approved",
+        "approved_by_name": approver.get("name") or approver.get("email") or "Approved",
+        "approved_by_email": approver.get("email", ""),
+        "approved_at": datetime.utcnow(),
+        "client_signature": signature or variation.get("client_signature", ""),
+        "client_comments": comments or variation.get("client_comments", ""),
+        "updated_at": datetime.utcnow(),
+    }
+    await db.variations.update_one({"id": variation_id}, {"$set": patch})
+    updated = await db.variations.find_one({"id": variation_id}, {"_id": 0})
+    if updated.get("add_to_gantt_on_approval"):
+        updated = await add_variation_to_gantt(variation_id)
+    await recalculate_job_variation_totals(updated.get("job_id"))
+    await create_or_update_variation_finance_record(updated)
+    return updated
+
+
+async def send_variation_client_notification(variation: Dict[str, Any]) -> Dict[str, Any]:
+    recipient = str(variation.get("client_email") or "").strip()
+    if not recipient:
+        return {"sent": False, "method": "not_configured", "error": "No client email saved against this variation"}
+    payload = {
+        "variation_id": variation.get("id"),
+        "variation_number": variation.get("variation_number"),
+        "job_id": variation.get("job_id"),
+        "job_name": variation.get("job_name"),
+        "client_name": variation.get("client_name"),
+        "client_email": recipient,
+        "title": variation.get("title"),
+        "description": variation.get("description"),
+        "client_instruction_summary": variation.get("client_instruction_summary"),
+        "scope_of_works": variation.get("scope_of_works"),
+        "net_total": variation.get("net_total"),
+        "vat_total": variation.get("vat_total"),
+        "gross_total": variation.get("gross_total"),
+        "approval_link": variation.get("approval_link"),
+    }
+    power_automate_url = os.environ.get("POWER_AUTOMATE_VARIATION_APPROVAL_URL", "").strip()
+    power_automate_secret = os.environ.get("POWER_AUTOMATE_VARIATION_APPROVAL_SECRET", "").strip()
+    if power_automate_url:
+        headers = {"Content-Type": "application/json"}
+        if power_automate_secret:
+            headers["x-lda-secret"] = power_automate_secret
+        try:
+            response = requests.post(power_automate_url, json=payload, headers=headers, timeout=20)
+            response.raise_for_status()
+            return {"sent": True, "method": "power_automate", "to": recipient}
+        except Exception as exc:
+            logger.exception("Failed to send variation approval Power Automate notification: %s", exc)
+            return {"sent": False, "method": "power_automate", "to": recipient, "error": str(exc)}
+    smtp_host = os.environ.get("SMTP_HOST", "").strip()
+    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+    smtp_username = os.environ.get("SMTP_USERNAME", "").strip()
+    smtp_password = os.environ.get("SMTP_PASSWORD", "").strip()
+    smtp_from = os.environ.get("SMTP_FROM_EMAIL", smtp_username).strip()
+    smtp_from_name = os.environ.get("SMTP_FROM_NAME", "LDA Group").strip()
+    smtp_reply_to = os.environ.get("SMTP_REPLY_TO", "").strip()
+    if smtp_host and smtp_username and smtp_password and smtp_from:
+        msg = EmailMessage()
+        msg["Subject"] = f"Variation approval required - {variation.get('variation_number')}"
+        msg["From"] = f"{smtp_from_name} <{smtp_from}>"
+        msg["To"] = recipient
+        if smtp_reply_to:
+            msg["Reply-To"] = smtp_reply_to
+        msg.set_content(
+            f"Please review the following variation request:\n\n"
+            f"Project: {variation.get('job_name')}\n"
+            f"Variation: {variation.get('title')}\n"
+            f"Net: £{finance_to_number(variation.get('net_total')):,.2f}\n"
+            f"VAT: £{finance_to_number(variation.get('vat_total')):,.2f}\n"
+            f"Gross: £{finance_to_number(variation.get('gross_total')):,.2f}\n\n"
+            f"Approval link: {variation.get('approval_link')}\n"
+        )
+        try:
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as smtp:
+                if os.environ.get("SMTP_USE_TLS", "true").lower() != "false":
+                    smtp.starttls()
+                smtp.login(smtp_username, smtp_password)
+                smtp.send_message(msg)
+            return {"sent": True, "method": "smtp", "to": recipient}
+        except Exception as exc:
+            logger.exception("Failed to send variation approval SMTP email: %s", exc)
+            return {"sent": False, "method": "smtp", "to": recipient, "error": str(exc)}
+    return {"sent": False, "method": "not_configured", "to": recipient, "error": "No Power Automate or SMTP variation approval settings configured"}
+
+
+@api_router.get("/variations")
+async def get_variations(job_id: Optional[str] = Query(None), status: Optional[str] = Query(None), include_archived: bool = Query(False), admin: str = Depends(verify_admin)):
+    filters: Dict[str, Any] = {}
+    if job_id:
+        filters["job_id"] = job_id
+    if status and status != "all":
+        filters["status"] = status
+    if not include_archived:
+        filters["archived"] = {"$ne": True}
+    return await db.variations.find(filters, {"_id": 0}).sort("created_at", -1).to_list(5000)
+
+
+@api_router.get("/jobs/{job_id}/variations")
+async def get_job_variations(job_id: str, admin: str = Depends(verify_admin)):
+    return await db.variations.find({"job_id": job_id, "archived": {"$ne": True}}, {"_id": 0}).sort("created_at", -1).to_list(1000)
+
+
+@api_router.post("/variations", response_model=Variation)
+async def create_variation(variation: VariationCreate, admin: str = Depends(verify_admin)):
+    job = await db.jobs.find_one({"id": variation.job_id, "archived": {"$ne": True}}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    data = variation.dict()
+    totals = calculate_variation_totals(data)
+    token = secrets.token_urlsafe(32)
+    doc = {
+        **data,
+        **totals,
+        "id": str(uuid.uuid4()),
+        "variation_number": await next_variation_number(variation.job_id),
+        "job_name": job.get("display_name") or job.get("name") or "",
+        "job_number": job.get("job_number"),
+        "client_name": job.get("client") or "",
+        "status": variation.status if variation.status in VARIATION_ACTIVE_STATUSES else "pending_client_approval",
+        "approval_token": token,
+        "approval_link": build_variation_approval_link(token),
+        "approval_notification_status": "not_sent",
+        "created_at": datetime.utcnow(),
+        "updated_at": datetime.utcnow(),
+        "archived": False,
+    }
+    await db.variations.insert_one(doc)
+    await recalculate_job_variation_totals(variation.job_id)
+    if doc.get("status") == "pending_client_approval" and doc.get("client_email"):
+        notification_result = await send_variation_client_notification(doc)
+        await db.variations.update_one({"id": doc["id"]}, {"$set": {
+            "approval_sent_at": datetime.utcnow() if notification_result.get("sent") else None,
+            "approval_notification_status": "sent" if notification_result.get("sent") else notification_result.get("method", "not_configured"),
+            "approval_notification_result": notification_result,
+        }})
+        doc = await db.variations.find_one({"id": doc["id"]}, {"_id": 0})
+    return Variation(**doc)
+
+
+@api_router.get("/variations/{variation_id}")
+async def get_variation(variation_id: str, admin: str = Depends(verify_admin)):
+    variation = await db.variations.find_one({"id": variation_id}, {"_id": 0})
+    if not variation:
+        raise HTTPException(status_code=404, detail="Variation not found")
+    return variation
+
+
+@api_router.put("/variations/{variation_id}")
+async def update_variation(variation_id: str, update: VariationUpdate, admin: str = Depends(verify_admin)):
+    existing = await db.variations.find_one({"id": variation_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Variation not found")
+    if existing.get("status") == "approved":
+        raise HTTPException(status_code=400, detail="Approved variations cannot be edited. Create a further variation instead.")
+    update_data = {k: v for k, v in update.dict().items() if v is not None}
+    update_data.update(calculate_variation_totals({**existing, **update_data}))
+    update_data["updated_at"] = datetime.utcnow()
+    await db.variations.update_one({"id": variation_id}, {"$set": update_data})
+    updated = await db.variations.find_one({"id": variation_id}, {"_id": 0})
+    await recalculate_job_variation_totals(updated.get("job_id"))
+    return updated
+
+
+@api_router.delete("/variations/{variation_id}")
+async def archive_variation(variation_id: str, admin: str = Depends(verify_admin)):
+    variation = await db.variations.find_one({"id": variation_id}, {"_id": 0})
+    if not variation:
+        raise HTTPException(status_code=404, detail="Variation not found")
+    if variation.get("status") == "approved":
+        raise HTTPException(status_code=400, detail="Approved variations cannot be deleted. Raise a contra variation if needed.")
+    await db.variations.update_one({"id": variation_id}, {"$set": {"archived": True, "updated_at": datetime.utcnow()}})
+    await recalculate_job_variation_totals(variation.get("job_id"))
+    return {"success": True, "message": "Variation archived"}
+
+
+@api_router.post("/variations/{variation_id}/submit-for-approval")
+async def submit_variation_for_approval(variation_id: str, admin: str = Depends(verify_admin)):
+    variation = await db.variations.find_one({"id": variation_id}, {"_id": 0})
+    if not variation:
+        raise HTTPException(status_code=404, detail="Variation not found")
+    token = variation.get("approval_token") or secrets.token_urlsafe(32)
+    patch = {
+        "status": "pending_client_approval",
+        "approval_token": token,
+        "approval_link": variation.get("approval_link") or build_variation_approval_link(token),
+        "updated_at": datetime.utcnow(),
+    }
+    await db.variations.update_one({"id": variation_id}, {"$set": patch})
+    variation = await db.variations.find_one({"id": variation_id}, {"_id": 0})
+    notification_result = await send_variation_client_notification(variation)
+    await db.variations.update_one({"id": variation_id}, {"$set": {
+        "approval_sent_at": datetime.utcnow() if notification_result.get("sent") else variation.get("approval_sent_at"),
+        "approval_notification_status": "sent" if notification_result.get("sent") else notification_result.get("method", "not_configured"),
+        "approval_notification_result": notification_result,
+        "updated_at": datetime.utcnow(),
+    }})
+    await recalculate_job_variation_totals(variation.get("job_id"))
+    return await db.variations.find_one({"id": variation_id}, {"_id": 0})
+
+
+@api_router.post("/variations/{variation_id}/approve")
+async def admin_approve_variation(variation_id: str, admin: str = Depends(verify_admin)):
+    return await approve_variation(variation_id, {"name": admin, "email": admin})
+
+
+@api_router.post("/variations/{variation_id}/reject")
+async def admin_reject_variation(variation_id: str, response: VariationApprovalResponse, admin: str = Depends(verify_admin)):
+    variation = await db.variations.find_one({"id": variation_id}, {"_id": 0})
+    if not variation:
+        raise HTTPException(status_code=404, detail="Variation not found")
+    patch = {
+        "status": "rejected",
+        "rejected_by_name": response.name or admin,
+        "rejected_by_email": response.email or admin,
+        "rejected_at": datetime.utcnow(),
+        "rejection_reason": response.reason or response.comments,
+        "client_comments": response.comments,
+        "updated_at": datetime.utcnow(),
+    }
+    await db.variations.update_one({"id": variation_id}, {"$set": patch})
+    updated = await db.variations.find_one({"id": variation_id}, {"_id": 0})
+    await recalculate_job_variation_totals(updated.get("job_id"))
+    return updated
+
+
+@api_router.post("/variations/{variation_id}/add-to-gantt")
+async def variation_add_to_gantt(variation_id: str, admin: str = Depends(verify_admin)):
+    variation = await db.variations.find_one({"id": variation_id}, {"_id": 0})
+    if not variation:
+        raise HTTPException(status_code=404, detail="Variation not found")
+    if variation.get("status") != "approved":
+        raise HTTPException(status_code=400, detail="Only approved variations can be added to the Gantt")
+    updated = await add_variation_to_gantt(variation_id)
+    await recalculate_job_variation_totals(updated.get("job_id"))
+    return updated
+
+
+@api_router.get("/variations/public/{token}")
+async def public_get_variation(token: str):
+    variation = await db.variations.find_one({"approval_token": token, "archived": {"$ne": True}}, {"_id": 0})
+    if not variation:
+        raise HTTPException(status_code=404, detail="Variation approval link not found")
+    return variation
+
+
+@api_router.post("/variations/public/{token}/response")
+async def public_variation_response(token: str, response: VariationApprovalResponse):
+    variation = await db.variations.find_one({"approval_token": token, "archived": {"$ne": True}}, {"_id": 0})
+    if not variation:
+        raise HTTPException(status_code=404, detail="Variation approval link not found")
+    decision = str(response.decision or "").strip().lower()
+    if decision in ["approve", "approved", "accept", "accepted"]:
+        return await approve_variation(variation.get("id"), {"name": response.name or "Client", "email": response.email or variation.get("client_email", "")}, signature=response.signature, comments=response.comments)
+    if decision in ["reject", "rejected", "decline", "declined"]:
+        patch = {
+            "status": "rejected",
+            "rejected_by_name": response.name or "Client",
+            "rejected_by_email": response.email or variation.get("client_email", ""),
+            "rejected_at": datetime.utcnow(),
+            "rejection_reason": response.reason or response.comments,
+            "client_comments": response.comments,
+            "updated_at": datetime.utcnow(),
+        }
+        await db.variations.update_one({"id": variation.get("id")}, {"$set": patch})
+        updated = await db.variations.find_one({"id": variation.get("id")}, {"_id": 0})
+        await recalculate_job_variation_totals(updated.get("job_id"))
+        return updated
+    raise HTTPException(status_code=400, detail="Decision must be approve or reject")
 
 # Include the router in the main app after all routes have been registered.
 # Important: FastAPI copies the APIRouter routes at include time, so this must stay at the end.

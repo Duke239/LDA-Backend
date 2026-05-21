@@ -22,6 +22,7 @@ import re
 import smtplib
 import requests
 from email.message import EmailMessage
+from bson import ObjectId
 
 try:
     from google.oauth2 import service_account
@@ -1184,6 +1185,7 @@ APP_SECTIONS = [
     "workers",
     "jobs",
     "project-management",
+    "price-builder",
     "variations",
     "schedule",
     "purchase-orders",
@@ -1202,6 +1204,7 @@ DEFAULT_ROLE_PERMISSIONS = {
         "workers": True,
         "jobs": True,
         "project-management": False,
+        "price-builder": True,
         "variations": True,
         "schedule": False,
         "purchase-orders": True,
@@ -1215,6 +1218,7 @@ DEFAULT_ROLE_PERMISSIONS = {
         "workers": False,
         "jobs": False,
         "project-management": True,
+        "price-builder": True,
         "variations": True,
         "schedule": True,
         "purchase-orders": False,
@@ -1228,6 +1232,7 @@ DEFAULT_ROLE_PERMISSIONS = {
         "workers": False,
         "jobs": False,
         "project-management": False,
+        "price-builder": True,
         "variations": True,
         "schedule": False,
         "purchase-orders": False,
@@ -9779,6 +9784,371 @@ async def public_variation_response(token: str, response: VariationApprovalRespo
         await recalculate_job_variation_totals(updated.get("job_id"))
         return updated
     raise HTTPException(status_code=400, detail="Decision must be approve or reject")
+
+
+
+# ==================== PRICE BUILDER / SOR RATE LIBRARY ====================
+
+class PriceBuildLine(BaseModel):
+    sor_code: Optional[str] = None
+    parent_nhf_code: Optional[str] = None
+    description: str
+    uom: str = "item"
+    quantity: float = 1.0
+    library_unit_rate: float = 0.0
+    override_unit_rate: Optional[float] = None
+    override_reason: Optional[str] = None
+    vat_rate: float = 0.2
+    trade_required: Optional[str] = None
+    job_type: Optional[str] = None
+    line_type: Optional[str] = None
+    labour_rate_used: Optional[float] = 0.0
+    labour_allocation_percent: Optional[float] = 0.0
+    est_labour_value_per_uom: Optional[float] = 0.0
+    est_materials_other_value_per_uom: Optional[float] = 0.0
+    est_labour_hours_per_uom: Optional[float] = 0.0
+    est_labour_minutes_per_uom: Optional[float] = 0.0
+    split_confidence: Optional[str] = None
+    split_note: Optional[str] = None
+    pricing_note: Optional[str] = None
+
+class PriceBuildPayload(BaseModel):
+    project_id: Optional[str] = None
+    quote_reference: Optional[str] = None
+    build_name: str = "New price build"
+    status: str = "Draft"
+    notes: Optional[str] = None
+    lines: List[PriceBuildLine] = []
+
+
+def price_builder_now_iso() -> str:
+    return datetime.utcnow().isoformat()
+
+
+def price_builder_is_blank(value: Any) -> bool:
+    if value is None:
+        return True
+    try:
+        if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+            return True
+    except Exception:
+        pass
+    try:
+        # pandas/numpy NaN support without making pandas a required import at app startup.
+        return bool(value != value)
+    except Exception:
+        return False
+
+
+def price_builder_clean(value: Any) -> Any:
+    if price_builder_is_blank(value):
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def price_builder_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if price_builder_is_blank(value):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def price_builder_money(value: Any, default: float = 0.0) -> float:
+    return round(price_builder_float(value, default), 2)
+
+
+def price_builder_safe_code(value: Any) -> str:
+    if price_builder_is_blank(value):
+        return ""
+    if isinstance(value, float):
+        if value.is_integer():
+            return str(int(value))
+        return f"{value:.2f}".rstrip("0").rstrip(".")
+    return str(value).strip()
+
+
+def price_builder_model_to_dict(model: BaseModel) -> Dict[str, Any]:
+    if hasattr(model, "model_dump"):
+        return model.model_dump()
+    return model.dict()
+
+
+def price_builder_serialise_doc(doc: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not doc:
+        return None
+    out = dict(doc)
+    if "_id" in out:
+        out["id"] = str(out.pop("_id"))
+    return out
+
+
+def price_builder_line_totals(line: Dict[str, Any]) -> Dict[str, Any]:
+    quantity = price_builder_float(line.get("quantity"), 0.0)
+    library_rate = price_builder_money(line.get("library_unit_rate"), 0.0)
+    override_rate = line.get("override_unit_rate")
+    unit_rate = price_builder_money(override_rate if override_rate not in [None, ""] else library_rate, 0.0)
+    labour_value_per_uom = price_builder_money(line.get("est_labour_value_per_uom"), 0.0)
+    materials_value_per_uom = price_builder_money(line.get("est_materials_other_value_per_uom"), 0.0)
+    labour_hours_per_uom = price_builder_float(line.get("est_labour_hours_per_uom"), 0.0)
+    vat_rate = price_builder_float(line.get("vat_rate"), 0.2)
+
+    net = round(quantity * unit_rate, 2)
+    vat = round(net * vat_rate, 2)
+    gross = round(net + vat, 2)
+
+    imported_split_total = labour_value_per_uom + materials_value_per_uom
+    split_scale = unit_rate / imported_split_total if imported_split_total > 0 else 1
+
+    line.update({
+        "effective_unit_rate": unit_rate,
+        "net_amount": net,
+        "vat_amount": vat,
+        "gross_amount": gross,
+        "est_labour_total": round(quantity * labour_value_per_uom * split_scale, 2),
+        "est_materials_other_total": round(quantity * materials_value_per_uom * split_scale, 2),
+        "est_labour_hours_total": round(quantity * labour_hours_per_uom, 2),
+    })
+    return line
+
+
+def price_builder_totals(lines: List[Dict[str, Any]]) -> Dict[str, Any]:
+    calculated = [price_builder_line_totals(dict(line)) for line in lines]
+    return {
+        "net_total": round(sum(price_builder_money(line.get("net_amount")) for line in calculated), 2),
+        "vat_total": round(sum(price_builder_money(line.get("vat_amount")) for line in calculated), 2),
+        "gross_total": round(sum(price_builder_money(line.get("gross_amount")) for line in calculated), 2),
+        "est_labour_total": round(sum(price_builder_money(line.get("est_labour_total")) for line in calculated), 2),
+        "est_materials_other_total": round(sum(price_builder_money(line.get("est_materials_other_total")) for line in calculated), 2),
+        "est_labour_hours_total": round(sum(price_builder_float(line.get("est_labour_hours_total")) for line in calculated), 2),
+        "line_count": len(calculated),
+    }
+
+
+async def ensure_price_builder_indexes():
+    try:
+        await db.sor_rates.create_index("granular_sor_code", unique=True)
+        await db.sor_rates.create_index("parent_nhf_code")
+        await db.sor_rates.create_index("job_type")
+        await db.sor_rates.create_index("trade_required")
+        await db.sor_rates.create_index("line_type")
+        await db.price_builds.create_index("project_id")
+        await db.price_builds.create_index("created_at")
+    except Exception as exc:
+        logger.warning("Could not create price builder indexes: %s", exc)
+
+
+@api_router.post("/price-builder/import-sor-library")
+async def import_price_builder_sor_library(
+    file: UploadFile = File(...),
+    replace_existing: bool = Query(False),
+    admin: str = Depends(verify_admin),
+):
+    """Import the LDA granular NHF/SOR workbook into MongoDB."""
+    if not file.filename.lower().endswith((".xlsx", ".xls")):
+        raise HTTPException(status_code=400, detail="Upload an Excel workbook (.xlsx or .xls).")
+
+    try:
+        import pandas as pd
+        from io import BytesIO
+        content = await file.read()
+        frame = pd.read_excel(BytesIO(content), sheet_name="SOR Rates")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not read the 'SOR Rates' sheet: {exc}")
+
+    await ensure_price_builder_indexes()
+    if replace_existing:
+        await db.sor_rates.delete_many({})
+
+    imported = 0
+    skipped = 0
+    now = price_builder_now_iso()
+
+    for _, row in frame.iterrows():
+        unit_rate = price_builder_money(row.get("Granular Unit Net Rate"))
+        labour_value = price_builder_money(row.get("Est. Labour Value / UOM"))
+        materials_value = price_builder_money(row.get("Est. Materials/Other Value / UOM"))
+        labour_hours = price_builder_float(row.get("Est. Labour Hours / UOM"))
+        labour_minutes = price_builder_float(row.get("Est. Labour Minutes / UOM"))
+        labour_rate = price_builder_money(row.get("Labour Rate Used (£/hr)"))
+
+        # Fallback if an older workbook without the simple split columns is imported.
+        if labour_value == 0 and materials_value == 0 and unit_rate > 0:
+            labour_value = round(unit_rate * 0.60, 2)
+            materials_value = round(unit_rate - labour_value, 2)
+            if labour_rate <= 0:
+                labour_rate = 37.0
+            labour_hours = round(labour_value / labour_rate, 4) if labour_rate > 0 else 0
+            labour_minutes = round(labour_hours * 60, 1)
+
+        description = price_builder_clean(row.get("Granular Task Description"))
+        sor_code = price_builder_safe_code(row.get("Granular SOR Code"))
+        uom = price_builder_clean(row.get("UOM")) or "item"
+        line_type = price_builder_clean(row.get("Line Type")) or "Rate"
+
+        if not sor_code or not description:
+            skipped += 1
+            continue
+
+        doc = {
+            "parent_nhf_code": price_builder_safe_code(row.get("Parent NHF Code")),
+            "granular_sor_code": sor_code,
+            "job_type": price_builder_clean(row.get("Job Type")),
+            "trade_required": price_builder_clean(row.get("Trade Required")),
+            "description": description,
+            "uom": uom,
+            "source_quantity_basis": price_builder_float(row.get("Source Quantity Basis")),
+            "nhf_baseline_rate": price_builder_money(row.get("NHF Baseline Rate")),
+            "split_percent": price_builder_float(row.get("Split %")),
+            "granular_unit_net_rate": unit_rate,
+            "vat_rate": price_builder_float(row.get("VAT Rate"), 0.2) or 0.2,
+            "line_type": line_type,
+            "parent_price_item": price_builder_clean(row.get("Parent Price Item")),
+            "original_nhf_description": price_builder_clean(row.get("Original NHF Description")),
+            "pricing_split_note": price_builder_clean(row.get("Pricing / Split Note")),
+            "source_row": price_builder_clean(row.get("Source Row")),
+            "labour_rate_used": labour_rate,
+            "labour_allocation_percent": price_builder_float(row.get("Labour Allocation %")),
+            "est_labour_value_per_uom": labour_value,
+            "est_materials_other_value_per_uom": materials_value,
+            "est_labour_hours_per_uom": labour_hours,
+            "est_labour_minutes_per_uom": labour_minutes,
+            "split_confidence": price_builder_clean(row.get("Split Confidence")),
+            "split_note": price_builder_clean(row.get("Split Note")),
+            "selection_label": f"{description} — {uom} — {line_type}",
+            "updated_at": now,
+        }
+
+        await db.sor_rates.update_one(
+            {"granular_sor_code": sor_code},
+            {"$set": doc, "$setOnInsert": {"created_at": now}},
+            upsert=True,
+        )
+        imported += 1
+
+    return {"success": True, "imported_or_updated": imported, "skipped": skipped, "replace_existing": replace_existing}
+
+
+@api_router.get("/price-builder/filters")
+async def get_price_builder_filters(admin: str = Depends(verify_admin)):
+    await ensure_price_builder_indexes()
+    return {
+        "job_types": sorted([value for value in await db.sor_rates.distinct("job_type") if value]),
+        "trades": sorted([value for value in await db.sor_rates.distinct("trade_required") if value]),
+        "line_types": sorted([value for value in await db.sor_rates.distinct("line_type") if value]),
+        "uoms": sorted([value for value in await db.sor_rates.distinct("uom") if value]),
+    }
+
+
+@api_router.get("/price-builder/rates")
+async def search_price_builder_rates(
+    search: str = "",
+    job_type: str = "",
+    trade: str = "",
+    line_type: str = "",
+    include_non_priceable: bool = False,
+    limit: int = Query(50, ge=1, le=200),
+    skip: int = Query(0, ge=0),
+    admin: str = Depends(verify_admin),
+):
+    await ensure_price_builder_indexes()
+    query: Dict[str, Any] = {}
+    if job_type:
+        query["job_type"] = job_type
+    if trade:
+        query["trade_required"] = trade
+    if line_type:
+        query["line_type"] = line_type
+    elif not include_non_priceable:
+        query["line_type"] = {"$regex": "priceable|single|parent", "$options": "i"}
+
+    if search.strip():
+        escaped = re.escape(search.strip())
+        query["$or"] = [
+            {"granular_sor_code": {"$regex": escaped, "$options": "i"}},
+            {"parent_nhf_code": {"$regex": escaped, "$options": "i"}},
+            {"description": {"$regex": escaped, "$options": "i"}},
+            {"original_nhf_description": {"$regex": escaped, "$options": "i"}},
+            {"parent_price_item": {"$regex": escaped, "$options": "i"}},
+        ]
+
+    rates = [price_builder_serialise_doc(doc) async for doc in db.sor_rates.find(query).sort([("job_type", 1), ("description", 1)]).skip(skip).limit(limit)]
+    total = await db.sor_rates.count_documents(query)
+    return {"rates": rates, "total": total, "skip": skip, "limit": limit}
+
+
+@api_router.get("/price-builder/rates/{sor_code}")
+async def get_price_builder_rate(sor_code: str, admin: str = Depends(verify_admin)):
+    await ensure_price_builder_indexes()
+    rate = await db.sor_rates.find_one({"granular_sor_code": sor_code})
+    if not rate:
+        raise HTTPException(status_code=404, detail="SOR rate not found")
+    siblings = []
+    parent_code = rate.get("parent_nhf_code")
+    if parent_code:
+        siblings = [price_builder_serialise_doc(doc) async for doc in db.sor_rates.find({"parent_nhf_code": parent_code}).sort("granular_sor_code", 1)]
+    return {"rate": price_builder_serialise_doc(rate), "siblings": siblings}
+
+
+@api_router.post("/price-builds")
+async def create_price_build(payload: PriceBuildPayload, admin: str = Depends(verify_admin)):
+    await ensure_price_builder_indexes()
+    payload_dict = price_builder_model_to_dict(payload)
+    lines = [price_builder_line_totals(price_builder_model_to_dict(line) if isinstance(line, BaseModel) else dict(line)) for line in payload.lines]
+    payload_dict["lines"] = lines
+    payload_dict["totals"] = price_builder_totals(lines)
+    payload_dict["created_by"] = admin
+    payload_dict["created_at"] = price_builder_now_iso()
+    payload_dict["updated_at"] = price_builder_now_iso()
+    result = await db.price_builds.insert_one(payload_dict)
+    saved = await db.price_builds.find_one({"_id": result.inserted_id})
+    return price_builder_serialise_doc(saved)
+
+
+@api_router.get("/price-builds")
+async def list_price_builds(project_id: str = "", limit: int = Query(50, ge=1, le=200), admin: str = Depends(verify_admin)):
+    await ensure_price_builder_indexes()
+    query = {"project_id": project_id} if project_id else {}
+    builds = [price_builder_serialise_doc(doc) async for doc in db.price_builds.find(query).sort("updated_at", -1).limit(limit)]
+    return {"builds": builds}
+
+
+@api_router.get("/price-builds/{build_id}")
+async def get_price_build(build_id: str, admin: str = Depends(verify_admin)):
+    if not ObjectId.is_valid(build_id):
+        raise HTTPException(status_code=400, detail="Invalid build id")
+    doc = await db.price_builds.find_one({"_id": ObjectId(build_id)})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Price build not found")
+    return price_builder_serialise_doc(doc)
+
+
+@api_router.put("/price-builds/{build_id}")
+async def update_price_build(build_id: str, payload: PriceBuildPayload, admin: str = Depends(verify_admin)):
+    if not ObjectId.is_valid(build_id):
+        raise HTTPException(status_code=400, detail="Invalid build id")
+    payload_dict = price_builder_model_to_dict(payload)
+    lines = [price_builder_line_totals(price_builder_model_to_dict(line) if isinstance(line, BaseModel) else dict(line)) for line in payload.lines]
+    payload_dict["lines"] = lines
+    payload_dict["totals"] = price_builder_totals(lines)
+    payload_dict["updated_by"] = admin
+    payload_dict["updated_at"] = price_builder_now_iso()
+    result = await db.price_builds.update_one({"_id": ObjectId(build_id)}, {"$set": payload_dict})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Price build not found")
+    doc = await db.price_builds.find_one({"_id": ObjectId(build_id)})
+    return price_builder_serialise_doc(doc)
+
+
+@api_router.delete("/price-builds/{build_id}")
+async def delete_price_build(build_id: str, admin: str = Depends(verify_admin)):
+    if not ObjectId.is_valid(build_id):
+        raise HTTPException(status_code=400, detail="Invalid build id")
+    result = await db.price_builds.delete_one({"_id": ObjectId(build_id)})
+    return {"success": result.deleted_count == 1}
 
 # Include the router in the main app after all routes have been registered.
 # Important: FastAPI copies the APIRouter routes at include time, so this must stay at the end.

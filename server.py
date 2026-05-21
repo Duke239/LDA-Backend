@@ -9038,6 +9038,27 @@ async def send_variation_client_notification(variation: Dict[str, Any]) -> Dict[
     token = variation.get("approval_token") or ""
     approval_link = build_variation_approval_link(token) if token else variation.get("approval_link", "")
 
+    backend = variation_backend_base_url()
+    pdf_link = f"{backend}/api/variations/{variation.get('id')}/pdf" if backend and variation.get("id") else ""
+    email_subject = f"Variation approval required - {variation.get('variation_number')} - {variation.get('job_name')}"
+    email_html = f"""
+    <div style="font-family:Arial,sans-serif;color:#0f172a;line-height:1.45;max-width:720px">
+      <div style="border-bottom:4px solid #d01f2f;padding-bottom:12px;margin-bottom:18px">
+        <h2 style="margin:0;color:#0f172a">LDA Group - Variation Approval Required</h2>
+        <p style="margin:4px 0 0;color:#64748b">{variation.get('variation_number') or ''}</p>
+      </div>
+      <p>Please review the following variation request:</p>
+      <table style="border-collapse:collapse;width:100%;font-size:14px">
+        <tr><td style="padding:8px;border:1px solid #cbd5e1;background:#f8fafc;font-weight:bold">Project</td><td style="padding:8px;border:1px solid #cbd5e1">{variation.get('job_name') or ''}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #cbd5e1;background:#f8fafc;font-weight:bold">Variation</td><td style="padding:8px;border:1px solid #cbd5e1">{variation.get('title') or ''}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #cbd5e1;background:#f8fafc;font-weight:bold">Net</td><td style="padding:8px;border:1px solid #cbd5e1">{variation_money(variation.get('net_total'))}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #cbd5e1;background:#f8fafc;font-weight:bold">VAT</td><td style="padding:8px;border:1px solid #cbd5e1">{variation_money(variation.get('vat_total'))}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #cbd5e1;background:#f8fafc;font-weight:bold">Gross</td><td style="padding:8px;border:1px solid #cbd5e1;color:#b91c1c;font-weight:bold">{variation_money(variation.get('gross_total'))}</td></tr>
+      </table>
+      <p style="margin-top:18px"><a href="{approval_link}" style="background:#d01f2f;color:white;text-decoration:none;padding:12px 18px;border-radius:8px;display:inline-block;font-weight:bold">Review and approve variation</a></p>
+      <p style="font-size:12px;color:#64748b">If the button does not work, copy and paste this link into your browser:<br />{approval_link}</p>
+    </div>
+    """
     payload = {
         "variation_id": variation.get("id"),
         "variation_number": variation.get("variation_number"),
@@ -9053,6 +9074,9 @@ async def send_variation_client_notification(variation: Dict[str, Any]) -> Dict[
         "vat_total": variation.get("vat_total"),
         "gross_total": variation.get("gross_total"),
         "approval_link": approval_link,
+        "pdf_link": pdf_link,
+        "email_subject": email_subject,
+        "email_html": email_html,
     }
     power_automate_url = os.environ.get("POWER_AUTOMATE_VARIATION_APPROVAL_URL", "").strip()
     power_automate_secret = os.environ.get("POWER_AUTOMATE_VARIATION_APPROVAL_SECRET", "").strip()
@@ -9076,7 +9100,7 @@ async def send_variation_client_notification(variation: Dict[str, Any]) -> Dict[
     smtp_reply_to = os.environ.get("SMTP_REPLY_TO", "").strip()
     if smtp_host and smtp_username and smtp_password and smtp_from:
         msg = EmailMessage()
-        msg["Subject"] = f"Variation approval required - {variation.get('variation_number')}"
+        msg["Subject"] = email_subject
         msg["From"] = f"{smtp_from_name} <{smtp_from}>"
         msg["To"] = recipient
         if smtp_reply_to:
@@ -9085,11 +9109,12 @@ async def send_variation_client_notification(variation: Dict[str, Any]) -> Dict[
             f"Please review the following variation request:\n\n"
             f"Project: {variation.get('job_name')}\n"
             f"Variation: {variation.get('title')}\n"
-            f"Net: £{finance_to_number(variation.get('net_total')):,.2f}\n"
-            f"VAT: £{finance_to_number(variation.get('vat_total')):,.2f}\n"
-            f"Gross: £{finance_to_number(variation.get('gross_total')):,.2f}\n\n"
+            f"Net: {variation_money(variation.get('net_total'))}\n"
+            f"VAT: {variation_money(variation.get('vat_total'))}\n"
+            f"Gross: {variation_money(variation.get('gross_total'))}\n\n"
             f"Approval link: {approval_link}\n"
         )
+        msg.add_alternative(email_html, subtype="html")
         try:
             with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as smtp:
                 if os.environ.get("SMTP_USE_TLS", "true").lower() != "false":
@@ -9101,6 +9126,153 @@ async def send_variation_client_notification(variation: Dict[str, Any]) -> Dict[
             logger.exception("Failed to send variation approval SMTP email: %s", exc)
             return {"sent": False, "method": "smtp", "to": recipient, "error": str(exc)}
     return {"sent": False, "method": "not_configured", "to": recipient, "error": "No Power Automate or SMTP variation approval settings configured"}
+
+
+
+
+def variation_money(value: Any) -> str:
+    return f"£{finance_to_number(value):,.2f}"
+
+
+def variation_display_date(value: Any) -> str:
+    if not value:
+        return "-"
+    try:
+        value_str = str(value)
+        if len(value_str) >= 10 and value_str[4] == "-" and value_str[7] == "-":
+            parsed = datetime.fromisoformat(value_str[:10])
+            return parsed.strftime("%d %b %Y")
+        if isinstance(value, datetime):
+            return value.strftime("%d %b %Y")
+        return value_str
+    except Exception:
+        return str(value)
+
+
+def generate_variation_pdf_bytes(variation: Dict[str, Any]) -> bytes:
+    """Create a formal PDF record for a variation approval/instruction."""
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import cm
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
+    except Exception:
+        raise HTTPException(status_code=500, detail="PDF generation is not available on this server. Check reportlab is installed.")
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=1.3 * cm,
+        leftMargin=1.3 * cm,
+        topMargin=1.0 * cm,
+        bottomMargin=1.0 * cm,
+    )
+
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name="LdaTitle", parent=styles["Heading1"], fontSize=16, leading=20, spaceAfter=6, textColor=colors.HexColor("#0f172a")))
+    styles.add(ParagraphStyle(name="LdaHeading", parent=styles["Heading2"], fontSize=10.5, leading=13, spaceBefore=8, spaceAfter=5, textColor=colors.HexColor("#0f172a")))
+    styles.add(ParagraphStyle(name="LdaBody", parent=styles["BodyText"], fontSize=8.5, leading=11, textColor=colors.HexColor("#334155")))
+    styles.add(ParagraphStyle(name="LdaSmall", parent=styles["BodyText"], fontSize=7.5, leading=9.5, textColor=colors.HexColor("#64748b")))
+
+    def p(value, style="LdaBody"):
+        safe = str(value or "-").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br/>")
+        return Paragraph(safe, styles[style])
+
+    story = []
+
+    logo_url = os.environ.get("LDA_LOGO_URL", "https://ldagroup.co.uk/wp-content/uploads/2022/01/lda-group-200x200.png").strip()
+    logo_cell = ""
+    if logo_url:
+        try:
+            logo_response = requests.get(logo_url, timeout=8)
+            logo_response.raise_for_status()
+            logo_image = Image(io.BytesIO(logo_response.content), width=1.55 * cm, height=1.55 * cm)
+            logo_cell = logo_image
+        except Exception:
+            logo_cell = ""
+
+    header = Table(
+        [[logo_cell, [Paragraph("LDA Group", styles["LdaTitle"]), Paragraph("Variation Approval Record", styles["LdaSmall"])] , Paragraph(str(variation.get("variation_number") or "Variation"), styles["LdaTitle"])]],
+        colWidths=[2.0 * cm, 9.4 * cm, 5.2 * cm],
+    )
+    header.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (2, 0), (2, 0), "RIGHT"),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ("LINEBELOW", (0, 0), (-1, -1), 1, colors.HexColor("#d01f2f")),
+    ]))
+    story.append(header)
+    story.append(Spacer(1, 0.25 * cm))
+
+    status_text = str(variation.get("status") or "").replace("_", " ").title()
+    summary_rows = [
+        [p("Project", "LdaSmall"), p(variation.get("job_name") or variation.get("job_id")), p("Status", "LdaSmall"), p(status_text)],
+        [p("Variation title", "LdaSmall"), p(variation.get("title")), p("Required date", "LdaSmall"), p(variation_display_date(variation.get("required_date")))],
+        [p("Client", "LdaSmall"), p(variation.get("client_name") or "-"), p("Client email", "LdaSmall"), p(variation.get("client_email") or "-")],
+        [p("Raised by", "LdaSmall"), p(variation.get("created_by_name") or "-"), p("Raised date", "LdaSmall"), p(variation_display_date(variation.get("created_at")))],
+    ]
+    summary = Table(summary_rows, colWidths=[3.0 * cm, 6.2 * cm, 3.0 * cm, 4.4 * cm])
+    summary.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#cbd5e1")),
+        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f8fafc")),
+        ("BACKGROUND", (2, 0), (2, -1), colors.HexColor("#f8fafc")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("PADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(summary)
+
+    story.append(Paragraph("Client instruction / conversation summary", styles["LdaHeading"]))
+    story.append(p(variation.get("client_instruction_summary") or "No client instruction summary recorded."))
+    story.append(Paragraph("Scope / description", styles["LdaHeading"]))
+    story.append(p(variation.get("scope_of_works") or variation.get("description") or "No scope recorded."))
+
+    cost_rows = [
+        ["Materials", variation_money(variation.get("material_value"))],
+        ["Labour", variation_money(variation.get("labour_value"))],
+        ["Subcontractor", variation_money(variation.get("subcontractor_value"))],
+        ["Other", variation_money(variation.get("other_value"))],
+        ["Net variation", variation_money(variation.get("net_total"))],
+        [f"VAT @ {finance_to_number(variation.get('vat_rate'), 20):g}%", variation_money(variation.get("vat_total"))],
+        ["Gross total", variation_money(variation.get("gross_total"))],
+    ]
+    cost_table = Table(cost_rows, colWidths=[11.6 * cm, 5.0 * cm])
+    cost_table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#cbd5e1")),
+        ("BACKGROUND", (0, 0), (-1, 3), colors.white),
+        ("BACKGROUND", (0, 4), (-1, 4), colors.HexColor("#f8fafc")),
+        ("BACKGROUND", (0, 6), (-1, 6), colors.HexColor("#fee2e2")),
+        ("TEXTCOLOR", (0, 6), (-1, 6), colors.HexColor("#991b1b")),
+        ("FONTNAME", (0, 4), (-1, 6), "Helvetica-Bold"),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ("PADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(Paragraph("Cost breakdown", styles["LdaHeading"]))
+    story.append(cost_table)
+
+    story.append(Paragraph("Approval / response", styles["LdaHeading"]))
+    approval_rows = [
+        [p("Approved by", "LdaSmall"), p(variation.get("approved_by_name") or variation.get("rejected_by_name") or "-")],
+        [p("Email", "LdaSmall"), p(variation.get("approved_by_email") or variation.get("rejected_by_email") or "-")],
+        [p("Date", "LdaSmall"), p(variation_display_date(variation.get("approved_at") or variation.get("rejected_at")))],
+        [p("Signature", "LdaSmall"), p(variation.get("client_signature") or "-")],
+        [p("Comments", "LdaSmall"), p(variation.get("client_comments") or variation.get("rejection_reason") or "-")],
+    ]
+    approval_table = Table(approval_rows, colWidths=[3.0 * cm, 13.6 * cm])
+    approval_table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#cbd5e1")),
+        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f8fafc")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("PADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(approval_table)
+    story.append(Spacer(1, 0.2 * cm))
+    story.append(Paragraph("This document records the variation request and client response held within the LDA Work App.", styles["LdaSmall"]))
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer.getvalue()
 
 
 @api_router.get("/variations")
@@ -9118,6 +9290,28 @@ async def get_variations(job_id: Optional[str] = Query(None), status: Optional[s
 @api_router.get("/jobs/{job_id}/variations")
 async def get_job_variations(job_id: str, admin: str = Depends(verify_admin)):
     return await db.variations.find({"job_id": job_id, "archived": {"$ne": True}}, {"_id": 0}).sort("created_at", -1).to_list(1000)
+
+
+@api_router.get("/jobs/{job_id}/variation-summary")
+async def get_job_variation_summary(job_id: str, admin: str = Depends(verify_admin)):
+    job = await recalculate_job_variation_totals(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    variations = await db.variations.find({"job_id": job_id, "archived": {"$ne": True}}, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    return {
+        "job_id": job_id,
+        "job_name": job.get("display_name") or job.get("name") or "",
+        "original_quoted_cost": finance_to_number(job.get("original_quoted_cost") or job.get("quoted_cost")),
+        "approved_variations_total": finance_to_number(job.get("approved_variations_total")),
+        "pending_variations_total": finance_to_number(job.get("pending_variations_total")),
+        "rejected_variations_total": finance_to_number(job.get("rejected_variations_total")),
+        "current_contract_value": finance_to_number(job.get("current_contract_value") or job.get("quoted_cost")),
+        "variation_count": len(variations),
+        "approved_count": len([v for v in variations if v.get("status") == "approved"]),
+        "pending_count": len([v for v in variations if v.get("status") in VARIATION_PENDING_STATUSES]),
+        "rejected_count": len([v for v in variations if v.get("status") == "rejected"]),
+        "variations": variations,
+    }
 
 
 @api_router.post("/variations", response_model=Variation)
@@ -9163,6 +9357,20 @@ async def get_variation(variation_id: str, admin: str = Depends(verify_admin)):
     if not variation:
         raise HTTPException(status_code=404, detail="Variation not found")
     return variation
+
+
+@api_router.get("/variations/{variation_id}/pdf")
+async def download_variation_pdf(variation_id: str, admin: str = Depends(verify_admin)):
+    variation = await db.variations.find_one({"id": variation_id, "archived": {"$ne": True}}, {"_id": 0})
+    if not variation:
+        raise HTTPException(status_code=404, detail="Variation not found")
+    pdf_bytes = generate_variation_pdf_bytes(variation)
+    safe_ref = re.sub(r"[^A-Za-z0-9_-]+", "_", str(variation.get("variation_number") or variation_id)).strip("_") or "variation"
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={safe_ref}.pdf"},
+    )
 
 
 @api_router.put("/variations/{variation_id}")

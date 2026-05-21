@@ -426,6 +426,7 @@ class GanttShiftProjectRequest(BaseModel):
     delta_days: int
     shift_sections: bool = True
     shift_schedule: bool = True
+    shift_commercial_markers: bool = True
 
 
 class FinanceRecord(BaseModel):
@@ -4350,7 +4351,9 @@ async def shift_gantt_project(request: GanttShiftProjectRequest, admin: str = De
         raise HTTPException(status_code=404, detail="Job not found")
 
     original_sections = job.get("gantt_sections") or []
+    original_markers = job.get("commercial_markers") or []
     updated_sections = []
+    updated_markers = []
     linked_schedule_ids = []
 
     for section in original_sections:
@@ -4364,6 +4367,18 @@ async def shift_gantt_project(request: GanttShiftProjectRequest, admin: str = De
             if entry_id:
                 linked_schedule_ids.append(entry_id)
         updated_sections.append(section_copy)
+
+    if request.shift_commercial_markers:
+        for marker in original_markers:
+            marker_copy = dict(marker)
+            # Commercial marker/application dates should move with the programme when the project start date shifts.
+            for date_key in ["date", "marker_date", "expected_date", "payment_due_date", "retention_due_date"]:
+                if marker_copy.get(date_key):
+                    marker_copy[date_key] = shift_iso_date(marker_copy.get(date_key), request.delta_days)
+            marker_copy["last_programme_shift_at"] = datetime.utcnow().isoformat()
+            updated_markers.append(marker_copy)
+    else:
+        updated_markers = original_markers
 
     shifted_schedule_count = 0
     clashes = []
@@ -4432,6 +4447,7 @@ async def shift_gantt_project(request: GanttShiftProjectRequest, admin: str = De
         "planned_start_date": request.planned_start_date,
         "planned_end_date": request.planned_end_date,
         "gantt_sections": updated_sections if request.shift_sections else original_sections,
+        "commercial_markers": updated_markers if request.shift_commercial_markers else original_markers,
         "last_programme_shift_at": datetime.utcnow().isoformat(),
         "last_programme_shift_days": request.delta_days,
     }
@@ -4444,6 +4460,7 @@ async def shift_gantt_project(request: GanttShiftProjectRequest, admin: str = De
         "job": updated_job,
         "delta_days": request.delta_days,
         "sections_shifted": len(updated_sections) if request.shift_sections else 0,
+        "commercial_markers_shifted": len(updated_markers) if request.shift_commercial_markers else 0,
         "shifted_schedule_count": shifted_schedule_count,
         "clash_count": len(clashes),
         "clashes": clashes,

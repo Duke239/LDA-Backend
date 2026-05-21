@@ -9028,7 +9028,176 @@ async def approve_variation(variation_id: str, approver: Dict[str, Any], signatu
         updated = await add_variation_to_gantt(variation_id)
     await recalculate_job_variation_totals(updated.get("job_id"))
     await create_or_update_variation_finance_record(updated)
-    return updated
+
+    # Once the client has approved, send the final approved PDF record back to
+    # the person who originally raised the variation. This gives the PM/admin
+    # an immediate audit trail without needing to download it from the app.
+    originator_notification = await send_variation_originator_approval_notification(updated)
+    await db.variations.update_one({"id": variation_id}, {"$set": {
+        "originator_approval_notification_status": "sent" if originator_notification.get("sent") else originator_notification.get("method", "not_configured"),
+        "originator_approval_notification_result": originator_notification,
+        "originator_approval_sent_at": datetime.utcnow() if originator_notification.get("sent") else updated.get("originator_approval_sent_at"),
+        "updated_at": datetime.utcnow(),
+    }})
+
+    return await db.variations.find_one({"id": variation_id}, {"_id": 0})
+
+
+def variation_originator_email(variation: Dict[str, Any]) -> str:
+    """Best-effort email for the person who raised/requested the variation."""
+    for key in [
+        "created_by_email",
+        "requested_by_email",
+        "raised_by_email",
+        "submitted_by_email",
+        "updated_by_email",
+    ]:
+        value = str(variation.get(key) or "").strip()
+        if value and "@" in value:
+            return value
+    return ""
+
+
+def variation_originator_name(variation: Dict[str, Any]) -> str:
+    for key in [
+        "created_by_name",
+        "requested_by_name",
+        "raised_by_name",
+        "submitted_by_name",
+        "updated_by_name",
+    ]:
+        value = str(variation.get(key) or "").strip()
+        if value:
+            return value
+    email = variation_originator_email(variation)
+    return email or "Originator"
+
+
+def build_variation_originator_approval_payload(variation: Dict[str, Any]) -> Dict[str, Any]:
+    recipient = variation_originator_email(variation)
+    recipient_name = variation_originator_name(variation)
+    backend = variation_backend_base_url()
+    pdf_link = f"{backend}/api/variations/{variation.get('id')}/pdf" if backend and variation.get("id") else ""
+    approval_link = variation.get("approval_link") or build_variation_approval_link(variation.get("approval_token", ""))
+    approved_by = variation.get("approved_by_name") or variation.get("approved_by_email") or "the client"
+    approved_at = variation_display_date(variation.get("approved_at"))
+
+    email_subject = f"Variation approved - {variation.get('variation_number')} - {variation.get('job_name')}"
+    email_html = f"""
+    <div style="font-family:Arial,sans-serif;color:#0f172a;line-height:1.45;max-width:720px">
+      <div style="border-bottom:4px solid #d01f2f;padding-bottom:12px;margin-bottom:18px">
+        <h2 style="margin:0;color:#0f172a">Variation Approved</h2>
+        <p style="margin:4px 0 0;color:#64748b">{variation.get('variation_number') or ''}</p>
+      </div>
+      <p>Hi {recipient_name},</p>
+      <p>The following variation has been approved by the client. A PDF approval record is attached.</p>
+      <table style="border-collapse:collapse;width:100%;font-size:14px">
+        <tr><td style="padding:8px;border:1px solid #cbd5e1;background:#f8fafc;font-weight:bold">Project</td><td style="padding:8px;border:1px solid #cbd5e1">{variation.get('job_name') or ''}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #cbd5e1;background:#f8fafc;font-weight:bold">Variation</td><td style="padding:8px;border:1px solid #cbd5e1">{variation.get('title') or ''}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #cbd5e1;background:#f8fafc;font-weight:bold">Approved by</td><td style="padding:8px;border:1px solid #cbd5e1">{approved_by}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #cbd5e1;background:#f8fafc;font-weight:bold">Approved date</td><td style="padding:8px;border:1px solid #cbd5e1">{approved_at}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #cbd5e1;background:#f8fafc;font-weight:bold">Net</td><td style="padding:8px;border:1px solid #cbd5e1">{variation_money(variation.get('net_total'))}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #cbd5e1;background:#f8fafc;font-weight:bold">VAT</td><td style="padding:8px;border:1px solid #cbd5e1">{variation_money(variation.get('vat_total'))}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #cbd5e1;background:#f8fafc;font-weight:bold">Gross</td><td style="padding:8px;border:1px solid #cbd5e1;color:#b91c1c;font-weight:bold">{variation_money(variation.get('gross_total'))}</td></tr>
+      </table>
+      <p style="font-size:12px;color:#64748b;margin-top:16px">Client approval page:<br />{approval_link}</p>
+    </div>
+    """
+
+    payload = {
+        "notification_type": "variation_approved_originator",
+        "variation_id": variation.get("id"),
+        "variation_number": variation.get("variation_number"),
+        "job_id": variation.get("job_id"),
+        "job_name": variation.get("job_name"),
+        "client_name": recipient_name,
+        "client_email": recipient,
+        "to_email": recipient,
+        "to_name": recipient_name,
+        "originator_email": recipient,
+        "originator_name": recipient_name,
+        "title": variation.get("title"),
+        "description": variation.get("description"),
+        "client_instruction_summary": variation.get("client_instruction_summary"),
+        "scope_of_works": variation.get("scope_of_works"),
+        "net_total": variation.get("net_total"),
+        "vat_total": variation.get("vat_total"),
+        "gross_total": variation.get("gross_total"),
+        "approval_link": approval_link,
+        "pdf_link": pdf_link,
+        "email_subject": email_subject,
+        "email_html": email_html,
+    }
+    payload.update(build_variation_pdf_attachment_payload(variation))
+    return payload
+
+
+async def send_variation_originator_approval_notification(variation: Dict[str, Any]) -> Dict[str, Any]:
+    recipient = variation_originator_email(variation)
+    if not recipient:
+        return {"sent": False, "method": "not_configured", "error": "No originator email saved against this variation"}
+
+    # You can use a dedicated approval-notification flow, or leave it blank to
+    # reuse the same Power Automate HTTP trigger as the client approval email.
+    power_automate_url = (
+        os.environ.get("POWER_AUTOMATE_VARIATION_APPROVED_URL", "").strip()
+        or os.environ.get("POWER_AUTOMATE_VARIATION_APPROVAL_URL", "").strip()
+    )
+    power_automate_secret = (
+        os.environ.get("POWER_AUTOMATE_VARIATION_APPROVED_SECRET", "").strip()
+        or os.environ.get("POWER_AUTOMATE_VARIATION_APPROVAL_SECRET", "").strip()
+    )
+
+    payload = build_variation_originator_approval_payload(variation)
+
+    if power_automate_url:
+        headers = {"Content-Type": "application/json"}
+        if power_automate_secret:
+            headers["x-lda-secret"] = power_automate_secret
+        try:
+            response = requests.post(power_automate_url, json=payload, headers=headers, timeout=20)
+            response.raise_for_status()
+            return {"sent": True, "method": "power_automate", "to": recipient}
+        except Exception as exc:
+            logger.exception("Failed to send variation approved Power Automate notification: %s", exc)
+            return {"sent": False, "method": "power_automate", "to": recipient, "error": str(exc)}
+
+    smtp_host = os.environ.get("SMTP_HOST", "").strip()
+    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+    smtp_username = os.environ.get("SMTP_USERNAME", "").strip()
+    smtp_password = os.environ.get("SMTP_PASSWORD", "").strip()
+    smtp_from = os.environ.get("SMTP_FROM_EMAIL", smtp_username).strip()
+    smtp_from_name = os.environ.get("SMTP_FROM_NAME", "LDA Group").strip()
+
+    if smtp_host and smtp_username and smtp_password and smtp_from:
+        msg = EmailMessage()
+        msg["Subject"] = payload.get("email_subject", "Variation approved")
+        msg["From"] = f"{smtp_from_name} <{smtp_from}>"
+        msg["To"] = recipient
+        msg.set_content(f"Variation approved: {variation.get('variation_number')} - {variation.get('job_name')}\n")
+        msg.add_alternative(payload.get("email_html", ""), subtype="html")
+        if payload.get("pdf_base64"):
+            try:
+                msg.add_attachment(
+                    base64.b64decode(payload["pdf_base64"]),
+                    maintype="application",
+                    subtype="pdf",
+                    filename=payload.get("pdf_filename") or "variation.pdf",
+                )
+            except Exception as attach_exc:
+                logger.warning("Could not attach approved variation PDF to SMTP email: %s", attach_exc)
+        try:
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as smtp:
+                if os.environ.get("SMTP_USE_TLS", "true").lower() != "false":
+                    smtp.starttls()
+                smtp.login(smtp_username, smtp_password)
+                smtp.send_message(msg)
+            return {"sent": True, "method": "smtp", "to": recipient}
+        except Exception as exc:
+            logger.exception("Failed to send variation approved SMTP email: %s", exc)
+            return {"sent": False, "method": "smtp", "to": recipient, "error": str(exc)}
+
+    return {"sent": False, "method": "not_configured", "to": recipient, "error": "No Power Automate or SMTP settings configured"}
 
 
 async def send_variation_client_notification(variation: Dict[str, Any]) -> Dict[str, Any]:
@@ -9066,6 +9235,12 @@ async def send_variation_client_notification(variation: Dict[str, Any]) -> Dict[
         "job_name": variation.get("job_name"),
         "client_name": variation.get("client_name"),
         "client_email": recipient,
+        "to_email": recipient,
+        "to_name": variation.get("client_name"),
+        "originator_email": variation_originator_email(variation),
+        "originator_name": variation_originator_name(variation),
+        "reply_to_email": variation_originator_email(variation),
+        "reply_to_name": variation_originator_name(variation),
         "title": variation.get("title"),
         "description": variation.get("description"),
         "client_instruction_summary": variation.get("client_instruction_summary"),

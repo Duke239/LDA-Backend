@@ -9055,7 +9055,7 @@ async def send_variation_client_notification(variation: Dict[str, Any]) -> Dict[
         <tr><td style="padding:8px;border:1px solid #cbd5e1;background:#f8fafc;font-weight:bold">VAT</td><td style="padding:8px;border:1px solid #cbd5e1">{variation_money(variation.get('vat_total'))}</td></tr>
         <tr><td style="padding:8px;border:1px solid #cbd5e1;background:#f8fafc;font-weight:bold">Gross</td><td style="padding:8px;border:1px solid #cbd5e1;color:#b91c1c;font-weight:bold">{variation_money(variation.get('gross_total'))}</td></tr>
       </table>
-      <p style="margin-top:18px"><a href="{approval_link}" style="background:#d01f2f;color:white;text-decoration:none;padding:12px 18px;border-radius:8px;display:inline-block;font-weight:bold">Review and approve variation</a></p>
+      <p style="margin-top:18px"><a href="{approval_link}" style="background:#d01f2f;color:white;text-decoration:none;padding:12px 18px;border-radius:8px;display:inline-block;font-weight:bold">Review, Query or Approve Variation</a></p>
       <p style="font-size:12px;color:#64748b">If the button does not work, copy and paste this link into your browser:<br />{approval_link}</p>
     </div>
     """
@@ -9078,6 +9078,7 @@ async def send_variation_client_notification(variation: Dict[str, Any]) -> Dict[
         "email_subject": email_subject,
         "email_html": email_html,
     }
+    payload.update(build_variation_pdf_attachment_payload(variation))
     power_automate_url = os.environ.get("POWER_AUTOMATE_VARIATION_APPROVAL_URL", "").strip()
     power_automate_secret = os.environ.get("POWER_AUTOMATE_VARIATION_APPROVAL_SECRET", "").strip()
     if power_automate_url:
@@ -9115,6 +9116,17 @@ async def send_variation_client_notification(variation: Dict[str, Any]) -> Dict[
             f"Approval link: {approval_link}\n"
         )
         msg.add_alternative(email_html, subtype="html")
+        attachment = build_variation_pdf_attachment_payload(variation)
+        if attachment.get("pdf_base64"):
+            try:
+                msg.add_attachment(
+                    base64.b64decode(attachment["pdf_base64"]),
+                    maintype="application",
+                    subtype="pdf",
+                    filename=attachment.get("pdf_filename") or "variation.pdf",
+                )
+            except Exception as attach_exc:
+                logger.warning("Could not attach variation PDF to SMTP email: %s", attach_exc)
         try:
             with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as smtp:
                 if os.environ.get("SMTP_USE_TLS", "true").lower() != "false":
@@ -9147,6 +9159,26 @@ def variation_display_date(value: Any) -> str:
         return value_str
     except Exception:
         return str(value)
+
+def safe_variation_pdf_filename(variation: Dict[str, Any]) -> str:
+    number = str(variation.get("variation_number") or "variation").strip() or "variation"
+    title = str(variation.get("title") or variation.get("job_name") or "approval").strip() or "approval"
+    filename = f"{number} - {title}.pdf"
+    filename = re.sub(r'[\\/:*?"<>|]+', "-", filename)
+    filename = re.sub(r"\s+", " ", filename).strip()
+    return filename[:150] if filename else "variation.pdf"
+
+
+def build_variation_pdf_attachment_payload(variation: Dict[str, Any]) -> Dict[str, str]:
+    try:
+        pdf_bytes = generate_variation_pdf_bytes(variation)
+        return {
+            "pdf_filename": safe_variation_pdf_filename(variation),
+            "pdf_base64": base64.b64encode(pdf_bytes).decode("utf-8"),
+        }
+    except Exception as exc:
+        logger.exception("Could not generate variation PDF attachment: %s", exc)
+        return {"pdf_filename": "", "pdf_base64": ""}
 
 
 def generate_variation_pdf_bytes(variation: Dict[str, Any]) -> bytes:
@@ -9267,6 +9299,24 @@ def generate_variation_pdf_bytes(variation: Dict[str, Any]) -> bytes:
         ("PADDING", (0, 0), (-1, -1), 6),
     ]))
     story.append(approval_table)
+
+    approval_link = variation.get("approval_link") or build_variation_approval_link(variation.get("approval_token", ""))
+    if approval_link:
+        story.append(Spacer(1, 0.35 * cm))
+        story.append(Paragraph("Client review link", styles["LdaHeading"]))
+        button_text = f'<link href="{approval_link}"><font color="white"><b>Review, Query or Approve Variation</b></font></link>'
+        button_table = Table([[Paragraph(button_text, styles["LdaBody"])]], colWidths=[16.6 * cm])
+        button_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#d01f2f")),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("PADDING", (0, 0), (-1, -1), 10),
+            ("BOX", (0, 0), (-1, -1), 0.25, colors.HexColor("#d01f2f")),
+        ]))
+        story.append(button_table)
+        story.append(Spacer(1, 0.12 * cm))
+        story.append(Paragraph(f"If the button does not work, copy and paste this link into your browser:<br/>{approval_link}", styles["LdaSmall"]))
+
     story.append(Spacer(1, 0.2 * cm))
     story.append(Paragraph("This document records the variation request and client response held within the LDA Work App.", styles["LdaSmall"]))
 

@@ -8827,11 +8827,19 @@ VARIATION_PENDING_STATUSES = {"draft", "pending_client_approval"}
 
 
 def variation_public_base_url() -> str:
-    return os.environ.get("PUBLIC_FRONTEND_URL", os.environ.get("FRONTEND_URL", "")).rstrip("/")
+    return (
+        os.environ.get("PUBLIC_FRONTEND_URL")
+        or os.environ.get("FRONTEND_URL")
+        or ""
+    ).strip()
 
 
 def variation_backend_base_url() -> str:
-    return os.environ.get("PUBLIC_BACKEND_URL", os.environ.get("BACKEND_URL", "")).rstrip("/")
+    return (
+        os.environ.get("PUBLIC_BACKEND_URL")
+        or os.environ.get("BACKEND_URL")
+        or ""
+    ).strip().rstrip("/")
 
 
 def calculate_variation_totals(data: Dict[str, Any]) -> Dict[str, float]:
@@ -8863,13 +8871,36 @@ async def next_variation_number(job_id: str) -> str:
 
 
 def build_variation_approval_link(token: str) -> str:
+    """Build the client-facing variation approval link.
+
+    The React frontend uses HashRouter, so approval links must be:
+    https://frontend.example/#/variation-approval/TOKEN
+
+    Keep PUBLIC_FRONTEND_URL as the clean site root in Render, for example:
+    https://lda-group.vercel.app
+    This helper strips any accidental /#/ or # from the env var to avoid broken
+    links such as https://site/#/#/variation-approval/TOKEN.
+    """
+    clean_token = str(token or "").strip()
     frontend = variation_public_base_url()
+
     if frontend:
-        return f"{frontend}/variation-approval/{token}"
+        clean_frontend = frontend.strip().rstrip("/")
+
+        if "/#/" in clean_frontend:
+            clean_frontend = clean_frontend.split("/#/")[0].rstrip("/")
+        elif clean_frontend.endswith("/#"):
+            clean_frontend = clean_frontend[:-2].rstrip("/")
+        elif clean_frontend.endswith("#"):
+            clean_frontend = clean_frontend[:-1].rstrip("/")
+
+        return f"{clean_frontend}/#/variation-approval/{clean_token}"
+
     backend = variation_backend_base_url()
     if backend:
-        return f"{backend}/api/variations/public/{token}"
-    return f"/api/variations/public/{token}"
+        return f"{backend}/api/variations/public/{clean_token}"
+
+    return f"/api/variations/public/{clean_token}"
 
 
 async def recalculate_job_variation_totals(job_id: str) -> Dict[str, Any]:
@@ -8883,7 +8914,10 @@ async def recalculate_job_variation_totals(job_id: str) -> Dict[str, Any]:
     original_value = finance_to_number(job.get("original_quoted_cost")) or finance_to_number(job.get("quoted_cost"))
     current_value = round(original_value + approved_total, 2)
     patch = {
+        # Keep the tender/original value, but also update quoted_cost so existing
+        # Jobs/Gantt/Finance screens that still read quoted_cost show the live value.
         "original_quoted_cost": original_value,
+        "quoted_cost": current_value,
         "approved_variations_total": approved_total,
         "pending_variations_total": pending_total,
         "rejected_variations_total": rejected_total,
@@ -9001,6 +9035,9 @@ async def send_variation_client_notification(variation: Dict[str, Any]) -> Dict[
     recipient = str(variation.get("client_email") or "").strip()
     if not recipient:
         return {"sent": False, "method": "not_configured", "error": "No client email saved against this variation"}
+    token = variation.get("approval_token") or ""
+    approval_link = build_variation_approval_link(token) if token else variation.get("approval_link", "")
+
     payload = {
         "variation_id": variation.get("id"),
         "variation_number": variation.get("variation_number"),
@@ -9015,7 +9052,7 @@ async def send_variation_client_notification(variation: Dict[str, Any]) -> Dict[
         "net_total": variation.get("net_total"),
         "vat_total": variation.get("vat_total"),
         "gross_total": variation.get("gross_total"),
-        "approval_link": variation.get("approval_link"),
+        "approval_link": approval_link,
     }
     power_automate_url = os.environ.get("POWER_AUTOMATE_VARIATION_APPROVAL_URL", "").strip()
     power_automate_secret = os.environ.get("POWER_AUTOMATE_VARIATION_APPROVAL_SECRET", "").strip()
@@ -9051,7 +9088,7 @@ async def send_variation_client_notification(variation: Dict[str, Any]) -> Dict[
             f"Net: £{finance_to_number(variation.get('net_total')):,.2f}\n"
             f"VAT: £{finance_to_number(variation.get('vat_total')):,.2f}\n"
             f"Gross: £{finance_to_number(variation.get('gross_total')):,.2f}\n\n"
-            f"Approval link: {variation.get('approval_link')}\n"
+            f"Approval link: {approval_link}\n"
         )
         try:
             with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as smtp:
@@ -9165,7 +9202,7 @@ async def submit_variation_for_approval(variation_id: str, admin: str = Depends(
     patch = {
         "status": "pending_client_approval",
         "approval_token": token,
-        "approval_link": variation.get("approval_link") or build_variation_approval_link(token),
+        "approval_link": build_variation_approval_link(token),
         "updated_at": datetime.utcnow(),
     }
     await db.variations.update_one({"id": variation_id}, {"$set": patch})

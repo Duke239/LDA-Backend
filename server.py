@@ -9182,15 +9182,58 @@ async def update_variation(variation_id: str, update: VariationUpdate, admin: st
 
 
 @api_router.delete("/variations/{variation_id}")
-async def archive_variation(variation_id: str, admin: str = Depends(verify_admin)):
+async def archive_variation(variation_id: str, super_admin: Dict[str, Any] = Depends(get_super_admin_user)):
+    """Soft-delete a variation. Super Admin only.
+
+    If the variation had already been approved, this reverses its commercial impact by
+    archiving the variation and recalculating the job variation totals. Any finance
+    record created from the variation is archived, and the linked Gantt section is
+    removed so the job value/programme stay in sync.
+    """
     variation = await db.variations.find_one({"id": variation_id}, {"_id": 0})
     if not variation:
         raise HTTPException(status_code=404, detail="Variation not found")
-    if variation.get("status") == "approved":
-        raise HTTPException(status_code=400, detail="Approved variations cannot be deleted. Raise a contra variation if needed.")
-    await db.variations.update_one({"id": variation_id}, {"$set": {"archived": True, "updated_at": datetime.utcnow()}})
-    await recalculate_job_variation_totals(variation.get("job_id"))
-    return {"success": True, "message": "Variation archived"}
+
+    now = datetime.utcnow()
+    actor_name = super_admin.get("name") or super_admin.get("email") or "Super Admin"
+
+    await db.variations.update_one(
+        {"id": variation_id},
+        {"$set": {
+            "archived": True,
+            "archived_at": now,
+            "archived_by": actor_name,
+            "archived_by_email": super_admin.get("email", ""),
+            "status_before_archive": variation.get("status", ""),
+            "updated_at": now,
+        }},
+    )
+
+    # Hide any finance/dashboard record created for this variation.
+    await db.finance_dashboard_records.update_one(
+        {"id": f"variation-{variation_id}"},
+        {"$set": {"archived": True, "updated_at": now}},
+    )
+
+    # Remove the linked Gantt section, if one was created from this variation.
+    job_id = variation.get("job_id")
+    gantt_section_id = variation.get("gantt_section_id")
+    if job_id:
+        job = await db.jobs.find_one({"id": job_id}, {"_id": 0}) or {}
+        sections = job.get("gantt_sections") or []
+        filtered_sections = [
+            section for section in sections
+            if section.get("variation_id") != variation_id and section.get("id") != gantt_section_id
+        ]
+        if len(filtered_sections) != len(sections):
+            await db.jobs.update_one(
+                {"id": job_id},
+                {"$set": {"gantt_sections": filtered_sections, "updated_at": now}},
+            )
+
+        await recalculate_job_variation_totals(job_id)
+
+    return {"success": True, "message": "Variation deleted", "variation_id": variation_id}
 
 
 @api_router.post("/variations/{variation_id}/submit-for-approval")

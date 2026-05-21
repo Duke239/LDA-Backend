@@ -9801,6 +9801,31 @@ class PriceBuilderRateUpdate(BaseModel):
     line_type: Optional[str] = None
     change_reason: str = ""
 
+class PriceBuilderSORCreate(BaseModel):
+    granular_sor_code: str
+    parent_nhf_code: str = "LDA"
+    job_type: str = "Manual / Specialist"
+    trade_required: str = "Specialist"
+    description: str
+    uom: str = "item"
+    granular_unit_net_rate: float = 0.0
+    vat_rate: float = 0.2
+    line_type: str = "Priceable LDA item"
+    labour_rate_used: float = 37.0
+    est_labour_value_per_uom: float = 0.0
+    est_materials_other_value_per_uom: float = 0.0
+    est_labour_hours_per_uom: Optional[float] = None
+    est_labour_minutes_per_uom: Optional[float] = None
+    split_confidence: str = "Medium"
+    split_note: str = "Manual LDA SOR item created from Price Builder."
+    pricing_split_note: str = "Manual LDA item. Rate to be reviewed against supplier/subcontractor quote where applicable."
+    change_reason: str = "New SOR created from Price Builder"
+
+class BOQMatchRow(BaseModel):
+    description: str = ""
+    quantity: float = 1.0
+    uom: str = "item"
+
 class PriceBuildPayload(BaseModel):
     build_name: str = "New Price Build"
     quote_reference: str = ""
@@ -10020,12 +10045,15 @@ async def search_price_builder_rates(
     trade: str = "",
     line_type: str = "",
     include_non_priceable: bool = False,
+    include_archived: bool = False,
     limit: int = Query(50, ge=1, le=200),
     skip: int = Query(0, ge=0),
     admin: str = Depends(verify_admin),
 ):
     await ensure_price_builder_indexes()
     query: Dict[str, Any] = {}
+    if not include_archived:
+        query["archived"] = {"$ne": True}
     search_text = search.strip()
     exact_code_search = bool(re.fullmatch(r"[A-Za-z0-9 ._-]+", search_text)) and bool(re.search(r"\d", search_text))
 
@@ -10054,6 +10082,193 @@ async def search_price_builder_rates(
     return {"rates": rates, "total": total, "skip": skip, "limit": limit}
 
 
+@api_router.post("/price-builder/rates")
+async def create_price_builder_sor_rate(payload: PriceBuilderSORCreate, admin_user: Dict[str, Any] = Depends(get_super_admin_user)):
+    """Create a new reusable LDA SOR item. Super Admin only."""
+    await ensure_price_builder_indexes()
+    sor_code = pb_code(payload.granular_sor_code)
+    if not sor_code:
+        raise HTTPException(status_code=400, detail="SOR code is required")
+    if not pb_clean(payload.description):
+        raise HTTPException(status_code=400, detail="Description is required")
+
+    existing = await db.sor_rates.find_one({"granular_sor_code": sor_code})
+    if existing:
+        raise HTTPException(status_code=400, detail="A SOR item with this code already exists")
+
+    unit_rate = pb_money(payload.granular_unit_net_rate)
+    labour_value = pb_money(payload.est_labour_value_per_uom)
+    materials_value = pb_money(payload.est_materials_other_value_per_uom)
+    labour_rate = pb_money(payload.labour_rate_used, 37.0) or 37.0
+
+    labour_minutes = pb_float(payload.est_labour_minutes_per_uom)
+    labour_hours = pb_float(payload.est_labour_hours_per_uom)
+    if labour_hours == 0 and labour_minutes > 0:
+        labour_hours = round(labour_minutes / 60, 4)
+    if labour_minutes == 0 and labour_hours > 0:
+        labour_minutes = round(labour_hours * 60, 1)
+    if labour_hours == 0 and labour_value > 0 and labour_rate > 0:
+        labour_hours = round(labour_value / labour_rate, 4)
+        labour_minutes = round(labour_hours * 60, 1)
+
+    if unit_rate > 0 and labour_value == 0 and materials_value == 0:
+        labour_value = round(unit_rate * 0.45, 2)
+        materials_value = round(unit_rate - labour_value, 2)
+
+    now = pb_now_iso()
+    admin = admin_user.get("email") or admin_user.get("name") or "Super Admin"
+    doc = {
+        "parent_nhf_code": pb_code(payload.parent_nhf_code) or "LDA",
+        "granular_sor_code": sor_code,
+        "job_type": pb_clean(payload.job_type) or "Manual / Specialist",
+        "trade_required": pb_clean(payload.trade_required) or "Specialist",
+        "description": pb_clean(payload.description),
+        "uom": pb_clean(payload.uom) or "item",
+        "source_quantity_basis": 1,
+        "nhf_baseline_rate": unit_rate,
+        "split_percent": 1,
+        "granular_unit_net_rate": unit_rate,
+        "vat_rate": pb_float(payload.vat_rate, 0.2) or 0.2,
+        "line_type": pb_clean(payload.line_type) or "Priceable LDA item",
+        "parent_price_item": "Manual LDA SOR",
+        "original_nhf_description": "Manual LDA SOR",
+        "pricing_split_note": pb_clean(payload.pricing_split_note),
+        "source_row": "Price Builder manual SOR",
+        "labour_rate_used": labour_rate,
+        "labour_allocation_percent": round((labour_value / unit_rate) * 100, 2) if unit_rate > 0 else 0,
+        "est_labour_value_per_uom": labour_value,
+        "est_materials_other_value_per_uom": materials_value,
+        "est_labour_hours_per_uom": labour_hours,
+        "est_labour_minutes_per_uom": labour_minutes,
+        "split_confidence": pb_clean(payload.split_confidence) or "Medium",
+        "split_note": pb_clean(payload.split_note),
+        "selection_label": f"{pb_clean(payload.description)} — {pb_clean(payload.uom) or 'item'} — {pb_clean(payload.line_type) or 'Rate'}",
+        "created_at": now,
+        "updated_at": now,
+        "created_by": admin,
+        "updated_by": admin,
+        "archived": False,
+        "rate_history": [{
+            "id": str(uuid.uuid4()),
+            "changed_at": now,
+            "changed_by": admin,
+            "reason": payload.change_reason or "New SOR created from Price Builder",
+            "old": {},
+            "new": {"granular_sor_code": sor_code, "granular_unit_net_rate": unit_rate},
+        }],
+    }
+    await db.sor_rates.insert_one(doc)
+    return {"success": True, "rate": pb_doc(doc)}
+
+
+def pb_simple_tokens(text: str) -> List[str]:
+    words = re.findall(r"[a-zA-Z0-9]+", (text or "").lower())
+    stop = {"and", "or", "the", "to", "of", "for", "with", "in", "on", "inc", "including", "supply", "install", "new", "renew", "replace", "item", "nr", "no"}
+    return [w for w in words if len(w) > 2 and w not in stop]
+
+
+def pb_match_confidence(description: str, rate_doc: Dict[str, Any]) -> int:
+    boq_tokens = set(pb_simple_tokens(description))
+    rate_tokens = set(pb_simple_tokens(" ".join([
+        rate_doc.get("description", ""),
+        rate_doc.get("job_type", ""),
+        rate_doc.get("trade_required", ""),
+        rate_doc.get("original_nhf_description", ""),
+    ])))
+    if not boq_tokens or not rate_tokens:
+        return 0
+    overlap = boq_tokens.intersection(rate_tokens)
+    score = int(round((len(overlap) / max(len(boq_tokens), 1)) * 100))
+    if description and rate_doc.get("description") and description.lower() in rate_doc.get("description", "").lower():
+        score = max(score, 90)
+    return min(score, 99)
+
+
+async def pb_match_one_boq_line(description: str, uom: str = "", limit: int = 5) -> List[Dict[str, Any]]:
+    tokens = pb_simple_tokens(description)
+    query: Dict[str, Any] = {"archived": {"$ne": True}}
+    if tokens:
+        important = tokens[:8]
+        query["$or"] = []
+        for token in important:
+            query["$or"].extend([
+                {"description": {"$regex": re.escape(token), "$options": "i"}},
+                {"original_nhf_description": {"$regex": re.escape(token), "$options": "i"}},
+                {"job_type": {"$regex": re.escape(token), "$options": "i"}},
+                {"trade_required": {"$regex": re.escape(token), "$options": "i"}},
+            ])
+    if uom:
+        # do not force UOM as BOQs vary between nr/each/item, but it helps ordering later
+        pass
+    docs = await db.sor_rates.find(query, {"_id": 0}).limit(80).to_list(80)
+    scored = []
+    for doc in docs:
+        score = pb_match_confidence(description, doc)
+        if uom and str(doc.get("uom", "")).lower() == str(uom).lower():
+            score = min(score + 8, 99)
+        if score > 0:
+            out = pb_doc(doc)
+            out["match_confidence"] = score
+            scored.append(out)
+    scored.sort(key=lambda item: (item.get("match_confidence", 0), item.get("granular_unit_net_rate", 0)), reverse=True)
+    return scored[:limit]
+
+
+@api_router.post("/price-builder/match-boq")
+async def match_price_builder_boq(file: UploadFile = File(...), admin: str = Depends(verify_admin)):
+    """Upload a CSV/XLSX BOQ and return likely SOR matches for each row."""
+    filename = (file.filename or "").lower()
+    content = await file.read()
+    rows: List[Dict[str, Any]] = []
+
+    try:
+        if filename.endswith((".xlsx", ".xls")):
+            import pandas as pd
+            from io import BytesIO
+            frame = pd.read_excel(BytesIO(content))
+            raw_rows = frame.to_dict("records")
+        elif filename.endswith(".csv"):
+            text = content.decode("utf-8-sig", errors="ignore")
+            raw_rows = list(csv.DictReader(io.StringIO(text)))
+        else:
+            raise HTTPException(status_code=400, detail="Upload a BOQ as .xlsx, .xls or .csv")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not read BOQ file: {exc}")
+
+    def pick(row: Dict[str, Any], names: List[str]) -> Any:
+        lookup = {str(k).strip().lower(): v for k, v in row.items()}
+        for name in names:
+            if name.lower() in lookup:
+                return lookup[name.lower()]
+        for key, value in lookup.items():
+            if any(name.lower() in key for name in names):
+                return value
+        return ""
+
+    for idx, row in enumerate(raw_rows[:500]):
+        description = pb_clean(pick(row, ["description", "item", "works", "scope", "boq description", "task", "name"]))
+        if not description:
+            values = [pb_clean(v) for v in row.values() if pb_clean(v)]
+            description = values[0] if values else ""
+        if not description:
+            continue
+        quantity = pb_float(pick(row, ["qty", "quantity", "quant", "amount"]), 1) or 1
+        uom = pb_clean(pick(row, ["uom", "unit", "units", "measure"])) or "item"
+        matches = await pb_match_one_boq_line(description, uom, limit=5)
+        rows.append({
+            "id": str(uuid.uuid4()),
+            "source_row": idx + 1,
+            "description": description,
+            "quantity": quantity,
+            "uom": uom,
+            "matches": matches,
+        })
+
+    return {"success": True, "rows": rows, "row_count": len(rows)}
+
+
 @api_router.get("/price-builder/rates/{sor_code}")
 async def get_price_builder_rate(sor_code: str, admin: str = Depends(verify_admin)):
     await ensure_price_builder_indexes()
@@ -10068,7 +10283,7 @@ async def get_price_builder_rate(sor_code: str, admin: str = Depends(verify_admi
 
 
 @api_router.put("/price-builder/rates/{sor_code}")
-async def update_price_builder_master_rate(sor_code: str, payload: PriceBuilderRateUpdate, admin: str = Depends(verify_admin)):
+async def update_price_builder_master_rate(sor_code: str, payload: PriceBuilderRateUpdate, admin_user: Dict[str, Any] = Depends(get_super_admin_user)):
     await ensure_price_builder_indexes()
     existing = await db.sor_rates.find_one({"granular_sor_code": sor_code})
     if not existing:
@@ -10103,6 +10318,7 @@ async def update_price_builder_master_rate(sor_code: str, payload: PriceBuilderR
         update_data["labour_allocation_percent"] = round((pb_float(labour_value) / update_data["granular_unit_net_rate"]) * 100, 2)
 
     update_data["updated_at"] = pb_now_iso()
+    admin = admin_user.get("email") or admin_user.get("name") or "Super Admin"
     update_data["updated_by"] = admin
 
     audit_entry = {

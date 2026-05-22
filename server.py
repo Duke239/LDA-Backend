@@ -9833,9 +9833,6 @@ class PriceBuildPayload(BaseModel):
     quote_reference: str = ""
     project_id: str = ""
     status: str = "Draft"
-    sor_library: str = "All Libraries"
-    sections: List[Dict[str, Any]] = []
-    trade_rates: Dict[str, float] = {}
     lines: List[Dict[str, Any]] = []
 
 
@@ -9896,18 +9893,6 @@ def pb_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def pb_line_totals(line: Dict[str, Any]) -> Dict[str, Any]:
-    """Calculate one Price Builder line.
-
-    Supports the newer build-level workflow where each line has:
-    - section_id / section_name
-    - trade_required
-    - trade_rate_used
-    - labour_percent slider value
-
-    The slider controls the split of the final net line value between labour and
-    materials/other. Labour hours are then calculated as labour value divided by
-    the trade rate used for that build.
-    """
     quantity = pb_float(line.get("quantity"), 0)
     library_rate = pb_money(line.get("library_unit_rate"), 0)
     override = line.get("override_unit_rate")
@@ -9917,53 +9902,20 @@ def pb_line_totals(line: Dict[str, Any]) -> Dict[str, Any]:
     vat = round(net * vat_rate, 2)
     gross = round(net + vat, 2)
 
-    # Trade rate used for planning hours. Keep fallbacks for older saved builds.
-    trade_rate = pb_float(
-        line.get("trade_rate_used", line.get("labour_rate_used")),
-        pb_float(line.get("labour_rate_used"), 37.0),
-    )
-
-    # New behaviour: line-level labour/material slider controls the split.
-    labour_percent_raw = line.get("labour_percent", None)
-    if labour_percent_raw is not None and labour_percent_raw != "":
-        labour_percent = max(0.0, min(100.0, pb_float(labour_percent_raw, 0)))
-        materials_percent = round(100.0 - labour_percent, 2)
-        labour_total = round(net * labour_percent / 100.0, 2)
-        materials_total = round(net - labour_total, 2)
-        labour_each = round(effective_rate * labour_percent / 100.0, 2)
-        materials_each = round(effective_rate - labour_each, 2)
-    else:
-        # Backward compatible behaviour: use imported labour/material split columns.
-        labour_each = pb_money(line.get("est_labour_value_per_uom"), 0)
-        materials_each = pb_money(line.get("est_materials_other_value_per_uom"), 0)
-        imported_split_total = labour_each + materials_each
-        scale = effective_rate / imported_split_total if imported_split_total > 0 else 1
-        labour_total = round(quantity * labour_each * scale, 2)
-        materials_total = round(quantity * materials_each * scale, 2)
-        labour_percent = round((labour_total / net) * 100, 2) if net > 0 else 0
-        materials_percent = round(100.0 - labour_percent, 2)
-        labour_each = round(labour_total / quantity, 2) if quantity > 0 else labour_each
-        materials_each = round(materials_total / quantity, 2) if quantity > 0 else materials_each
-
-    labour_hours_total = round(labour_total / trade_rate, 2) if trade_rate > 0 else 0
-    labour_hours_each = round(labour_hours_total / quantity, 4) if quantity > 0 else 0
-    labour_minutes_each = round(labour_hours_each * 60, 1)
+    labour_each = pb_money(line.get("est_labour_value_per_uom"), 0)
+    materials_each = pb_money(line.get("est_materials_other_value_per_uom"), 0)
+    imported_split_total = labour_each + materials_each
+    scale = effective_rate / imported_split_total if imported_split_total > 0 else 1
 
     line["effective_unit_rate"] = effective_rate
     line["net_amount"] = net
     line["vat_amount"] = vat
     line["gross_amount"] = gross
-    line["trade_rate_used"] = trade_rate
-    line["labour_percent"] = labour_percent
-    line["materials_percent"] = materials_percent
-    line["est_labour_value_per_uom"] = labour_each
-    line["est_materials_other_value_per_uom"] = materials_each
-    line["est_labour_total"] = labour_total
-    line["est_materials_other_total"] = materials_total
-    line["est_labour_hours_per_uom"] = labour_hours_each
-    line["est_labour_minutes_per_uom"] = labour_minutes_each
-    line["est_labour_hours_total"] = labour_hours_total
+    line["est_labour_total"] = round(quantity * labour_each * scale, 2)
+    line["est_materials_other_total"] = round(quantity * materials_each * scale, 2)
+    line["est_labour_hours_total"] = round(quantity * pb_float(line.get("est_labour_hours_per_uom"), 0), 2)
     return line
+
 
 def pb_totals(lines: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {
@@ -10033,22 +9985,55 @@ async def import_price_builder_sor_library(
     sor_library: str = Query(DEFAULT_SOR_LIBRARY),
     admin: str = Depends(verify_admin),
 ):
-    """Import the LDA granular NHF/SOR workbook into MongoDB."""
-    if not file.filename.lower().endswith((".xlsx", ".xls")):
-        raise HTTPException(status_code=400, detail="Upload an Excel workbook (.xlsx or .xls).")
+    """Import an SOR library workbook/CSV into MongoDB.
+
+    Supports both:
+    - NHF/LDA granular workbook column names, e.g. Granular SOR Code / Granular Task Description
+    - Construction/Building Services SOR exports, e.g. SOR Code / Description / Category / Section
+
+    If replace_existing=true, only the selected sor_library is replaced.
+    """
+    filename = (file.filename or "").lower()
+    if not filename.endswith((".xlsx", ".xls", ".csv")):
+        raise HTTPException(status_code=400, detail="Upload an Excel workbook (.xlsx/.xls) or CSV file.")
 
     try:
         import pandas as pd
         from io import BytesIO
         content = await file.read()
-        frame = pd.read_excel(BytesIO(content), sheet_name="SOR Rates")
+
+        if filename.endswith(".csv"):
+            frame = pd.read_csv(BytesIO(content))
+        else:
+            excel_file = pd.ExcelFile(BytesIO(content))
+            # Prefer SOR Rates, but fall back to the first sheet so Construction/BS exports import cleanly.
+            sheet_name = "SOR Rates" if "SOR Rates" in excel_file.sheet_names else excel_file.sheet_names[0]
+            frame = pd.read_excel(excel_file, sheet_name=sheet_name)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Could not read the 'SOR Rates' sheet: {exc}")
+        raise HTTPException(status_code=400, detail=f"Could not read uploaded SOR file: {exc}")
+
+    def first_value(row, *names):
+        for name in names:
+            if name in row.index:
+                value = row.get(name)
+                if value is not None and str(value).strip().lower() not in ["", "nan", "none"]:
+                    return value
+        return ""
+
+    def first_money(row, *names):
+        return pb_money(first_value(row, *names))
+
+    def first_float(row, *names, default=0):
+        value = first_value(row, *names)
+        if value == "":
+            return default
+        return pb_float(value, default)
 
     await ensure_price_builder_indexes()
     selected_library = normalise_sor_library(sor_library)
     if selected_library == "All Libraries":
         selected_library = DEFAULT_SOR_LIBRARY
+
     if replace_existing:
         await db.sor_rates.delete_many({"sor_library": selected_library})
 
@@ -10057,64 +10042,105 @@ async def import_price_builder_sor_library(
     now = pb_now_iso()
 
     for _, row in frame.iterrows():
-        unit_rate = pb_money(row.get("Granular Unit Net Rate"))
-        labour_value = pb_money(row.get("Est. Labour Value / UOM"))
-        materials_value = pb_money(row.get("Est. Materials/Other Value / UOM"))
-        labour_hours = pb_float(row.get("Est. Labour Hours / UOM"))
-        labour_minutes = pb_float(row.get("Est. Labour Minutes / UOM"))
-        labour_rate = pb_money(row.get("Labour Rate Used (£/hr)"))
+        sor_code = pb_code(first_value(row, "Granular SOR Code", "SOR Code", "Code", "Item Code", "Rate Code"))
+        description = pb_clean(first_value(row, "Granular Task Description", "Description", "Item Description", "BOQ Description", "Line Item Description"))
 
-        if labour_value == 0 and materials_value == 0 and unit_rate > 0:
-            labour_value = round(unit_rate * 0.60, 2)
-            materials_value = round(unit_rate - labour_value, 2)
-            labour_rate = labour_rate or 37.0
-            labour_hours = round(labour_value / labour_rate, 4) if labour_rate > 0 else 0
-            labour_minutes = round(labour_hours * 60, 1)
-
-        description = pb_clean(row.get("Granular Task Description"))
-        sor_code = pb_code(row.get("Granular SOR Code"))
         if not sor_code or not description:
             skipped += 1
             continue
 
+        row_library = pb_clean(first_value(row, "SOR Library", "Library"))
+        row_library = normalise_sor_library(row_library) if row_library else selected_library
+        if row_library == "All Libraries":
+            row_library = selected_library
+
+        unit_rate = first_money(row, "Granular Unit Net Rate", "Unit Net Rate", "Rate", "Unit Rate", "Net Rate")
+        labour_value = first_money(row, "Est. Labour Value / UOM", "Labour Value / UOM", "Labour Value", "Labour")
+        materials_value = first_money(row, "Est. Materials/Other Value / UOM", "Materials/Other Value / UOM", "Materials / Other Value", "Materials Value", "Materials")
+        labour_hours = first_float(row, "Est. Labour Hours / UOM", "Labour Hours / UOM", "Estimated Labour Hours", "Labour Hours")
+        labour_minutes = first_float(row, "Est. Labour Minutes / UOM", "Labour Minutes / UOM", "Estimated Labour Minutes", "Labour Minutes")
+        labour_rate = first_money(row, "Labour Rate Used (£/hr)", "Labour Rate", "Trade Rate")
+        labour_percent = first_float(row, "Labour Allocation %", "Labour %", "Labour Percent")
+
+        if labour_value == 0 and materials_value == 0 and unit_rate > 0:
+            labour_percent_for_calc = labour_percent if labour_percent > 0 else 0.60
+            if labour_percent_for_calc > 1:
+                labour_percent_for_calc = labour_percent_for_calc / 100
+            labour_value = round(unit_rate * labour_percent_for_calc, 2)
+            materials_value = round(unit_rate - labour_value, 2)
+
+        if labour_rate == 0:
+            labour_rate = 37.0
+
+        if labour_hours == 0 and labour_value > 0 and labour_rate > 0:
+            labour_hours = round(labour_value / labour_rate, 4)
+
+        if labour_minutes == 0 and labour_hours > 0:
+            labour_minutes = round(labour_hours * 60, 1)
+
+        uom = pb_clean(first_value(row, "UOM", "Unit", "Unit of Measure")) or "item"
+        line_type = pb_clean(first_value(row, "Line Type", "Rate Mode", "Pricing Mode")) or "Rate"
+        category = pb_clean(first_value(row, "Job Type", "Category / Section", "Category", "Section"))
+        subcategory = pb_clean(first_value(row, "Subcategory", "Sub Category"))
+        trade_required = pb_clean(first_value(row, "Trade Required", "Trade", "Default Trade")) or "Construction Operative"
+        source_file = pb_clean(first_value(row, "Source File", "Source Workbook"))
+        source_sheet = pb_clean(first_value(row, "Source Sheet", "Worksheet"))
+        source_row = pb_clean(first_value(row, "Source Row", "Source Ref", "Row Ref"))
+
+        if source_file or source_sheet or source_row:
+            source_row_text = " > ".join([part for part in [source_file, source_sheet, source_row] if part])
+        else:
+            source_row_text = pb_clean(first_value(row, "Source Row"))
+
         doc = {
-            "sor_library": selected_library,
-            "parent_nhf_code": pb_code(row.get("Parent NHF Code")),
+            "sor_library": row_library,
+            "parent_nhf_code": pb_code(first_value(row, "Parent NHF Code", "Parent Code", "Parent SOR Code")),
             "granular_sor_code": sor_code,
-            "job_type": pb_clean(row.get("Job Type")),
-            "trade_required": pb_clean(row.get("Trade Required")),
+            "job_type": category,
+            "subcategory": subcategory,
+            "trade_required": trade_required,
             "description": description,
-            "uom": pb_clean(row.get("UOM")) or "item",
-            "source_quantity_basis": pb_float(row.get("Source Quantity Basis")),
-            "nhf_baseline_rate": pb_money(row.get("NHF Baseline Rate")),
-            "split_percent": pb_float(row.get("Split %")),
+            "uom": uom,
+            "source_quantity_basis": first_float(row, "Source Quantity Basis", "Source Quantity", "Quantity", "Qty"),
+            "nhf_baseline_rate": first_money(row, "NHF Baseline Rate", "Baseline Rate"),
+            "split_percent": first_float(row, "Split %", "Split Percent"),
             "granular_unit_net_rate": unit_rate,
-            "vat_rate": pb_float(row.get("VAT Rate"), 0.2) or 0.2,
-            "line_type": pb_clean(row.get("Line Type")) or "Rate",
-            "parent_price_item": pb_clean(row.get("Parent Price Item")),
-            "original_nhf_description": pb_clean(row.get("Original NHF Description")),
-            "pricing_split_note": pb_clean(row.get("Pricing / Split Note")),
-            "source_row": pb_clean(row.get("Source Row")),
+            "vat_rate": first_float(row, "VAT Rate", "VAT", default=0.2) or 0.2,
+            "line_type": line_type,
+            "parent_price_item": pb_clean(first_value(row, "Parent Price Item")),
+            "original_nhf_description": pb_clean(first_value(row, "Original NHF Description")),
+            "pricing_split_note": pb_clean(first_value(row, "Pricing / Split Note", "Pricing Note", "Notes", "Build-Up Note")),
+            "source_row": source_row_text,
+            "source_file": source_file,
+            "source_sheet": source_sheet,
             "labour_rate_used": labour_rate,
-            "labour_allocation_percent": pb_float(row.get("Labour Allocation %")),
+            "labour_allocation_percent": labour_percent,
             "est_labour_value_per_uom": labour_value,
             "est_materials_other_value_per_uom": materials_value,
             "est_labour_hours_per_uom": labour_hours,
             "est_labour_minutes_per_uom": labour_minutes,
-            "split_confidence": pb_clean(row.get("Split Confidence")),
-            "split_note": pb_clean(row.get("Split Note")),
-            "selection_label": f"{description} — {pb_clean(row.get('UOM')) or 'item'} — {pb_clean(row.get('Line Type')) or 'Rate'}",
+            "split_confidence": pb_clean(first_value(row, "Split Confidence", "Confidence", "Pricing Confidence")),
+            "split_note": pb_clean(first_value(row, "Split Note", "Estimation Note", "Rate Note")),
+            "selection_label": f"{description} — {uom} — {line_type}",
+            "archived": bool(first_float(row, "Archived", default=0)),
             "updated_at": now,
         }
 
         await db.sor_rates.update_one(
-            {"sor_library": selected_library, "granular_sor_code": sor_code},
+            {"sor_library": row_library, "granular_sor_code": sor_code},
             {"$set": doc, "$setOnInsert": {"created_at": now}},
             upsert=True,
         )
         imported += 1
 
-    return {"success": True, "sor_library": selected_library, "imported_or_updated": imported, "skipped": skipped, "replace_existing": replace_existing}
+    return {
+        "success": True,
+        "sor_library": selected_library,
+        "imported_or_updated": imported,
+        "skipped": skipped,
+        "replace_existing": replace_existing,
+        "columns_seen": list(frame.columns),
+    }
 
 
 @api_router.get("/price-builder/filters")
@@ -10451,9 +10477,6 @@ async def create_price_build(payload: PriceBuildPayload, admin: str = Depends(ve
     await ensure_price_builder_indexes()
     lines = [pb_line_totals(dict(line)) for line in payload.lines]
     doc = payload.dict()
-    doc["sor_library"] = normalise_sor_library(doc.get("sor_library") or "All Libraries")
-    doc["sections"] = doc.get("sections") or []
-    doc["trade_rates"] = doc.get("trade_rates") or {}
     doc["id"] = str(uuid.uuid4())
     doc["lines"] = lines
     doc["totals"] = pb_totals(lines)
@@ -10484,9 +10507,6 @@ async def get_price_build(build_id: str, admin: str = Depends(verify_admin)):
 async def update_price_build(build_id: str, payload: PriceBuildPayload, admin: str = Depends(verify_admin)):
     lines = [pb_line_totals(dict(line)) for line in payload.lines]
     update_data = payload.dict()
-    update_data["sor_library"] = normalise_sor_library(update_data.get("sor_library") or "All Libraries")
-    update_data["sections"] = update_data.get("sections") or []
-    update_data["trade_rates"] = update_data.get("trade_rates") or {}
     update_data["lines"] = lines
     update_data["totals"] = pb_totals(lines)
     update_data["updated_by"] = admin

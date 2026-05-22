@@ -9788,6 +9788,7 @@ async def public_variation_response(token: str, response: VariationApprovalRespo
 # ==================== PRICE BUILDER SYSTEM ====================
 
 class PriceBuilderRateUpdate(BaseModel):
+    sor_library: Optional[str] = None
     granular_unit_net_rate: Optional[float] = None
     est_labour_value_per_uom: Optional[float] = None
     est_materials_other_value_per_uom: Optional[float] = None
@@ -9802,6 +9803,7 @@ class PriceBuilderRateUpdate(BaseModel):
     change_reason: str = ""
 
 class PriceBuilderSORCreate(BaseModel):
+    sor_library: str = "Building Services"
     granular_sor_code: str
     parent_nhf_code: str = "LDA"
     job_type: str = "Manual / Specialist"
@@ -9831,6 +9833,9 @@ class PriceBuildPayload(BaseModel):
     quote_reference: str = ""
     project_id: str = ""
     status: str = "Draft"
+    sor_library: str = "All Libraries"
+    sections: List[Dict[str, Any]] = []
+    trade_rates: Dict[str, float] = {}
     lines: List[Dict[str, Any]] = []
 
 
@@ -9891,6 +9896,18 @@ def pb_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def pb_line_totals(line: Dict[str, Any]) -> Dict[str, Any]:
+    """Calculate one Price Builder line.
+
+    Supports the newer build-level workflow where each line has:
+    - section_id / section_name
+    - trade_required
+    - trade_rate_used
+    - labour_percent slider value
+
+    The slider controls the split of the final net line value between labour and
+    materials/other. Labour hours are then calculated as labour value divided by
+    the trade rate used for that build.
+    """
     quantity = pb_float(line.get("quantity"), 0)
     library_rate = pb_money(line.get("library_unit_rate"), 0)
     override = line.get("override_unit_rate")
@@ -9900,20 +9917,53 @@ def pb_line_totals(line: Dict[str, Any]) -> Dict[str, Any]:
     vat = round(net * vat_rate, 2)
     gross = round(net + vat, 2)
 
-    labour_each = pb_money(line.get("est_labour_value_per_uom"), 0)
-    materials_each = pb_money(line.get("est_materials_other_value_per_uom"), 0)
-    imported_split_total = labour_each + materials_each
-    scale = effective_rate / imported_split_total if imported_split_total > 0 else 1
+    # Trade rate used for planning hours. Keep fallbacks for older saved builds.
+    trade_rate = pb_float(
+        line.get("trade_rate_used", line.get("labour_rate_used")),
+        pb_float(line.get("labour_rate_used"), 37.0),
+    )
+
+    # New behaviour: line-level labour/material slider controls the split.
+    labour_percent_raw = line.get("labour_percent", None)
+    if labour_percent_raw is not None and labour_percent_raw != "":
+        labour_percent = max(0.0, min(100.0, pb_float(labour_percent_raw, 0)))
+        materials_percent = round(100.0 - labour_percent, 2)
+        labour_total = round(net * labour_percent / 100.0, 2)
+        materials_total = round(net - labour_total, 2)
+        labour_each = round(effective_rate * labour_percent / 100.0, 2)
+        materials_each = round(effective_rate - labour_each, 2)
+    else:
+        # Backward compatible behaviour: use imported labour/material split columns.
+        labour_each = pb_money(line.get("est_labour_value_per_uom"), 0)
+        materials_each = pb_money(line.get("est_materials_other_value_per_uom"), 0)
+        imported_split_total = labour_each + materials_each
+        scale = effective_rate / imported_split_total if imported_split_total > 0 else 1
+        labour_total = round(quantity * labour_each * scale, 2)
+        materials_total = round(quantity * materials_each * scale, 2)
+        labour_percent = round((labour_total / net) * 100, 2) if net > 0 else 0
+        materials_percent = round(100.0 - labour_percent, 2)
+        labour_each = round(labour_total / quantity, 2) if quantity > 0 else labour_each
+        materials_each = round(materials_total / quantity, 2) if quantity > 0 else materials_each
+
+    labour_hours_total = round(labour_total / trade_rate, 2) if trade_rate > 0 else 0
+    labour_hours_each = round(labour_hours_total / quantity, 4) if quantity > 0 else 0
+    labour_minutes_each = round(labour_hours_each * 60, 1)
 
     line["effective_unit_rate"] = effective_rate
     line["net_amount"] = net
     line["vat_amount"] = vat
     line["gross_amount"] = gross
-    line["est_labour_total"] = round(quantity * labour_each * scale, 2)
-    line["est_materials_other_total"] = round(quantity * materials_each * scale, 2)
-    line["est_labour_hours_total"] = round(quantity * pb_float(line.get("est_labour_hours_per_uom"), 0), 2)
+    line["trade_rate_used"] = trade_rate
+    line["labour_percent"] = labour_percent
+    line["materials_percent"] = materials_percent
+    line["est_labour_value_per_uom"] = labour_each
+    line["est_materials_other_value_per_uom"] = materials_each
+    line["est_labour_total"] = labour_total
+    line["est_materials_other_total"] = materials_total
+    line["est_labour_hours_per_uom"] = labour_hours_each
+    line["est_labour_minutes_per_uom"] = labour_minutes_each
+    line["est_labour_hours_total"] = labour_hours_total
     return line
-
 
 def pb_totals(lines: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {
@@ -9927,9 +9977,44 @@ def pb_totals(lines: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+SOR_LIBRARIES = ["NHF Rates", "Building Services", "Construction"]
+DEFAULT_SOR_LIBRARY = "NHF Rates"
+
+def normalise_sor_library(value: Optional[str]) -> str:
+    requested = str(value or DEFAULT_SOR_LIBRARY).strip()
+    if requested.lower() in ["all", "all libraries", "all sor libraries"]:
+        return "All Libraries"
+    for library in SOR_LIBRARIES:
+        if requested.lower() == library.lower():
+            return library
+    return DEFAULT_SOR_LIBRARY
+
+def sor_library_query(value: Optional[str]) -> Dict[str, Any]:
+    library = normalise_sor_library(value)
+    if library == "All Libraries":
+        return {}
+    return {"sor_library": library}
+
+async def backfill_sor_library(default_library: str = DEFAULT_SOR_LIBRARY):
+    try:
+        await db.sor_rates.update_many(
+            {"$or": [{"sor_library": {"$exists": False}}, {"sor_library": ""}, {"sor_library": None}]},
+            {"$set": {"sor_library": default_library}},
+        )
+    except Exception as exc:
+        logger.warning("Could not backfill SOR library values: %s", exc)
+
 async def ensure_price_builder_indexes():
     try:
-        await db.sor_rates.create_index("granular_sor_code", unique=True)
+        await backfill_sor_library()
+        # Earlier versions used a single unique index on granular_sor_code.  We now allow
+        # the same SOR code to exist in different libraries, so drop that legacy index if present.
+        try:
+            await db.sor_rates.drop_index("granular_sor_code_1")
+        except Exception:
+            pass
+        await db.sor_rates.create_index([("sor_library", 1), ("granular_sor_code", 1)], unique=True)
+        await db.sor_rates.create_index("sor_library")
         await db.sor_rates.create_index("parent_nhf_code")
         await db.sor_rates.create_index("job_type")
         await db.sor_rates.create_index("trade_required")
@@ -9945,6 +10030,7 @@ async def ensure_price_builder_indexes():
 async def import_price_builder_sor_library(
     file: UploadFile = File(...),
     replace_existing: bool = Query(False),
+    sor_library: str = Query(DEFAULT_SOR_LIBRARY),
     admin: str = Depends(verify_admin),
 ):
     """Import the LDA granular NHF/SOR workbook into MongoDB."""
@@ -9960,8 +10046,11 @@ async def import_price_builder_sor_library(
         raise HTTPException(status_code=400, detail=f"Could not read the 'SOR Rates' sheet: {exc}")
 
     await ensure_price_builder_indexes()
+    selected_library = normalise_sor_library(sor_library)
+    if selected_library == "All Libraries":
+        selected_library = DEFAULT_SOR_LIBRARY
     if replace_existing:
-        await db.sor_rates.delete_many({})
+        await db.sor_rates.delete_many({"sor_library": selected_library})
 
     imported = 0
     skipped = 0
@@ -9989,6 +10078,7 @@ async def import_price_builder_sor_library(
             continue
 
         doc = {
+            "sor_library": selected_library,
             "parent_nhf_code": pb_code(row.get("Parent NHF Code")),
             "granular_sor_code": sor_code,
             "job_type": pb_clean(row.get("Job Type")),
@@ -10018,23 +10108,30 @@ async def import_price_builder_sor_library(
         }
 
         await db.sor_rates.update_one(
-            {"granular_sor_code": sor_code},
+            {"sor_library": selected_library, "granular_sor_code": sor_code},
             {"$set": doc, "$setOnInsert": {"created_at": now}},
             upsert=True,
         )
         imported += 1
 
-    return {"success": True, "imported_or_updated": imported, "skipped": skipped, "replace_existing": replace_existing}
+    return {"success": True, "sor_library": selected_library, "imported_or_updated": imported, "skipped": skipped, "replace_existing": replace_existing}
 
 
 @api_router.get("/price-builder/filters")
-async def get_price_builder_filters(admin: str = Depends(verify_admin)):
+async def get_price_builder_filters(sor_library: str = Query("All Libraries"), admin: str = Depends(verify_admin)):
     await ensure_price_builder_indexes()
+    query = sor_library_query(sor_library)
+    existing_libraries = sorted([value for value in await db.sor_rates.distinct("sor_library") if value])
+    libraries = []
+    for library in SOR_LIBRARIES + existing_libraries:
+        if library and library not in libraries:
+            libraries.append(library)
     return {
-        "job_types": sorted([value for value in await db.sor_rates.distinct("job_type") if value]),
-        "trades": sorted([value for value in await db.sor_rates.distinct("trade_required") if value]),
-        "line_types": sorted([value for value in await db.sor_rates.distinct("line_type") if value]),
-        "uoms": sorted([value for value in await db.sor_rates.distinct("uom") if value]),
+        "libraries": libraries,
+        "job_types": sorted([value for value in await db.sor_rates.distinct("job_type", query) if value]),
+        "trades": sorted([value for value in await db.sor_rates.distinct("trade_required", query) if value]),
+        "line_types": sorted([value for value in await db.sor_rates.distinct("line_type", query) if value]),
+        "uoms": sorted([value for value in await db.sor_rates.distinct("uom", query) if value]),
     }
 
 
@@ -10044,6 +10141,7 @@ async def search_price_builder_rates(
     job_type: str = "",
     trade: str = "",
     line_type: str = "",
+    sor_library: str = Query("All Libraries"),
     include_non_priceable: bool = False,
     include_archived: bool = False,
     limit: int = Query(50, ge=1, le=200),
@@ -10051,7 +10149,7 @@ async def search_price_builder_rates(
     admin: str = Depends(verify_admin),
 ):
     await ensure_price_builder_indexes()
-    query: Dict[str, Any] = {}
+    query: Dict[str, Any] = sor_library_query(sor_library)
     if not include_archived:
         query["archived"] = {"$ne": True}
     search_text = search.strip()
@@ -10086,15 +10184,18 @@ async def search_price_builder_rates(
 async def create_price_builder_sor_rate(payload: PriceBuilderSORCreate, admin_user: Dict[str, Any] = Depends(get_super_admin_user)):
     """Create a new reusable LDA SOR item. Super Admin only."""
     await ensure_price_builder_indexes()
+    selected_library = normalise_sor_library(payload.sor_library)
+    if selected_library == "All Libraries":
+        selected_library = "Building Services"
     sor_code = pb_code(payload.granular_sor_code)
     if not sor_code:
         raise HTTPException(status_code=400, detail="SOR code is required")
     if not pb_clean(payload.description):
         raise HTTPException(status_code=400, detail="Description is required")
 
-    existing = await db.sor_rates.find_one({"granular_sor_code": sor_code})
+    existing = await db.sor_rates.find_one({"sor_library": selected_library, "granular_sor_code": sor_code})
     if existing:
-        raise HTTPException(status_code=400, detail="A SOR item with this code already exists")
+        raise HTTPException(status_code=400, detail=f"A SOR item with this code already exists in {selected_library}")
 
     unit_rate = pb_money(payload.granular_unit_net_rate)
     labour_value = pb_money(payload.est_labour_value_per_uom)
@@ -10118,6 +10219,7 @@ async def create_price_builder_sor_rate(payload: PriceBuilderSORCreate, admin_us
     now = pb_now_iso()
     admin = admin_user.get("email") or admin_user.get("name") or "Super Admin"
     doc = {
+        "sor_library": selected_library,
         "parent_nhf_code": pb_code(payload.parent_nhf_code) or "LDA",
         "granular_sor_code": sor_code,
         "job_type": pb_clean(payload.job_type) or "Manual / Specialist",
@@ -10184,9 +10286,9 @@ def pb_match_confidence(description: str, rate_doc: Dict[str, Any]) -> int:
     return min(score, 99)
 
 
-async def pb_match_one_boq_line(description: str, uom: str = "", limit: int = 5) -> List[Dict[str, Any]]:
+async def pb_match_one_boq_line(description: str, uom: str = "", limit: int = 5, sor_library: str = "All Libraries") -> List[Dict[str, Any]]:
     tokens = pb_simple_tokens(description)
-    query: Dict[str, Any] = {"archived": {"$ne": True}}
+    query: Dict[str, Any] = {"archived": {"$ne": True}, **sor_library_query(sor_library)}
     if tokens:
         important = tokens[:8]
         query["$or"] = []
@@ -10215,7 +10317,7 @@ async def pb_match_one_boq_line(description: str, uom: str = "", limit: int = 5)
 
 
 @api_router.post("/price-builder/match-boq")
-async def match_price_builder_boq(file: UploadFile = File(...), admin: str = Depends(verify_admin)):
+async def match_price_builder_boq(file: UploadFile = File(...), sor_library: str = Query("All Libraries"), admin: str = Depends(verify_admin)):
     """Upload a CSV/XLSX BOQ and return likely SOR matches for each row."""
     filename = (file.filename or "").lower()
     content = await file.read()
@@ -10256,7 +10358,7 @@ async def match_price_builder_boq(file: UploadFile = File(...), admin: str = Dep
             continue
         quantity = pb_float(pick(row, ["qty", "quantity", "quant", "amount"]), 1) or 1
         uom = pb_clean(pick(row, ["uom", "unit", "units", "measure"])) or "item"
-        matches = await pb_match_one_boq_line(description, uom, limit=5)
+        matches = await pb_match_one_boq_line(description, uom, limit=5, sor_library=sor_library)
         rows.append({
             "id": str(uuid.uuid4()),
             "source_row": idx + 1,
@@ -10270,22 +10372,28 @@ async def match_price_builder_boq(file: UploadFile = File(...), admin: str = Dep
 
 
 @api_router.get("/price-builder/rates/{sor_code}")
-async def get_price_builder_rate(sor_code: str, admin: str = Depends(verify_admin)):
+async def get_price_builder_rate(sor_code: str, sor_library: str = Query("All Libraries"), admin: str = Depends(verify_admin)):
     await ensure_price_builder_indexes()
-    rate = await db.sor_rates.find_one({"granular_sor_code": sor_code})
+    query = {"granular_sor_code": sor_code, **sor_library_query(sor_library)}
+    rate = await db.sor_rates.find_one(query)
     if not rate:
         raise HTTPException(status_code=404, detail="SOR rate not found")
     siblings = []
     parent_code = rate.get("parent_nhf_code")
     if parent_code:
-        siblings = [pb_doc(doc) async for doc in db.sor_rates.find({"parent_nhf_code": parent_code}).sort("granular_sor_code", 1)]
+        sibling_query = {"parent_nhf_code": parent_code}
+        if rate.get("sor_library"):
+            sibling_query["sor_library"] = rate.get("sor_library")
+        siblings = [pb_doc(doc) async for doc in db.sor_rates.find(sibling_query).sort("granular_sor_code", 1)]
     return {"rate": pb_doc(rate), "siblings": siblings}
 
 
 @api_router.put("/price-builder/rates/{sor_code}")
-async def update_price_builder_master_rate(sor_code: str, payload: PriceBuilderRateUpdate, admin_user: Dict[str, Any] = Depends(get_super_admin_user)):
+async def update_price_builder_master_rate(sor_code: str, payload: PriceBuilderRateUpdate, sor_library: str = Query("All Libraries"), admin_user: Dict[str, Any] = Depends(get_super_admin_user)):
     await ensure_price_builder_indexes()
-    existing = await db.sor_rates.find_one({"granular_sor_code": sor_code})
+    selected_library = normalise_sor_library(payload.sor_library or sor_library)
+    query = {"granular_sor_code": sor_code, **sor_library_query(selected_library)}
+    existing = await db.sor_rates.find_one(query)
     if not existing:
         raise HTTPException(status_code=404, detail="SOR rate not found")
 
@@ -10331,10 +10439,10 @@ async def update_price_builder_master_rate(sor_code: str, payload: PriceBuilderR
     }
 
     await db.sor_rates.update_one(
-        {"granular_sor_code": sor_code},
+        query,
         {"$set": update_data, "$push": {"rate_history": audit_entry}},
     )
-    updated = await db.sor_rates.find_one({"granular_sor_code": sor_code})
+    updated = await db.sor_rates.find_one(query)
     return {"success": True, "rate": pb_doc(updated)}
 
 
@@ -10343,6 +10451,9 @@ async def create_price_build(payload: PriceBuildPayload, admin: str = Depends(ve
     await ensure_price_builder_indexes()
     lines = [pb_line_totals(dict(line)) for line in payload.lines]
     doc = payload.dict()
+    doc["sor_library"] = normalise_sor_library(doc.get("sor_library") or "All Libraries")
+    doc["sections"] = doc.get("sections") or []
+    doc["trade_rates"] = doc.get("trade_rates") or {}
     doc["id"] = str(uuid.uuid4())
     doc["lines"] = lines
     doc["totals"] = pb_totals(lines)
@@ -10373,6 +10484,9 @@ async def get_price_build(build_id: str, admin: str = Depends(verify_admin)):
 async def update_price_build(build_id: str, payload: PriceBuildPayload, admin: str = Depends(verify_admin)):
     lines = [pb_line_totals(dict(line)) for line in payload.lines]
     update_data = payload.dict()
+    update_data["sor_library"] = normalise_sor_library(update_data.get("sor_library") or "All Libraries")
+    update_data["sections"] = update_data.get("sections") or []
+    update_data["trade_rates"] = update_data.get("trade_rates") or {}
     update_data["lines"] = lines
     update_data["totals"] = pb_totals(lines)
     update_data["updated_by"] = admin

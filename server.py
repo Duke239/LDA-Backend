@@ -509,6 +509,9 @@ class Supplier(BaseModel):
     address: str = ""
     vat_number: str = ""
     payment_terms: str = "30 days"
+    payment_terms_days: int = 30
+    payment_requirement: str = "credit_terms"  # credit_terms / proforma / immediate
+    lead_time_days: int = 0
     notes: str = ""
     active: bool = True
     archived: bool = False
@@ -524,6 +527,9 @@ class SupplierCreate(BaseModel):
     address: str = ""
     vat_number: str = ""
     payment_terms: str = "30 days"
+    payment_terms_days: int = 30
+    payment_requirement: str = "credit_terms"
+    lead_time_days: int = 0
     notes: str = ""
 
 class SupplierUpdate(BaseModel):
@@ -535,6 +541,9 @@ class SupplierUpdate(BaseModel):
     address: Optional[str] = None
     vat_number: Optional[str] = None
     payment_terms: Optional[str] = None
+    payment_terms_days: Optional[int] = None
+    payment_requirement: Optional[str] = None
+    lead_time_days: Optional[int] = None
     notes: Optional[str] = None
     active: Optional[bool] = None
     archived: Optional[bool] = None
@@ -6853,6 +6862,9 @@ async def download_supplier_import_template(admin: str = Depends(verify_admin)):
         "address",
         "vat_number",
         "payment_terms",
+        "payment_terms_days",
+        "payment_requirement",
+        "lead_time_days",
         "notes",
         "active",
     ])
@@ -6865,6 +6877,9 @@ async def download_supplier_import_template(admin: str = Depends(verify_admin)):
         "Example address, Newcastle",
         "123456789",
         "30 days",
+        "30",
+        "credit_terms",
+        "0",
         "Main supplier notes",
         "true",
     ])
@@ -6874,6 +6889,24 @@ async def download_supplier_import_template(admin: str = Depends(verify_admin)):
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": "attachment; filename=supplier_import_template.csv"},
     )
+
+
+def parse_supplier_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        return max(0, int(round(float(str(value).strip()))))
+    except Exception:
+        return default
+
+
+def normalise_supplier_payment_requirement(value: Any) -> str:
+    text = str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if text in ["proforma", "pro_forma", "pay_before_order", "advance", "upfront", "prepayment"]:
+        return "proforma"
+    if text in ["immediate", "due_on_receipt", "cod", "cash", "cash_on_delivery", "0_days"]:
+        return "immediate"
+    return "credit_terms"
 
 
 @api_router.post("/suppliers/import-csv")
@@ -6929,6 +6962,9 @@ async def import_suppliers_csv(
             address = get_csv_value(row, ["address", "supplier_address", "registered_address"])
             vat_number = get_csv_value(row, ["vat_number", "vat", "vat_no", "vat_registration", "vat_reg"])
             payment_terms = get_csv_value(row, ["payment_terms", "terms"])
+            payment_terms_days = parse_supplier_int(get_csv_value(row, ["payment_terms_days", "terms_days", "days_to_pay", "days_to_pay_after_invoice", "credit_days"]), 30)
+            payment_requirement = normalise_supplier_payment_requirement(get_csv_value(row, ["payment_requirement", "payment_type", "terms_type", "payment_method", "supplier_payment_requirement"]))
+            lead_time_days = parse_supplier_int(get_csv_value(row, ["lead_time_days", "material_lead_time_days", "ordering_lead_time_days", "lead_time"]), 0)
             notes = get_csv_value(row, ["notes", "note", "comments"])
             active = parse_bool_csv(get_csv_value(row, ["active", "status"]), default=True)
 
@@ -6957,7 +6993,10 @@ async def import_suppliers_csv(
                 "phone": phone,
                 "address": address,
                 "vat_number": vat_number,
-                "payment_terms": payment_terms or "30 days",
+                "payment_terms": payment_terms or f"{payment_terms_days} days",
+                "payment_terms_days": payment_terms_days,
+                "payment_requirement": payment_requirement,
+                "lead_time_days": lead_time_days,
                 "notes": notes,
                 "active": active,
                 "archived": False,

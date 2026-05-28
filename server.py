@@ -442,6 +442,7 @@ class GanttShiftProjectRequest(BaseModel):
     shift_sections: bool = True
     shift_schedule: bool = True
     shift_commercial_markers: bool = True
+    shift_purchase_orders: bool = True
 
 class GanttShiftSectionRequest(BaseModel):
     job_id: str
@@ -450,6 +451,7 @@ class GanttShiftSectionRequest(BaseModel):
     end_date: str
     delta_days: int
     shift_schedule: bool = True
+    shift_purchase_orders: bool = True
 
 
 class FinanceRecord(BaseModel):
@@ -614,6 +616,12 @@ class PurchaseOrder(BaseModel):
     sent_by_name: Optional[str] = None
     email_subject: str = ""
     required_date: Optional[str] = None
+    payment_requirement: str = "credit_terms"
+    payment_terms_days: int = 30
+    lead_time_days: int = 0
+    payment_due_date: Optional[str] = None
+    order_by_date: Optional[str] = None
+    expected_payment_date: Optional[str] = None
     delivery_address: str = ""
     notes: str = ""
     supplier_quote_number: str = ""
@@ -640,6 +648,12 @@ class PurchaseOrderCreate(BaseModel):
     job_number: Optional[int] = None
     division: str = ""
     required_date: Optional[str] = None
+    payment_requirement: str = "credit_terms"
+    payment_terms_days: int = 30
+    lead_time_days: int = 0
+    payment_due_date: Optional[str] = None
+    order_by_date: Optional[str] = None
+    expected_payment_date: Optional[str] = None
     delivery_address: str = ""
     notes: str = ""
     supplier_quote_number: str = ""
@@ -667,6 +681,12 @@ class PurchaseOrderUpdate(BaseModel):
     division: Optional[str] = None
     status: Optional[str] = None
     required_date: Optional[str] = None
+    payment_requirement: Optional[str] = None
+    payment_terms_days: Optional[int] = None
+    lead_time_days: Optional[int] = None
+    payment_due_date: Optional[str] = None
+    order_by_date: Optional[str] = None
+    expected_payment_date: Optional[str] = None
     delivery_address: Optional[str] = None
     notes: Optional[str] = None
     supplier_quote_number: Optional[str] = None
@@ -4426,6 +4446,103 @@ async def _find_linked_section_schedule_entries(job: Dict[str, Any], section: Di
     return await db.schedule_entries.find(query, {"_id": 0}).to_list(5000)
 
 
+
+
+def _normalise_link_value(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _po_links_to_section(po: Dict[str, Any], section: Dict[str, Any]) -> bool:
+    """Return True when a purchase order appears linked to a Gantt section."""
+    section_id = _normalise_link_value(section.get("id"))
+    section_name = _normalise_link_value(section.get("name"))
+
+    po_section_ids = [
+        po.get("project_section_id"),
+        po.get("job_section_id"),
+        po.get("linked_gantt_section_id"),
+    ]
+    po_section_names = [
+        po.get("project_section_name"),
+        po.get("job_section_name"),
+        po.get("section_name"),
+    ]
+
+    if section_id and any(_normalise_link_value(value) == section_id for value in po_section_ids):
+        return True
+    if section_name and any(_normalise_link_value(value) == section_name for value in po_section_names):
+        return True
+
+    for line in po.get("lines") or []:
+        if not isinstance(line, dict):
+            continue
+        line_section_ids = [
+            line.get("project_section_id"),
+            line.get("job_section_id"),
+            line.get("linked_gantt_section_id"),
+        ]
+        line_section_names = [
+            line.get("project_section_name"),
+            line.get("job_section_name"),
+            line.get("section_name"),
+        ]
+        if section_id and any(_normalise_link_value(value) == section_id for value in line_section_ids):
+            return True
+        if section_name and any(_normalise_link_value(value) == section_name for value in line_section_names):
+            return True
+
+    return False
+
+
+def _po_status_allows_required_date_shift(po: Dict[str, Any]) -> bool:
+    status = str(po.get("status") or "").strip().lower().replace(" ", "_")
+    blocked = {"cancelled", "canceled", "void", "archived", "rejected", "closed", "paid"}
+    return status not in blocked
+
+
+async def _shift_linked_purchase_orders_for_section(job: Dict[str, Any], section: Dict[str, Any], delta_days: int) -> Dict[str, Any]:
+    """Shift required/order/payment planning dates for POs linked to a moved section."""
+    if not job or not section or not delta_days:
+        return {"shifted_count": 0, "purchase_orders": []}
+
+    candidates = await db.purchase_orders.find({
+        "job_id": job.get("id"),
+        "archived": {"$ne": True},
+    }, {"_id": 0}).to_list(5000)
+
+    shifted = []
+    for po in candidates:
+        if not _po_status_allows_required_date_shift(po):
+            continue
+        if not _po_links_to_section(po, section):
+            continue
+
+        update = {"updated_at": datetime.utcnow()}
+        changed = False
+        for date_key in ["required_date", "material_required_date", "delivery_date", "expected_delivery_date", "order_by_date", "expected_payment_date"]:
+            if po.get(date_key):
+                update[date_key] = shift_iso_date(po.get(date_key), delta_days)
+                changed = True
+
+        # Do not shift explicit payment due dates. Cashflow calculates credit terms from required_date.
+        # If an explicit payment_due_date is stored, leave it as a deliberate manual override.
+        update["last_programme_shift_at"] = datetime.utcnow().isoformat()
+        update["last_programme_shift_days"] = delta_days
+        update["last_programme_shift_section_id"] = section.get("id", "")
+        update["last_programme_shift_section_name"] = section.get("name", "")
+
+        if changed:
+            await db.purchase_orders.update_one({"id": po.get("id")}, {"$set": update})
+            shifted.append({
+                "id": po.get("id"),
+                "po_number": po.get("po_number", ""),
+                "supplier_name": po.get("supplier_name", ""),
+                "old_required_date": po.get("required_date", ""),
+                "new_required_date": update.get("required_date", po.get("required_date", "")),
+            })
+
+    return {"shifted_count": len(shifted), "purchase_orders": shifted}
+
 async def _build_section_shift_preview(job: Dict[str, Any], section: Dict[str, Any], delta_days: int) -> Dict[str, Any]:
     entries = await _find_linked_section_schedule_entries(job, section)
     worker_ids = list({entry.get("worker_id") for entry in entries if entry.get("worker_id")})
@@ -4568,6 +4685,10 @@ async def shift_gantt_section(request: GanttShiftSectionRequest, admin: str = De
             moved_schedule_count += 1
             moved_ids.append(item.get("entry_id"))
 
+    po_shift_result = {"shifted_count": 0, "purchase_orders": []}
+    if request.shift_purchase_orders:
+        po_shift_result = await _shift_linked_purchase_orders_for_section(job, section, request.delta_days)
+
     updated_sections = []
     updated_section = None
     has_blocked = bool(preview.get("blocked_count"))
@@ -4605,6 +4726,8 @@ async def shift_gantt_section(request: GanttShiftSectionRequest, admin: str = De
         "updated_section": updated_section,
         "moved_schedule_count": moved_schedule_count,
         "moved_schedule_entry_ids": moved_ids,
+        "purchase_orders_shifted": po_shift_result.get("shifted_count", 0),
+        "shifted_purchase_orders": po_shift_result.get("purchase_orders", []),
         "preview": preview,
     }
 
@@ -4718,6 +4841,14 @@ async def shift_gantt_project(request: GanttShiftProjectRequest, admin: str = De
             adjusted_sections.append(section)
         updated_sections = adjusted_sections
 
+    purchase_orders_shifted = 0
+    shifted_purchase_orders = []
+    if request.shift_purchase_orders and request.shift_sections:
+        for original_section in original_sections:
+            result = await _shift_linked_purchase_orders_for_section(job, dict(original_section), request.delta_days)
+            purchase_orders_shifted += result.get("shifted_count", 0)
+            shifted_purchase_orders.extend(result.get("purchase_orders", []))
+
     update_doc = {
         "planned_start_date": request.planned_start_date,
         "planned_end_date": request.planned_end_date,
@@ -4736,6 +4867,8 @@ async def shift_gantt_project(request: GanttShiftProjectRequest, admin: str = De
         "delta_days": request.delta_days,
         "sections_shifted": len(updated_sections) if request.shift_sections else 0,
         "commercial_markers_shifted": len(updated_markers) if request.shift_commercial_markers else 0,
+        "purchase_orders_shifted": purchase_orders_shifted,
+        "shifted_purchase_orders": shifted_purchase_orders,
         "shifted_schedule_count": shifted_schedule_count,
         "clash_count": len(clashes),
         "clashes": clashes,
@@ -5085,23 +5218,30 @@ async def export_schedule(
         headers = [first_column] + [datetime.fromisoformat(day).strftime("%a %d %b") for day in date_list]
         table_data = [headers]
 
+        def worker_pdf_cell_text(worker_id: str, day: str) -> str:
+            entry = entry_lookup.get((worker_id, day))
+            if not entry:
+                return ""
+            return entry.get("job_name") or "Scheduled job"
+
+        def job_pdf_cell_text(job_id: str, day: str) -> str:
+            entries = job_day_lookup.get((job_id, day), [])
+            if not entries:
+                return ""
+            names = sorted({entry.get("job_name") or "Scheduled job" for entry in entries})
+            return "<br/>".join(names)
+
         if group_by == "job":
             for job in jobs:
-                row_title_parts = [job.get("name", "Unknown")]
-                if job.get("client"):
-                    row_title_parts.append(job.get("client"))
-                if job.get("location"):
-                    row_title_parts.append(job.get("location"))
-                row = [Paragraph("<br/>".join(row_title_parts), styles["BodyText"])]
+                row = [Paragraph(job.get("name", "Unknown"), styles["BodyText"])]
                 for day in date_list:
-                    row.append(Paragraph(job_cell_text(job.get("id"), day).replace(" | ", "<br/>"), styles["BodyText"]))
+                    row.append(Paragraph(job_pdf_cell_text(job.get("id"), day), styles["BodyText"]))
                 table_data.append(row)
         else:
             for worker in workers:
                 row = [worker.get("name", "Unknown")]
                 for day in date_list:
-                    text = worker_cell_text(worker.get("id"), day).replace(" | ", "<br/>")
-                    row.append(Paragraph(text, styles["BodyText"]))
+                    row.append(Paragraph(worker_pdf_cell_text(worker.get("id"), day), styles["BodyText"]))
                 table_data.append(row)
 
         if len(table_data) == 1:

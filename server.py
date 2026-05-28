@@ -7961,6 +7961,7 @@ async def create_purchase_order(po_data: PurchaseOrderCreate, admin: str = Depen
     po_dict["requested_by_name"] = po_dict.get("requested_by_name") or admin
     po_dict["requested_by_email"] = po_dict.get("requested_by_email") or (admin if "@" in str(admin) else "")
     po_dict["requested_by_role"] = po_dict.get("requested_by_role") or ""
+    po_dict.update(_normalise_po_planning_fields(po_dict, supplier))
     po_dict["status"] = po_dict.get("status") or "pending_approval"
     po_dict = calculate_po_totals(po_dict)
 
@@ -8007,6 +8008,14 @@ async def update_purchase_order(po_id: str, po_update: PurchaseOrderUpdate, admi
         update_dict["net_total"] = temp["net_total"]
         update_dict["vat_total"] = temp["vat_total"]
         update_dict["gross_total"] = temp["gross_total"]
+
+    planning_keys = {"supplier_id", "required_date", "payment_requirement", "payment_terms_days", "lead_time_days", "payment_due_date", "order_by_date", "expected_payment_date"}
+    if planning_keys.intersection(update_dict.keys()):
+        supplier_id = update_dict.get("supplier_id") or existing.get("supplier_id")
+        supplier = await db.suppliers.find_one({"id": supplier_id}) if supplier_id else {}
+        merged_po = {**existing, **update_dict}
+        update_dict.update(_normalise_po_planning_fields(merged_po, supplier or {}))
+
     update_dict["updated_at"] = datetime.utcnow()
     result = await db.purchase_orders.update_one({"id": po_id}, {"$set": update_dict})
     if result.matched_count == 0:
@@ -8894,7 +8903,7 @@ async def build_material_spend_dashboard_data(
         if po_status in MATERIAL_PO_CANCELLED_STATUSES:
             continue
         po_date = finance_material_iso(po.get("created_at") or po.get("approved_at") or po.get("sent_at"))
-        due_date = finance_material_iso(po.get("expected_payment_date") or po.get("payment_due_date") or po.get("invoice_due_date") or po.get("required_date") or po.get("created_at"))
+        due_date = finance_material_iso(_calculate_po_expected_payment_date(po) or po.get("expected_payment_date") or po.get("required_date") or po.get("created_at"))
         paid_date = finance_material_iso(po.get("paid_date") or po.get("payment_date"))
         net = finance_material_money(po.get("net_total"))
         vat = finance_material_money(po.get("vat_total"))
@@ -10963,6 +10972,585 @@ async def update_price_build(build_id: str, payload: PriceBuildPayload, admin: s
 async def delete_price_build(build_id: str, admin: str = Depends(verify_admin)):
     result = await db.price_builds.delete_one({"id": build_id})
     return {"success": result.deleted_count == 1}
+
+
+
+# ==================== CROSS-PROCESS SYNC HEALTH CHECKS ====================
+
+def _date_in_range(value: Optional[str], start_value: Optional[str], end_value: Optional[str]) -> bool:
+    value_date = parse_iso_date_safe(value)
+    start_date = parse_iso_date_safe(start_value)
+    end_date = parse_iso_date_safe(end_value)
+    if not value_date or not start_date or not end_date:
+        return True
+    if end_date < start_date:
+        start_date, end_date = end_date, start_date
+    return start_date <= value_date <= end_date
+
+
+def _date_after(value: Optional[str], compare_value: Optional[str]) -> bool:
+    value_date = parse_iso_date_safe(value)
+    compare_date = parse_iso_date_safe(compare_value)
+    return bool(value_date and compare_date and value_date > compare_date)
+
+
+def _date_before(value: Optional[str], compare_value: Optional[str]) -> bool:
+    value_date = parse_iso_date_safe(value)
+    compare_date = parse_iso_date_safe(compare_value)
+    return bool(value_date and compare_date and value_date < compare_date)
+
+
+def _safe_int(value: Any, fallback: int = 0) -> int:
+    try:
+        if value is None or value == "":
+            return fallback
+        return int(round(float(value)))
+    except Exception:
+        return fallback
+
+
+def _iso_add_days(value: Optional[str], days: int) -> Optional[str]:
+    if not value:
+        return None
+    parsed = parse_iso_date_safe(value)
+    if not parsed:
+        return None
+    return (parsed + timedelta(days=days)).isoformat()
+
+
+def _po_required_date(po: Dict[str, Any]) -> Optional[str]:
+    for key in ["required_date", "material_required_date", "delivery_date", "expected_delivery_date"]:
+        value = po.get(key)
+        if parse_iso_date_safe(value):
+            return str(value)[:10]
+    return None
+
+
+def _calculate_po_order_by_date(po: Dict[str, Any]) -> Optional[str]:
+    required_date = _po_required_date(po)
+    if not required_date:
+        return po.get("order_by_date")
+    lead_time_days = max(0, _safe_int(po.get("lead_time_days"), 0))
+    return _iso_add_days(required_date, -lead_time_days) if lead_time_days else (po.get("order_by_date") or required_date)
+
+
+def _calculate_po_expected_payment_date(po: Dict[str, Any]) -> Optional[str]:
+    """Return the cashflow date a PO should use when no actual paid date exists.
+
+    Explicit payment_due_date is treated as a manual override. Otherwise:
+    - proforma = order-by date / created date
+    - immediate = approved/sent/created date
+    - credit terms = required date + payment_terms_days
+    """
+    manual_due = po.get("payment_due_date") or po.get("invoice_due_date")
+    if parse_iso_date_safe(manual_due):
+        return str(manual_due)[:10]
+
+    requirement = normalise_supplier_payment_requirement(po.get("payment_requirement") or "credit_terms")
+    required_date = _po_required_date(po)
+
+    if requirement == "proforma":
+        return _calculate_po_order_by_date(po) or finance_material_iso(po.get("created_at")) or required_date
+
+    if requirement == "immediate":
+        return finance_material_iso(po.get("sent_at") or po.get("approved_at") or po.get("created_at")) or required_date
+
+    if required_date:
+        terms_days = max(0, _safe_int(po.get("payment_terms_days"), 30))
+        return _iso_add_days(required_date, terms_days)
+
+    return finance_material_iso(po.get("expected_payment_date") or po.get("created_at"))
+
+
+def _normalise_po_planning_fields(po: Dict[str, Any], supplier: Optional[Dict[str, Any]] = None, preserve_manual_due: bool = True) -> Dict[str, Any]:
+    """Return a patch that makes PO planning/cashflow fields consistent.
+
+    This does not mark the PO as sent/approved/paid; it only fills planning fields used by
+    Project Management and the Finance cashflow forecast.
+    """
+    supplier = supplier or {}
+    patch: Dict[str, Any] = {}
+
+    requirement = normalise_supplier_payment_requirement(po.get("payment_requirement") or supplier.get("payment_requirement") or "credit_terms")
+    terms_days = max(0, _safe_int(po.get("payment_terms_days"), _safe_int(supplier.get("payment_terms_days"), 30)))
+    lead_time_days = max(0, _safe_int(po.get("lead_time_days"), _safe_int(supplier.get("lead_time_days"), 0)))
+
+    patch["payment_requirement"] = requirement
+    patch["payment_terms_days"] = terms_days
+    patch["lead_time_days"] = lead_time_days
+
+    working = {**po, **patch}
+    order_by_date = _calculate_po_order_by_date(working)
+    if order_by_date:
+        patch["order_by_date"] = order_by_date
+        working["order_by_date"] = order_by_date
+
+    expected_payment_date = _calculate_po_expected_payment_date(working)
+    if expected_payment_date:
+        patch["expected_payment_date"] = expected_payment_date
+
+    # Preserve explicit manual payment_due_date. If none exists, leave the manual field blank and
+    # store the calculated cashflow date in expected_payment_date.
+    if preserve_manual_due and po.get("payment_due_date"):
+        patch["payment_due_date"] = po.get("payment_due_date")
+
+    return patch
+
+
+def _check_severity_rank(severity: str) -> int:
+    return {"critical": 3, "warning": 2, "info": 1, "ok": 0}.get(str(severity or "").lower(), 0)
+
+
+def _sync_check(severity: str, category: str, title: str, detail: str = "", action: str = "", record_type: str = "", record_id: str = "") -> Dict[str, Any]:
+    return {
+        "severity": severity,
+        "category": category,
+        "title": title,
+        "detail": detail,
+        "action": action,
+        "record_type": record_type,
+        "record_id": record_id,
+    }
+
+
+@api_router.get("/process-sync/job/{job_id}")
+async def get_job_process_sync_health(job_id: str, admin: str = Depends(verify_admin)):
+    """Review whether linked project-management, schedule, PO and cashflow data is still aligned for a job.
+
+    This is intentionally a read-only diagnostic endpoint. It does not change programme, schedule,
+    purchase order or finance records. The Project Management page uses it before/after programme
+    changes to spot downstream records that need attention.
+    """
+    job = await db.jobs.find_one({"id": job_id, "archived": {"$ne": True}}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    sections = [dict(section) for section in (job.get("gantt_sections") or [])]
+    section_by_id = {str(section.get("id") or ""): section for section in sections if section.get("id")}
+    section_by_name = {_normalise_link_value(section.get("name")): section for section in sections if section.get("name")}
+
+    checks: List[Dict[str, Any]] = []
+
+    schedule_entries = await db.schedule_entries.find({
+        "job_id": job_id,
+        "archived": {"$ne": True},
+    }, {"_id": 0}).to_list(5000)
+
+    purchase_orders = await db.purchase_orders.find({
+        "job_id": job_id,
+        "archived": {"$ne": True},
+    }, {"_id": 0}).to_list(5000)
+
+    finance_records = await db.finance_records.find({
+        "job_id": job_id,
+        "archived": {"$ne": True},
+    }, {"_id": 0}).to_list(5000)
+
+    active_schedule_ids = {entry.get("id") for entry in schedule_entries if entry.get("id")}
+    schedule_by_section: Dict[str, List[Dict[str, Any]]] = {}
+    manual_schedule_count = 0
+
+    for entry in schedule_entries:
+        section_id = str(entry.get("project_section_id") or entry.get("linked_gantt_section_id") or "")
+        section_name_key = _normalise_link_value(entry.get("project_section_name") or entry.get("notes"))
+        section = section_by_id.get(section_id) or section_by_name.get(section_name_key)
+
+        if section:
+            schedule_by_section.setdefault(str(section.get("id") or section.get("name")), []).append(entry)
+            if not _date_in_range(entry.get("scheduled_date"), section.get("start_date"), section.get("end_date")):
+                checks.append(_sync_check(
+                    "warning",
+                    "Schedule",
+                    "Schedule entry sits outside its Gantt section dates",
+                    f"{entry.get('worker_name') or entry.get('worker_id') or 'Worker'} is scheduled on {entry.get('scheduled_date')} but section '{section.get('name', 'Section')}' runs {section.get('start_date') or '-'} to {section.get('end_date') or '-' }.",
+                    "Review the section dates or move this schedule entry.",
+                    "schedule_entry",
+                    entry.get("id", ""),
+                ))
+        else:
+            manual_schedule_count += 1
+            if entry.get("schedule_link_mode") == "linked_to_section" or entry.get("project_section_id") or entry.get("linked_gantt_section_id"):
+                checks.append(_sync_check(
+                    "warning",
+                    "Schedule",
+                    "Schedule entry has a broken Gantt section link",
+                    f"A schedule entry on {entry.get('scheduled_date')} points at a section that could not be found on this job.",
+                    "Re-send the section to schedule or detach this entry as manual.",
+                    "schedule_entry",
+                    entry.get("id", ""),
+                ))
+
+    for section in sections:
+        section_key = str(section.get("id") or section.get("name") or "")
+        linked_entries = schedule_by_section.get(section_key, [])
+        section_ids = set(_normalise_section_ids(section))
+        missing_ids = [entry_id for entry_id in section_ids if entry_id not in active_schedule_ids]
+        if section.get("sent_to_schedule") is True and not linked_entries and not section_ids:
+            checks.append(_sync_check(
+                "warning",
+                "Gantt",
+                "Section is marked scheduled but has no active linked schedule entries",
+                f"'{section.get('name', 'Section')}' is green/scheduled on the Gantt but no active schedule entries were found.",
+                "Re-send this section to schedule or reset its schedule status.",
+                "gantt_section",
+                section.get("id", ""),
+            ))
+        if missing_ids:
+            checks.append(_sync_check(
+                "info",
+                "Gantt",
+                "Section contains old schedule entry references",
+                f"'{section.get('name', 'Section')}' still references {len(missing_ids)} schedule entry id(s) that are no longer active.",
+                "This is usually harmless, but re-sending the section will refresh the links.",
+                "gantt_section",
+                section.get("id", ""),
+            ))
+
+    if manual_schedule_count and sections:
+        checks.append(_sync_check(
+            "info",
+            "Schedule",
+            "Some job schedule entries are manual rather than Gantt-linked",
+            f"{manual_schedule_count} active schedule entr{'y is' if manual_schedule_count == 1 else 'ies are'} not linked to a Gantt section. These will still affect labour cashflow, but will not move automatically when a section moves.",
+            "Leave as manual if intentional, or schedule from Project Management if they should follow section moves.",
+            "schedule_entry",
+            "",
+        ))
+
+    linked_po_count = 0
+    unlinked_po_count = 0
+    for po in purchase_orders:
+        status = str(po.get("status") or "draft").lower().replace(" ", "_")
+        if status in {"cancelled", "canceled", "void", "archived", "rejected"}:
+            continue
+
+        linked_section = next((section for section in sections if _po_links_to_section(po, section)), None)
+        if linked_section:
+            linked_po_count += 1
+            required_date = po.get("required_date") or po.get("material_required_date") or po.get("delivery_date") or po.get("expected_delivery_date")
+            if required_date and linked_section.get("end_date") and _date_after(required_date, linked_section.get("end_date")):
+                checks.append(_sync_check(
+                    "warning",
+                    "Purchase Orders",
+                    "PO required date is after the linked section ends",
+                    f"{po.get('po_number') or 'PO'} / {po.get('supplier_name') or 'Supplier'} is required on {required_date}, after section '{linked_section.get('name', 'Section')}' ends on {linked_section.get('end_date')}.",
+                    "Check whether the PO date should move with the section or whether the PO is linked to the correct section.",
+                    "purchase_order",
+                    po.get("id", ""),
+                ))
+            if po.get("order_by_date") and required_date and _date_after(po.get("order_by_date"), required_date):
+                checks.append(_sync_check(
+                    "critical",
+                    "Purchase Orders",
+                    "PO order-by date is after the required date",
+                    f"{po.get('po_number') or 'PO'} has order-by date {po.get('order_by_date')} but required date {required_date}.",
+                    "Set the order-by date before the required date.",
+                    "purchase_order",
+                    po.get("id", ""),
+                ))
+            if str(po.get("payment_requirement") or "credit_terms") == "credit_terms" and not po.get("payment_due_date") and not required_date:
+                checks.append(_sync_check(
+                    "warning",
+                    "Cashflow",
+                    "Credit terms PO has no required date for cashflow timing",
+                    f"{po.get('po_number') or 'PO'} has credit terms but no required/delivery date, so finance may fall back to created/sent date.",
+                    "Add a required date so the cashflow can calculate required date + payment terms.",
+                    "purchase_order",
+                    po.get("id", ""),
+                ))
+            if po.get("payment_due_date") and required_date and _date_before(po.get("payment_due_date"), required_date):
+                checks.append(_sync_check(
+                    "warning",
+                    "Cashflow",
+                    "PO payment due date is before materials are required",
+                    f"{po.get('po_number') or 'PO'} has payment due date {po.get('payment_due_date')} before required date {required_date}.",
+                    "Check whether this is a proforma/immediate payment or an incorrect manual override.",
+                    "purchase_order",
+                    po.get("id", ""),
+                ))
+        else:
+            unlinked_po_count += 1
+
+    if unlinked_po_count and sections:
+        checks.append(_sync_check(
+            "info",
+            "Purchase Orders",
+            "Some POs are not linked to a Gantt section",
+            f"{unlinked_po_count} active PO(s) on this job are not linked to a section. They can still appear in finance, but section moves will not automatically update their planning dates.",
+            "Link future PO requests from the section in Project Management where possible.",
+            "purchase_order",
+            "",
+        ))
+
+    project_start = job.get("planned_start_date") or job.get("start_date")
+    project_end = job.get("planned_end_date") or job.get("end_date")
+    markers = [normalise_finance_marker(marker) for marker in (job.get("commercial_markers") or [])]
+    for marker in markers:
+        marker_date = marker.get("date")
+        if marker_date and project_start and project_end and not _date_in_range(marker_date, project_start, project_end):
+            checks.append(_sync_check(
+                "info",
+                "Commercial Markers",
+                "Commercial marker is outside the planned project dates",
+                f"'{marker.get('label') or marker.get('type')}' is dated {marker_date}; project dates are {project_start} to {project_end}.",
+                "Leave if intentional, otherwise move the marker or project dates.",
+                "commercial_marker",
+                marker.get("id", ""),
+            ))
+
+    marker_ids = {marker.get("id") for marker in markers if marker.get("id")}
+    for record in finance_records:
+        marker_id = record.get("application_marker_id")
+        if marker_id and marker_id not in marker_ids:
+            checks.append(_sync_check(
+                "info",
+                "Finance",
+                "Finance record points at a missing commercial marker",
+                f"Finance record '{record.get('label') or record.get('invoice_number') or record.get('type')}' references an application marker that is no longer on the Gantt.",
+                "Leave if this is historical, otherwise re-link or archive the finance record.",
+                "finance_record",
+                record.get("id", ""),
+            ))
+
+    if not checks:
+        checks.append(_sync_check(
+            "ok",
+            "Process Sync",
+            "No cross-process issues found",
+            "Gantt sections, linked schedules, purchase orders and commercial markers appear aligned for this job.",
+            "No action needed.",
+            "job",
+            job_id,
+        ))
+
+    counts = {"critical": 0, "warning": 0, "info": 0, "ok": 0}
+    for check in checks:
+        severity = str(check.get("severity") or "info").lower()
+        counts[severity] = counts.get(severity, 0) + 1
+
+    checks.sort(key=lambda item: (-_check_severity_rank(item.get("severity", "")), item.get("category", ""), item.get("title", "")))
+
+    return {
+        "job": {
+            "id": job.get("id"),
+            "name": job.get("name"),
+            "client": job.get("client", ""),
+            "planned_start_date": project_start,
+            "planned_end_date": project_end,
+        },
+        "summary": {
+            "checks_total": len(checks),
+            "critical": counts.get("critical", 0),
+            "warning": counts.get("warning", 0),
+            "info": counts.get("info", 0),
+            "ok": counts.get("ok", 0),
+            "sections": len(sections),
+            "schedule_entries": len(schedule_entries),
+            "linked_purchase_orders": linked_po_count,
+            "unlinked_purchase_orders": unlinked_po_count,
+            "finance_records": len(finance_records),
+            "commercial_markers": len(markers),
+        },
+        "checks": checks,
+    }
+
+
+
+class ProcessSyncRepairRequest(BaseModel):
+    repair_schedule_links: bool = True
+    repair_section_schedule_status: bool = True
+    repair_po_section_links: bool = True
+    repair_po_cashflow_dates: bool = True
+
+
+@api_router.post("/process-sync/job/{job_id}/repair")
+async def repair_job_process_sync(job_id: str, request: ProcessSyncRepairRequest, admin: str = Depends(verify_admin)):
+    """Apply safe cross-process repairs for one job.
+
+    Safe repairs are deliberately limited to data-linking and calculated planning fields:
+    - refresh Gantt section schedule_entry_ids / schedule_status from active schedule entries
+    - backfill missing section IDs on legacy schedule entries that match by section name
+    - backfill missing PO section IDs where the PO/line already names the section
+    - backfill PO payment requirement, terms, order-by and expected payment dates
+
+    It does not move historical records, overwrite manual payment_due_date values, approve/send POs,
+    or change commercial marker dates.
+    """
+    job = await db.jobs.find_one({"id": job_id, "archived": {"$ne": True}}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    sections = [dict(section) for section in (job.get("gantt_sections") or [])]
+    section_by_id = {str(section.get("id") or ""): section for section in sections if section.get("id")}
+    section_by_name = {_normalise_link_value(section.get("name")): section for section in sections if section.get("name")}
+    now = datetime.utcnow()
+    repairs: List[Dict[str, Any]] = []
+
+    schedule_entries = await db.schedule_entries.find({
+        "job_id": job_id,
+        "archived": {"$ne": True},
+    }, {"_id": 0}).to_list(5000)
+
+    # 1) Backfill legacy schedule links and build a fresh section -> schedule-entry map.
+    schedule_by_section_id: Dict[str, List[Dict[str, Any]]] = {str(section.get("id")): [] for section in sections if section.get("id")}
+    if request.repair_schedule_links or request.repair_section_schedule_status:
+        for entry in schedule_entries:
+            section_id = str(entry.get("project_section_id") or entry.get("linked_gantt_section_id") or "")
+            section_name_key = _normalise_link_value(entry.get("project_section_name") or entry.get("notes"))
+            section = section_by_id.get(section_id) or section_by_name.get(section_name_key)
+            if not section:
+                continue
+
+            real_section_id = str(section.get("id") or "")
+            if real_section_id:
+                schedule_by_section_id.setdefault(real_section_id, []).append(entry)
+
+            needs_link_update = (
+                request.repair_schedule_links
+                and real_section_id
+                and (
+                    entry.get("project_section_id") != real_section_id
+                    or entry.get("linked_gantt_section_id") != real_section_id
+                    or entry.get("project_section_name") != section.get("name", "")
+                    or entry.get("schedule_link_mode") not in ["linked_to_section", "manually_adjusted"]
+                )
+            )
+            if needs_link_update:
+                await db.schedule_entries.update_one(
+                    {"id": entry.get("id")},
+                    {"$set": {
+                        "project_section_id": real_section_id,
+                        "linked_gantt_section_id": real_section_id,
+                        "project_section_name": section.get("name", ""),
+                        "schedule_link_mode": "linked_to_section",
+                        "updated_date": now,
+                    }},
+                )
+                repairs.append({
+                    "category": "Schedule",
+                    "title": "Linked schedule entry to Gantt section",
+                    "detail": f"Schedule entry {entry.get('id')} linked to section '{section.get('name', 'Section')}'.",
+                    "record_type": "schedule_entry",
+                    "record_id": entry.get("id", ""),
+                })
+
+    # 2) Refresh section schedule IDs and RAG/schedule status from actual active entries.
+    if request.repair_section_schedule_status and sections:
+        refreshed_sections = []
+        sections_changed = 0
+        for section in sections:
+            section_id = str(section.get("id") or "")
+            linked_entries = schedule_by_section_id.get(section_id, [])
+            linked_ids = [entry.get("id") for entry in linked_entries if entry.get("id")]
+            old_ids = section.get("schedule_entry_ids") or []
+            old_status = section.get("schedule_status") or "not_scheduled"
+            old_sent = bool(section.get("sent_to_schedule"))
+
+            if linked_ids:
+                new_status = "scheduled"
+                new_sent = True
+            else:
+                new_status = "not_scheduled"
+                new_sent = False
+
+            if linked_ids != old_ids or new_status != old_status or new_sent != old_sent:
+                section = {
+                    **section,
+                    "schedule_entry_ids": linked_ids,
+                    "sent_to_schedule": new_sent,
+                    "schedule_status": new_status,
+                    "last_process_sync_repair_at": now.isoformat(),
+                }
+                sections_changed += 1
+                repairs.append({
+                    "category": "Gantt",
+                    "title": "Refreshed section schedule status",
+                    "detail": f"Section '{section.get('name', 'Section')}' now references {len(linked_ids)} active schedule entr{'y' if len(linked_ids) == 1 else 'ies'}.",
+                    "record_type": "gantt_section",
+                    "record_id": section_id,
+                })
+            refreshed_sections.append(section)
+
+        if sections_changed:
+            sections = refreshed_sections
+            await db.jobs.update_one(
+                {"id": job_id},
+                {"$set": {"gantt_sections": refreshed_sections, "last_process_sync_repair_at": now.isoformat()}},
+            )
+
+    # 3) Backfill PO section links and payment/cashflow planning dates.
+    purchase_orders = await db.purchase_orders.find({
+        "job_id": job_id,
+        "archived": {"$ne": True},
+    }, {"_id": 0}).to_list(5000)
+
+    supplier_ids = list({po.get("supplier_id") for po in purchase_orders if po.get("supplier_id")})
+    suppliers = await db.suppliers.find({"id": {"$in": supplier_ids}}, {"_id": 0}).to_list(1000) if supplier_ids else []
+    supplier_lookup = {supplier.get("id"): supplier for supplier in suppliers}
+
+    for po in purchase_orders:
+        status = str(po.get("status") or "draft").lower().replace(" ", "_")
+        if status in {"cancelled", "canceled", "void", "archived", "rejected"}:
+            continue
+
+        po_update: Dict[str, Any] = {}
+
+        if request.repair_po_section_links:
+            linked_section = next((section for section in sections if _po_links_to_section(po, section)), None)
+            if linked_section:
+                section_id = linked_section.get("id", "")
+                section_name = linked_section.get("name", "")
+                if section_id and po.get("project_section_id") != section_id:
+                    po_update["project_section_id"] = section_id
+                if section_name and po.get("project_section_name") != section_name:
+                    po_update["project_section_name"] = section_name
+
+                changed_lines = []
+                line_changed = False
+                for line in po.get("lines") or []:
+                    if not isinstance(line, dict):
+                        changed_lines.append(line)
+                        continue
+                    new_line = dict(line)
+                    line_names_match = _normalise_link_value(line.get("job_section_name") or line.get("project_section_name") or line.get("section_name")) == _normalise_link_value(section_name)
+                    line_ids_missing = not (line.get("job_section_id") or line.get("project_section_id"))
+                    if line_names_match or line_ids_missing:
+                        if section_id and new_line.get("job_section_id") != section_id:
+                            new_line["job_section_id"] = section_id
+                            line_changed = True
+                        if section_name and new_line.get("job_section_name") != section_name:
+                            new_line["job_section_name"] = section_name
+                            line_changed = True
+                    changed_lines.append(new_line)
+                if line_changed:
+                    po_update["lines"] = changed_lines
+
+        if request.repair_po_cashflow_dates:
+            planning_patch = _normalise_po_planning_fields({**po, **po_update}, supplier_lookup.get(po.get("supplier_id"), {}))
+            for key, value in planning_patch.items():
+                if value is not None and str(po.get(key, "")) != str(value):
+                    po_update[key] = value
+
+        if po_update:
+            po_update["updated_at"] = now
+            po_update["last_process_sync_repair_at"] = now.isoformat()
+            await db.purchase_orders.update_one({"id": po.get("id")}, {"$set": po_update})
+            repairs.append({
+                "category": "Purchase Orders",
+                "title": "Repaired PO planning/link fields",
+                "detail": f"{po.get('po_number') or 'PO'} updated fields: {', '.join(sorted(k for k in po_update.keys() if k not in ['updated_at', 'last_process_sync_repair_at']))}.",
+                "record_type": "purchase_order",
+                "record_id": po.get("id", ""),
+            })
+
+    health = await get_job_process_sync_health(job_id, admin=admin)
+    return {
+        "message": "Process sync safe repair complete",
+        "job_id": job_id,
+        "repairs_count": len(repairs),
+        "repairs": repairs,
+        "health": health,
+    }
 
 # Include the router in the main app after all routes have been registered.
 # Important: FastAPI copies the APIRouter routes at include time, so this must stay at the end.

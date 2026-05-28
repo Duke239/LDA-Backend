@@ -388,6 +388,11 @@ class ScheduleEntry(BaseModel):
     status: str = "scheduled"
     schedule_type: str = "job"  # job, holiday, sick, unavailable
     absence_type: Optional[str] = None
+    project_section_id: str = ""
+    project_section_name: str = ""
+    linked_gantt_section_id: str = ""
+    schedule_link_mode: str = "manual"  # manual / linked_to_section / manually_adjusted / detached
+    hours: float = 8.0
     created_date: datetime = Field(default_factory=datetime.utcnow)
     updated_date: Optional[datetime] = None
 
@@ -399,6 +404,11 @@ class ScheduleEntryCreate(BaseModel):
     status: str = "scheduled"
     schedule_type: str = "job"
     absence_type: Optional[str] = None
+    project_section_id: str = ""
+    project_section_name: str = ""
+    linked_gantt_section_id: str = ""
+    schedule_link_mode: str = "manual"
+    hours: float = 8.0
 
 class ScheduleEntryUpdate(BaseModel):
     worker_id: Optional[str] = None
@@ -408,6 +418,11 @@ class ScheduleEntryUpdate(BaseModel):
     status: Optional[str] = None
     schedule_type: Optional[str] = None
     absence_type: Optional[str] = None
+    project_section_id: Optional[str] = None
+    project_section_name: Optional[str] = None
+    linked_gantt_section_id: Optional[str] = None
+    schedule_link_mode: Optional[str] = None
+    hours: Optional[float] = None
 
 class GanttPushToScheduleRequest(BaseModel):
     job_id: str
@@ -427,6 +442,14 @@ class GanttShiftProjectRequest(BaseModel):
     shift_sections: bool = True
     shift_schedule: bool = True
     shift_commercial_markers: bool = True
+
+class GanttShiftSectionRequest(BaseModel):
+    job_id: str
+    section_id: str
+    start_date: str
+    end_date: str
+    delta_days: int
+    shift_schedule: bool = True
 
 
 class FinanceRecord(BaseModel):
@@ -4212,15 +4235,21 @@ async def _push_gantt_section_to_schedule(request: GanttPushToScheduleRequest):
     expected_count = len(request.worker_ids) * len(dates)
 
     if request.replace_existing_for_section and dates:
+        # Archive only schedule entries that are linked to this Gantt section.
+        # Older records may only have the section name in notes, so keep that as a legacy fallback.
         await db.schedule_entries.update_many(
             {
                 "job_id": request.job_id,
                 "worker_id": {"$in": request.worker_ids},
                 "scheduled_date": {"$in": dates},
-                "notes": section_note,
                 "archived": {"$ne": True},
+                "$or": [
+                    {"project_section_id": request.section_id},
+                    {"linked_gantt_section_id": request.section_id},
+                    {"notes": section_note},
+                ],
             },
-            {"$set": {"archived": True, "updated_date": datetime.utcnow()}},
+            {"$set": {"archived": True, "updated_date": datetime.utcnow(), "archived_reason": "replaced_by_gantt_section_push"}},
         )
 
     created = []
@@ -4278,6 +4307,11 @@ async def _push_gantt_section_to_schedule(request: GanttPushToScheduleRequest):
                 notes=section_note,
                 status="scheduled",
                 schedule_type="job",
+                project_section_id=request.section_id,
+                project_section_name=section_note,
+                linked_gantt_section_id=request.section_id,
+                schedule_link_mode="linked_to_section",
+                hours=8.0,
             )
             await db.schedule_entries.insert_one(entry_obj.dict())
             created.append(entry_obj.dict())
@@ -4345,6 +4379,234 @@ def shift_iso_date(value: Optional[str], delta_days: int) -> Optional[str]:
         return shifted.isoformat()
     except Exception:
         return value
+
+
+
+def _date_is_weekend(value: Optional[str]) -> bool:
+    try:
+        return datetime.fromisoformat(str(value)).date().weekday() >= 5
+    except Exception:
+        return False
+
+
+def _normalise_section_ids(section: Dict[str, Any]) -> List[str]:
+    ids = []
+    for entry_id in section.get("schedule_entry_ids") or []:
+        if entry_id:
+            ids.append(str(entry_id))
+    for entry in section.get("schedule_entries") or []:
+        if isinstance(entry, dict) and entry.get("id"):
+            ids.append(str(entry.get("id")))
+        elif entry:
+            ids.append(str(entry))
+    return list(dict.fromkeys(ids))
+
+
+async def _find_linked_section_schedule_entries(job: Dict[str, Any], section: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Find schedule entries linked to a Gantt section, including legacy records created before explicit section IDs existed."""
+    job_id = job.get("id")
+    section_id = section.get("id") or ""
+    section_name = section.get("name") or ""
+    linked_ids = _normalise_section_ids(section)
+
+    or_terms = []
+    if linked_ids:
+        or_terms.append({"id": {"$in": linked_ids}})
+    if section_id:
+        or_terms.append({"project_section_id": section_id})
+        or_terms.append({"linked_gantt_section_id": section_id})
+    if section_name:
+        # Legacy fallback from earlier Gantt pushes where notes carried the section name.
+        or_terms.append({"notes": section_name})
+
+    if not or_terms:
+        return []
+
+    query = {"job_id": job_id, "archived": {"$ne": True}, "$or": or_terms}
+    return await db.schedule_entries.find(query, {"_id": 0}).to_list(5000)
+
+
+async def _build_section_shift_preview(job: Dict[str, Any], section: Dict[str, Any], delta_days: int) -> Dict[str, Any]:
+    entries = await _find_linked_section_schedule_entries(job, section)
+    worker_ids = list({entry.get("worker_id") for entry in entries if entry.get("worker_id")})
+    job_ids = list({entry.get("job_id") for entry in entries if entry.get("job_id")})
+    workers = await db.workers.find({"id": {"$in": worker_ids}}, {"_id": 0}).to_list(1000) if worker_ids else []
+    jobs = await db.jobs.find({"id": {"$in": job_ids}}, {"_id": 0}).to_list(1000) if job_ids else []
+    worker_lookup = {worker.get("id"): worker for worker in workers}
+    job_lookup = {item.get("id"): item for item in jobs}
+
+    today_iso = get_uk_time().date().isoformat()
+    movable = []
+    conflicts = []
+    skipped_past_or_today = []
+    weekend_warnings = []
+
+    for entry in entries:
+        old_date = entry.get("scheduled_date")
+        new_date = shift_iso_date(old_date, delta_days)
+        worker = worker_lookup.get(entry.get("worker_id"), {})
+        if not old_date or not new_date or new_date == old_date:
+            continue
+
+        base_record = {
+            "entry_id": entry.get("id"),
+            "worker_id": entry.get("worker_id"),
+            "worker_name": worker.get("name", "Unknown worker"),
+            "old_date": old_date,
+            "new_date": new_date,
+            "hours": entry.get("hours", 8),
+            "job_id": entry.get("job_id"),
+            "job_name": job_lookup.get(entry.get("job_id"), {}).get("name", job.get("name", "Unknown job")),
+            "section_id": section.get("id", ""),
+            "section_name": section.get("name", ""),
+        }
+
+        if old_date <= today_iso:
+            skipped_past_or_today.append({**base_record, "reason": "Past/today schedule entries are not moved automatically"})
+            continue
+
+        if _date_is_weekend(new_date):
+            weekend_warnings.append({**base_record, "reason": "New date falls on a weekend"})
+            continue
+
+        duplicate = await db.schedule_entries.find_one({
+            "id": {"$ne": entry.get("id")},
+            "worker_id": entry.get("worker_id"),
+            "scheduled_date": new_date,
+            "archived": {"$ne": True},
+        }, {"_id": 0})
+
+        if duplicate:
+            duplicate_type = normalise_schedule_type(duplicate.get("schedule_type"))
+            duplicate_job = await db.jobs.find_one({"id": duplicate.get("job_id")}, {"_id": 0}) if duplicate.get("job_id") else {}
+            conflicts.append({
+                **base_record,
+                "existing_entry_id": duplicate.get("id"),
+                "existing_job_id": duplicate.get("job_id"),
+                "existing_job_name": schedule_type_label(duplicate_type) if is_absence_schedule_type(duplicate_type) else (duplicate_job or {}).get("name", "Existing scheduled job"),
+                "existing_schedule_type": duplicate_type,
+                "existing_notes": duplicate.get("notes", ""),
+                "reason": "Worker already has an active schedule entry on the new date",
+            })
+            continue
+
+        movable.append(base_record)
+
+    blocked_count = len(conflicts) + len(skipped_past_or_today) + len(weekend_warnings)
+    return {
+        "job_id": job.get("id"),
+        "job_name": job.get("name", ""),
+        "section_id": section.get("id", ""),
+        "section_name": section.get("name", ""),
+        "delta_days": delta_days,
+        "linked_schedule_count": len(entries),
+        "movable_count": len(movable),
+        "blocked_count": blocked_count,
+        "can_move_all": len(entries) > 0 and blocked_count == 0,
+        "movable": movable,
+        "conflicts": conflicts,
+        "skipped_past_or_today": skipped_past_or_today,
+        "weekend_warnings": weekend_warnings,
+    }
+
+
+@api_router.post("/gantt/shift-section-preview")
+async def preview_gantt_section_shift(request: GanttShiftSectionRequest, admin: str = Depends(verify_admin)):
+    """Preview linked schedule movement before a Gantt section is moved."""
+    job = await db.jobs.find_one({"id": request.job_id, "archived": {"$ne": True}}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    section = next((dict(item) for item in job.get("gantt_sections") or [] if item.get("id") == request.section_id), None)
+    if not section:
+        raise HTTPException(status_code=404, detail="Gantt section not found")
+    return await _build_section_shift_preview(job, section, request.delta_days)
+
+
+@api_router.post("/gantt/shift-section")
+async def shift_gantt_section(request: GanttShiftSectionRequest, admin: str = Depends(verify_admin)):
+    """Move a single Gantt section and safely move only non-conflicting future linked schedule entries."""
+    try:
+        datetime.fromisoformat(request.start_date)
+        datetime.fromisoformat(request.end_date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="start_date and end_date must be YYYY-MM-DD")
+
+    job = await db.jobs.find_one({"id": request.job_id, "archived": {"$ne": True}}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    sections = [dict(item) for item in (job.get("gantt_sections") or [])]
+    section = next((item for item in sections if item.get("id") == request.section_id), None)
+    if not section:
+        raise HTTPException(status_code=404, detail="Gantt section not found")
+
+    preview = await _build_section_shift_preview(job, section, request.delta_days) if request.shift_schedule else {
+        "linked_schedule_count": 0,
+        "movable_count": 0,
+        "blocked_count": 0,
+        "movable": [],
+        "conflicts": [],
+        "skipped_past_or_today": [],
+        "weekend_warnings": [],
+    }
+
+    moved_schedule_count = 0
+    moved_ids = []
+    if request.shift_schedule:
+        for item in preview.get("movable") or []:
+            await db.schedule_entries.update_one(
+                {"id": item.get("entry_id")},
+                {"$set": {
+                    "scheduled_date": item.get("new_date"),
+                    "updated_date": datetime.utcnow(),
+                    "shifted_from_date": item.get("old_date"),
+                    "shifted_by_gantt_job_id": request.job_id,
+                    "shifted_by_gantt_section_id": request.section_id,
+                    "schedule_link_mode": "linked_to_section",
+                }},
+            )
+            moved_schedule_count += 1
+            moved_ids.append(item.get("entry_id"))
+
+    updated_sections = []
+    updated_section = None
+    has_blocked = bool(preview.get("blocked_count"))
+    for item in sections:
+        if item.get("id") == request.section_id:
+            item = {
+                **item,
+                "start_date": request.start_date,
+                "end_date": request.end_date,
+                "last_programme_shift_at": datetime.utcnow().isoformat(),
+                "last_programme_shift_days": request.delta_days,
+            }
+            if request.shift_schedule and preview.get("linked_schedule_count", 0) > 0:
+                item["schedule_status"] = "partial_scheduled" if has_blocked else "scheduled"
+                item["sent_to_schedule"] = not has_blocked
+                item["schedule_move_preview"] = {
+                    "moved_schedule_count": moved_schedule_count,
+                    "blocked_count": preview.get("blocked_count", 0),
+                    "conflict_count": len(preview.get("conflicts") or []),
+                    "skipped_past_or_today_count": len(preview.get("skipped_past_or_today") or []),
+                    "weekend_warning_count": len(preview.get("weekend_warnings") or []),
+                    "moved_at": datetime.utcnow().isoformat(),
+                }
+            updated_section = item
+        updated_sections.append(item)
+
+    await db.jobs.update_one(
+        {"id": request.job_id},
+        {"$set": {"gantt_sections": updated_sections, "last_programme_shift_at": datetime.utcnow().isoformat()}},
+    )
+    updated_job = await db.jobs.find_one({"id": request.job_id}, {"_id": 0})
+    return {
+        "message": "Gantt section shifted",
+        "job": updated_job,
+        "updated_section": updated_section,
+        "moved_schedule_count": moved_schedule_count,
+        "moved_schedule_entry_ids": moved_ids,
+        "preview": preview,
+    }
 
 
 @api_router.post("/gantt/shift-project")

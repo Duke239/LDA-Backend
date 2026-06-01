@@ -255,6 +255,14 @@ class Job(BaseModel):
     drive_folder_copy_stats: Optional[Dict[str, Any]] = None
     post_work_photos: List[Dict[str, Any]] = []
     commercial_markers: List[Dict[str, Any]] = []
+    # Finance / tax treatment. Values are intentionally simple strings so older records remain compatible.
+    vat_treatment: str = "standard_20"  # standard_20 / reduced_5 / zero_rated / exempt / no_vat / drc
+    vat_rate: float = 20.0
+    drc_enabled: bool = False
+    cis_enabled: bool = False
+    cis_rate: float = 0.0  # 0 / 20 / 30 normally
+    cis_deduction_basis: str = "labour_only"  # labour_only / full_net / none
+    tax_notes: str = ""
 
 class JobCreate(BaseModel):
     name: str
@@ -278,6 +286,13 @@ class JobCreate(BaseModel):
     drive_folder_url: Optional[str] = None
     google_drive_link: Optional[str] = None
     drive_folder_status: Optional[str] = None
+    vat_treatment: str = "standard_20"
+    vat_rate: float = 20.0
+    drc_enabled: bool = False
+    cis_enabled: bool = False
+    cis_rate: float = 0.0
+    cis_deduction_basis: str = "labour_only"
+    tax_notes: str = ""
 
 class JobUpdate(BaseModel):
     name: Optional[str] = None
@@ -304,6 +319,13 @@ class JobUpdate(BaseModel):
     drive_folder_status: Optional[str] = None
     drive_folder_error: Optional[str] = None
     commercial_markers: Optional[List[Dict[str, Any]]] = None
+    vat_treatment: Optional[str] = None
+    vat_rate: Optional[float] = None
+    drc_enabled: Optional[bool] = None
+    cis_enabled: Optional[bool] = None
+    cis_rate: Optional[float] = None
+    cis_deduction_basis: Optional[str] = None
+    tax_notes: Optional[str] = None
 
 class GPSLocation(BaseModel):
     latitude: float
@@ -763,6 +785,7 @@ class Variation(BaseModel):
     client_signature: str = ""
     client_comments: str = ""
     add_to_gantt_on_approval: bool = True
+    standalone_variation_invoice: bool = False  # false means included in contract/applications, not separately counted as cash-in
     added_to_gantt: bool = False
     gantt_section_id: str = ""
     created_by_user_id: str = ""
@@ -788,6 +811,7 @@ class VariationCreate(BaseModel):
     required_date: Optional[str] = None
     status: str = "pending_client_approval"
     add_to_gantt_on_approval: bool = True
+    standalone_variation_invoice: bool = False
     created_by_user_id: str = ""
     created_by_name: str = ""
     created_by_email: str = ""
@@ -807,6 +831,7 @@ class VariationUpdate(BaseModel):
     required_date: Optional[str] = None
     status: Optional[str] = None
     add_to_gantt_on_approval: Optional[bool] = None
+    standalone_variation_invoice: Optional[bool] = None
     archived: Optional[bool] = None
 
 class VariationApprovalResponse(BaseModel):
@@ -2406,6 +2431,28 @@ async def update_job(job_id: str, job_update: JobUpdate, admin: str = Depends(ve
     """Update job (Admin only)"""
     update_dict = {k: v for k, v in job_update.dict().items() if v is not None}
 
+    if "vat_treatment" in update_dict or "drc_enabled" in update_dict or "vat_rate" in update_dict:
+        treatment = normalise_vat_treatment(update_dict.get("vat_treatment"))
+        if treatment == "drc" or update_dict.get("drc_enabled") is True:
+            update_dict["vat_treatment"] = "drc"
+            update_dict["drc_enabled"] = True
+            update_dict["vat_rate"] = finance_to_number(update_dict.get("vat_rate"), 20.0) or 20.0
+        else:
+            update_dict["vat_treatment"] = treatment
+            update_dict["drc_enabled"] = False
+            if treatment == "reduced_5":
+                update_dict["vat_rate"] = finance_to_number(update_dict.get("vat_rate"), 5.0) or 5.0
+            elif treatment in ["zero_rated", "exempt", "no_vat"]:
+                update_dict["vat_rate"] = 0.0
+            else:
+                update_dict["vat_rate"] = finance_to_number(update_dict.get("vat_rate"), 20.0) or 20.0
+
+    if "cis_enabled" in update_dict or "cis_rate" in update_dict or "cis_deduction_basis" in update_dict:
+        update_dict["cis_enabled"] = bool(update_dict.get("cis_enabled"))
+        update_dict["cis_rate"] = finance_to_number(update_dict.get("cis_rate"), 0.0) if update_dict["cis_enabled"] else 0.0
+        if update_dict.get("cis_deduction_basis") not in ["labour_only", "full_net", "none"]:
+            update_dict["cis_deduction_basis"] = "labour_only"
+
     result = await db.jobs.update_one({"id": job_id}, {"$set": update_dict})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -2437,6 +2484,57 @@ async def unarchive_job(job_id: str, admin: str = Depends(verify_admin)):
         raise HTTPException(status_code=404, detail="Job not found")
     return {"message": "Job unarchived successfully"}
 
+
+
+
+@api_router.get("/jobs/{job_id}/tax-settings")
+async def get_job_tax_settings(job_id: str, admin: str = Depends(verify_admin)):
+    """Return a job's VAT / DRC / CIS settings for Finance and Project Management."""
+    job = await db.jobs.find_one({"id": job_id, "archived": {"$ne": True}}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return normalise_job_tax_settings(job)
+
+
+@api_router.put("/jobs/{job_id}/tax-settings")
+async def update_job_tax_settings(job_id: str, settings: Dict[str, Any], admin: str = Depends(verify_admin)):
+    """Update VAT / DRC / CIS treatment for a job without touching programme or commercial data."""
+    job = await db.jobs.find_one({"id": job_id, "archived": {"$ne": True}}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    treatment = normalise_vat_treatment(settings.get("vat_treatment"))
+    drc_enabled = bool(settings.get("drc_enabled")) or treatment == "drc"
+    if drc_enabled:
+        treatment = "drc"
+        vat_rate = finance_to_number(settings.get("vat_rate"), 20.0) or 20.0
+    elif treatment == "reduced_5":
+        vat_rate = finance_to_number(settings.get("vat_rate"), 5.0) or 5.0
+    elif treatment in ["zero_rated", "exempt", "no_vat"]:
+        vat_rate = 0.0
+    else:
+        treatment = "standard_20"
+        vat_rate = finance_to_number(settings.get("vat_rate"), 20.0) or 20.0
+
+    cis_enabled = bool(settings.get("cis_enabled"))
+    cis_rate = finance_to_number(settings.get("cis_rate"), 20.0 if cis_enabled else 0.0) if cis_enabled else 0.0
+    cis_basis = str(settings.get("cis_deduction_basis") or "labour_only").strip().lower()
+    if cis_basis not in ["labour_only", "full_net", "none"]:
+        cis_basis = "labour_only"
+
+    patch = {
+        "vat_treatment": treatment,
+        "vat_rate": round(vat_rate, 2),
+        "drc_enabled": drc_enabled,
+        "cis_enabled": cis_enabled,
+        "cis_rate": max(0.0, min(100.0, cis_rate)),
+        "cis_deduction_basis": cis_basis,
+        "tax_notes": str(settings.get("tax_notes") or ""),
+        "updated_at": datetime.utcnow(),
+    }
+    await db.jobs.update_one({"id": job_id}, {"$set": patch})
+    updated = await db.jobs.find_one({"id": job_id}, {"_id": 0})
+    return {"success": True, "job": updated, "tax_settings": normalise_job_tax_settings(updated)}
 
 def get_job_drive_folder_id(job: Dict[str, Any]) -> Optional[str]:
     """Return the Google Drive folder ID stored against a job."""
@@ -5305,6 +5403,107 @@ def finance_to_number(value: Any, fallback: float = 0.0) -> float:
     except (TypeError, ValueError):
         return fallback
 
+
+
+
+def normalise_vat_treatment(value: Optional[str]) -> str:
+    treatment = str(value or "standard_20").strip().lower().replace(" ", "_").replace("-", "_")
+    aliases = {
+        "standard": "standard_20",
+        "standard_rate": "standard_20",
+        "20": "standard_20",
+        "20%": "standard_20",
+        "reduced": "reduced_5",
+        "reduced_rate": "reduced_5",
+        "5": "reduced_5",
+        "5%": "reduced_5",
+        "zero": "zero_rated",
+        "zero_rate": "zero_rated",
+        "zero_rated": "zero_rated",
+        "exempt": "exempt",
+        "vat_exempt": "exempt",
+        "outside_scope": "no_vat",
+        "no_vat": "no_vat",
+        "none": "no_vat",
+        "drc": "drc",
+        "reverse_charge": "drc",
+        "domestic_reverse_charge": "drc",
+    }
+    return aliases.get(treatment, treatment if treatment in ["standard_20", "reduced_5", "zero_rated", "exempt", "no_vat", "drc"] else "standard_20")
+
+
+def normalise_job_tax_settings(job: Dict[str, Any]) -> Dict[str, Any]:
+    treatment = normalise_vat_treatment(job.get("vat_treatment"))
+    drc_enabled = bool(job.get("drc_enabled")) or treatment == "drc"
+    if treatment == "drc" or drc_enabled:
+        vat_rate = finance_to_number(job.get("vat_rate"), 20.0) or 20.0
+        vat_charged_rate = 0.0
+        treatment = "drc"
+    elif treatment == "reduced_5":
+        vat_rate = finance_to_number(job.get("vat_rate"), 5.0) or 5.0
+        vat_charged_rate = vat_rate
+    elif treatment in ["zero_rated", "exempt", "no_vat"]:
+        vat_rate = 0.0
+        vat_charged_rate = 0.0
+    else:
+        vat_rate = finance_to_number(job.get("vat_rate"), 20.0) or 20.0
+        vat_charged_rate = vat_rate
+
+    cis_enabled = bool(job.get("cis_enabled"))
+    cis_rate = max(0.0, min(100.0, finance_to_number(job.get("cis_rate"), 0.0))) if cis_enabled else 0.0
+    basis = str(job.get("cis_deduction_basis") or "labour_only").strip().lower()
+    if basis not in ["labour_only", "full_net", "none"]:
+        basis = "labour_only"
+
+    return {
+        "vat_treatment": treatment,
+        "vat_rate": round(vat_rate, 2),
+        "vat_charged_rate": round(vat_charged_rate, 2),
+        "drc_enabled": drc_enabled,
+        "cis_enabled": cis_enabled,
+        "cis_rate": round(cis_rate, 2),
+        "cis_deduction_basis": basis,
+        "tax_notes": job.get("tax_notes", ""),
+    }
+
+
+def calculate_finance_tax_snapshot(job: Dict[str, Any], net_value: float, labour_value: Optional[float] = None, material_value: Optional[float] = None) -> Dict[str, Any]:
+    settings = normalise_job_tax_settings(job or {})
+    net = round(max(0.0, finance_to_number(net_value)), 2)
+    labour = finance_to_number(labour_value, 0.0)
+    material = finance_to_number(material_value, 0.0)
+    if labour <= 0 and material <= 0:
+        # Conservative default: CIS labour-only cannot be calculated accurately without a split,
+        # so use the net as the labour basis and flag that it is estimated.
+        labour = net
+        split_estimated = True
+    else:
+        split_estimated = False
+
+    vat_value = round(net * (settings["vat_charged_rate"] / 100.0), 2)
+    gross_value = round(net + vat_value, 2)
+
+    cis_basis_value = 0.0
+    if settings["cis_enabled"] and settings["cis_deduction_basis"] != "none":
+        if settings["cis_deduction_basis"] == "full_net":
+            cis_basis_value = net
+        else:
+            cis_basis_value = min(net, max(0.0, labour))
+    cis_deduction = round(cis_basis_value * (settings["cis_rate"] / 100.0), 2)
+    expected_cash = round(max(0.0, gross_value - cis_deduction), 2)
+
+    return {
+        **settings,
+        "net_value": net,
+        "labour_value": round(max(0.0, labour), 2),
+        "material_value": round(max(0.0, material), 2),
+        "split_estimated": split_estimated,
+        "vat_value": vat_value,
+        "gross_value": gross_value,
+        "cis_basis_value": round(cis_basis_value, 2),
+        "cis_deduction_value": cis_deduction,
+        "expected_cash_value": expected_cash,
+    }
 
 def parse_iso_date_safe(value: Optional[str]) -> Optional[date]:
     if not value:
@@ -9406,6 +9605,14 @@ async def create_or_update_variation_finance_record(variation: Dict[str, Any]) -
         job = await db.jobs.find_one({"id": variation.get("job_id")}, {"_id": 0}) or {}
         expected_date = variation.get("required_date") or datetime.utcnow().date().isoformat()
         record_id = f"variation-{variation.get('id')}"
+        variation_net = finance_to_number(variation.get("net_total"))
+        standalone_invoice = bool(variation.get("standalone_variation_invoice"))
+        tax_snapshot = calculate_finance_tax_snapshot(
+            job,
+            variation_net,
+            labour_value=variation.get("labour_value"),
+            material_value=variation.get("material_value"),
+        )
         record = {
             "id": record_id,
             "project_id": variation.get("job_id"),
@@ -9413,13 +9620,25 @@ async def create_or_update_variation_finance_record(variation: Dict[str, Any]) -
             "type": "variation",
             "description": variation.get("title") or "Approved variation",
             "expected_date": expected_date,
-            "expected_amount": finance_to_number(variation.get("net_total")),
+            # Approved variations are included in the contract/application valuation by default.
+            # They remain visible here as references but are excluded from totals to prevent double-counting.
+            "expected_amount": variation_net if standalone_invoice else 0.0,
             "anticipated_date": expected_date,
-            "anticipated_amount": finance_to_number(variation.get("net_total")),
-            "status": "expected",
+            "anticipated_amount": variation_net if standalone_invoice else 0.0,
+            "display_amount": variation_net,
+            "reference_amount": variation_net,
+            "status": "expected" if standalone_invoice else "reference",
             "source": "variation",
             "source_id": variation.get("id"),
-            "notes": variation.get("scope_of_works") or variation.get("description") or "",
+            "included_in_contract_value": not standalone_invoice,
+            "exclude_from_finance_totals": not standalone_invoice,
+            "standalone_variation_invoice": standalone_invoice,
+            "tax_treatment_snapshot": tax_snapshot,
+            "expected_cash_value": tax_snapshot.get("expected_cash_value") if standalone_invoice else 0.0,
+            "cis_deduction_value": tax_snapshot.get("cis_deduction_value"),
+            "vat_value": tax_snapshot.get("vat_value"),
+            "gross_value": tax_snapshot.get("gross_value"),
+            "notes": " | ".join([item for item in [variation.get("scope_of_works") or variation.get("description") or "", "Included in contract/application forecast" if not standalone_invoice else "Standalone variation invoice"] if item]),
             "created_by": variation.get("created_by_name", ""),
             "created_by_email": variation.get("created_by_email", ""),
             "created_by_role": variation.get("created_by_role", ""),

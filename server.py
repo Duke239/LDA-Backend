@@ -255,6 +255,12 @@ class Job(BaseModel):
     drive_folder_copy_stats: Optional[Dict[str, Any]] = None
     post_work_photos: List[Dict[str, Any]] = []
     commercial_markers: List[Dict[str, Any]] = []
+    client_id: str = ""
+    client_name: str = ""
+    client_tax_snapshot: Dict[str, Any] = {}
+    client_commercial_snapshot: Dict[str, Any] = {}
+    payment_terms_days: int = 30
+    retention_percent: float = 0.0
     # Finance / tax treatment. Values are intentionally simple strings so older records remain compatible.
     vat_treatment: str = "standard_20"  # standard_20 / reduced_5 / zero_rated / exempt / no_vat / drc
     vat_rate: float = 20.0
@@ -286,6 +292,12 @@ class JobCreate(BaseModel):
     drive_folder_url: Optional[str] = None
     google_drive_link: Optional[str] = None
     drive_folder_status: Optional[str] = None
+    client_id: str = ""
+    client_name: str = ""
+    client_tax_snapshot: Dict[str, Any] = {}
+    client_commercial_snapshot: Dict[str, Any] = {}
+    payment_terms_days: int = 30
+    retention_percent: float = 0.0
     vat_treatment: str = "standard_20"
     vat_rate: float = 20.0
     drc_enabled: bool = False
@@ -319,6 +331,12 @@ class JobUpdate(BaseModel):
     drive_folder_status: Optional[str] = None
     drive_folder_error: Optional[str] = None
     commercial_markers: Optional[List[Dict[str, Any]]] = None
+    client_id: Optional[str] = None
+    client_name: Optional[str] = None
+    client_tax_snapshot: Optional[Dict[str, Any]] = None
+    client_commercial_snapshot: Optional[Dict[str, Any]] = None
+    payment_terms_days: Optional[int] = None
+    retention_percent: Optional[float] = None
     vat_treatment: Optional[str] = None
     vat_rate: Optional[float] = None
     drc_enabled: Optional[bool] = None
@@ -326,6 +344,161 @@ class JobUpdate(BaseModel):
     cis_rate: Optional[float] = None
     cis_deduction_basis: Optional[str] = None
     tax_notes: Optional[str] = None
+
+
+# ==================== CLIENT / CUSTOMER SYSTEM MODELS ====================
+
+class ClientContact(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str = ""
+    role: str = ""
+    email: str = ""
+    phone: str = ""
+    receives_invoices: bool = False
+    receives_variations: bool = False
+    receives_quotes: bool = False
+    receives_project_updates: bool = False
+
+class Client(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    client_name: str
+    client_type: str = "commercial"  # commercial / domestic / local_authority / insurance / contractor / other
+    main_contact_name: str = ""
+    phone: str = ""
+    email: str = ""
+    accounts_email: str = ""
+    address: str = ""
+    billing_address: str = ""
+    vat_number: str = ""
+    company_number: str = ""
+    default_variation_email: str = ""
+    default_invoice_email: str = ""
+    default_quote_email: str = ""
+    payment_terms_days: int = 30
+    retention_percent: float = 0.0
+    vat_treatment: str = "standard_20"
+    vat_rate: float = 20.0
+    drc_enabled: bool = False
+    cis_enabled: bool = False
+    cis_rate: float = 0.0
+    cis_deduction_basis: str = "labour_only"
+    notes: str = ""
+    contacts: List[ClientContact] = []
+    active: bool = True
+    archived: bool = False
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: Optional[datetime] = None
+
+class ClientCreate(BaseModel):
+    client_name: str
+    client_type: str = "commercial"
+    main_contact_name: str = ""
+    phone: str = ""
+    email: str = ""
+    accounts_email: str = ""
+    address: str = ""
+    billing_address: str = ""
+    vat_number: str = ""
+    company_number: str = ""
+    default_variation_email: str = ""
+    default_invoice_email: str = ""
+    default_quote_email: str = ""
+    payment_terms_days: int = 30
+    retention_percent: float = 0.0
+    vat_treatment: str = "standard_20"
+    vat_rate: float = 20.0
+    drc_enabled: bool = False
+    cis_enabled: bool = False
+    cis_rate: float = 0.0
+    cis_deduction_basis: str = "labour_only"
+    notes: str = ""
+    contacts: List[ClientContact] = []
+    active: bool = True
+
+class ClientUpdate(BaseModel):
+    client_name: Optional[str] = None
+    client_type: Optional[str] = None
+    main_contact_name: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    accounts_email: Optional[str] = None
+    address: Optional[str] = None
+    billing_address: Optional[str] = None
+    vat_number: Optional[str] = None
+    company_number: Optional[str] = None
+    default_variation_email: Optional[str] = None
+    default_invoice_email: Optional[str] = None
+    default_quote_email: Optional[str] = None
+    payment_terms_days: Optional[int] = None
+    retention_percent: Optional[float] = None
+    vat_treatment: Optional[str] = None
+    vat_rate: Optional[float] = None
+    drc_enabled: Optional[bool] = None
+    cis_enabled: Optional[bool] = None
+    cis_rate: Optional[float] = None
+    cis_deduction_basis: Optional[str] = None
+    notes: Optional[str] = None
+    contacts: Optional[List[ClientContact]] = None
+    active: Optional[bool] = None
+    archived: Optional[bool] = None
+
+def normalise_client_tax_payload(values: Dict[str, Any]) -> Dict[str, Any]:
+    treatment = str(values.get("vat_treatment") or "standard_20").strip().lower()
+    if treatment not in {"standard_20", "reduced_5", "zero_rated", "exempt", "no_vat", "drc"}:
+        treatment = "standard_20"
+    drc_enabled = treatment == "drc" or values.get("drc_enabled") is True
+    if drc_enabled:
+        treatment = "drc"
+    rate = finance_to_number(values.get("vat_rate"), 20.0)
+    if treatment == "reduced_5":
+        rate = 5.0
+    elif treatment in {"zero_rated", "exempt", "no_vat", "drc"}:
+        rate = 0.0
+    cis_enabled = bool(values.get("cis_enabled"))
+    cis_rate = finance_to_number(values.get("cis_rate"), 20.0 if cis_enabled else 0.0) if cis_enabled else 0.0
+    return {
+        "vat_treatment": treatment,
+        "vat_rate": max(0.0, rate),
+        "drc_enabled": drc_enabled,
+        "cis_enabled": cis_enabled,
+        "cis_rate": max(0.0, min(100.0, cis_rate)),
+        "cis_deduction_basis": values.get("cis_deduction_basis") or "labour_only",
+    }
+
+def client_job_defaults(client: Dict[str, Any]) -> Dict[str, Any]:
+    tax = normalise_client_tax_payload(client or {})
+    commercial = {
+        "payment_terms_days": int(finance_to_number((client or {}).get("payment_terms_days"), 30)),
+        "retention_percent": finance_to_number((client or {}).get("retention_percent"), 0.0),
+    }
+    return {
+        "client_id": (client or {}).get("id", ""),
+        "client_name": (client or {}).get("client_name", ""),
+        "client_tax_snapshot": tax,
+        "client_commercial_snapshot": commercial,
+        **tax,
+        **commercial,
+    }
+
+async def apply_client_defaults_to_job_data(job_data: Dict[str, Any], force_refresh: bool = False) -> Dict[str, Any]:
+    client_id = str(job_data.get("client_id") or "").strip()
+    if not client_id:
+        return job_data
+    client = await db.clients.find_one({"id": client_id, "archived": {"$ne": True}}, {"_id": 0})
+    if not client:
+        return job_data
+    defaults = client_job_defaults(client)
+    job_data["client_id"] = defaults["client_id"]
+    job_data["client_name"] = defaults["client_name"]
+    if not job_data.get("client"):
+        job_data["client"] = defaults["client_name"]
+    job_data["client_tax_snapshot"] = defaults["client_tax_snapshot"]
+    job_data["client_commercial_snapshot"] = defaults["client_commercial_snapshot"]
+    defaultable_keys = ["vat_treatment", "vat_rate", "drc_enabled", "cis_enabled", "cis_rate", "cis_deduction_basis", "payment_terms_days", "retention_percent"]
+    for key in defaultable_keys:
+        if force_refresh or job_data.get(key) in [None, ""]:
+            job_data[key] = defaults.get(key)
+    return job_data
 
 class GPSLocation(BaseModel):
     latitude: float
@@ -1259,6 +1432,7 @@ class AppUserPasswordUpdate(BaseModel):
 APP_SECTIONS = [
     "dashboard",
     "workers",
+    "clients",
     "jobs",
     "project-management",
     "variations",
@@ -1278,6 +1452,7 @@ DEFAULT_ROLE_PERMISSIONS = {
     "admin": {
         "dashboard": True,
         "workers": True,
+        "clients": True,
         "jobs": True,
         "project-management": False,
         "variations": True,
@@ -1292,6 +1467,7 @@ DEFAULT_ROLE_PERMISSIONS = {
     "project_manager": {
         "dashboard": False,
         "workers": False,
+        "clients": False,
         "jobs": False,
         "project-management": True,
         "variations": True,
@@ -1306,6 +1482,7 @@ DEFAULT_ROLE_PERMISSIONS = {
     "accounts": {
         "dashboard": False,
         "workers": False,
+        "clients": False,
         "jobs": False,
         "project-management": False,
         "variations": True,
@@ -2114,6 +2291,106 @@ async def archive_worker(worker_id: str, admin: str = Depends(verify_admin)):
         raise HTTPException(status_code=404, detail="Worker not found")
     return {"message": "Worker archived successfully"}
 
+
+# ==================== CLIENT / CUSTOMER ENDPOINTS ====================
+
+@api_router.get("/clients", response_model=List[Client])
+async def get_clients(
+    active_only: bool = Query(True),
+    include_archived: bool = Query(False),
+    search: Optional[str] = Query(None),
+    admin: str = Depends(verify_admin),
+):
+    filter_dict = {}
+    if active_only:
+        filter_dict["active"] = True
+    if not include_archived:
+        filter_dict["archived"] = {"$ne": True}
+    if search:
+        filter_dict["$or"] = [
+            {"client_name": {"$regex": search, "$options": "i"}},
+            {"main_contact_name": {"$regex": search, "$options": "i"}},
+            {"email": {"$regex": search, "$options": "i"}},
+            {"accounts_email": {"$regex": search, "$options": "i"}},
+        ]
+    docs = await db.clients.find(filter_dict, {"_id": 0}).sort("client_name", 1).to_list(5000)
+    return [Client(**doc) for doc in docs]
+
+@api_router.post("/clients", response_model=Client)
+async def create_client(client: ClientCreate, admin: str = Depends(verify_admin)):
+    duplicate = await db.clients.find_one({
+        "client_name": {"$regex": f"^{re.escape(client.client_name.strip())}$", "$options": "i"},
+        "archived": {"$ne": True},
+    })
+    if duplicate:
+        raise HTTPException(status_code=400, detail="A client with this name already exists")
+    data = client.dict()
+    data["client_name"] = data["client_name"].strip()
+    data.update(normalise_client_tax_payload(data))
+    obj = Client(**data)
+    await db.clients.insert_one(obj.dict())
+    return obj
+
+@api_router.get("/clients/{client_id}", response_model=Client)
+async def get_client(client_id: str, admin: str = Depends(verify_admin)):
+    client = await db.clients.find_one({"id": client_id}, {"_id": 0})
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+    return Client(**client)
+
+@api_router.put("/clients/{client_id}", response_model=Client)
+async def update_client(client_id: str, update: ClientUpdate, admin: str = Depends(verify_admin)):
+    existing = await db.clients.find_one({"id": client_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Client not found")
+    update_data = {k: v for k, v in update.dict().items() if v is not None}
+    if not update_data:
+        return Client(**existing)
+    if "client_name" in update_data:
+        duplicate = await db.clients.find_one({
+            "id": {"$ne": client_id},
+            "client_name": {"$regex": f"^{re.escape(str(update_data['client_name']).strip())}$", "$options": "i"},
+            "archived": {"$ne": True},
+        })
+        if duplicate:
+            raise HTTPException(status_code=400, detail="Another client already has this name")
+        update_data["client_name"] = str(update_data["client_name"]).strip()
+    if any(key in update_data for key in ["vat_treatment", "vat_rate", "drc_enabled", "cis_enabled", "cis_rate", "cis_deduction_basis"]):
+        merged = {**existing, **update_data}
+        update_data.update(normalise_client_tax_payload(merged))
+    update_data["updated_at"] = datetime.utcnow()
+    await db.clients.update_one({"id": client_id}, {"$set": update_data})
+    updated = await db.clients.find_one({"id": client_id}, {"_id": 0})
+    return Client(**updated)
+
+@api_router.put("/clients/{client_id}/archive")
+async def archive_client(client_id: str, admin: str = Depends(verify_admin)):
+    result = await db.clients.update_one({"id": client_id}, {"$set": {"archived": True, "active": False, "updated_at": datetime.utcnow()}})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Client not found")
+    return {"success": True, "message": "Client archived"}
+
+@api_router.put("/clients/{client_id}/unarchive")
+async def unarchive_client(client_id: str, admin: str = Depends(verify_admin)):
+    result = await db.clients.update_one({"id": client_id}, {"$set": {"archived": False, "active": True, "updated_at": datetime.utcnow()}})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Client not found")
+    return {"success": True, "message": "Client unarchived"}
+
+@api_router.post("/jobs/{job_id}/refresh-client-defaults", response_model=Job)
+async def refresh_job_client_defaults(job_id: str, admin: str = Depends(verify_admin)):
+    job = await db.jobs.find_one({"id": job_id, "archived": {"$ne": True}}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not job.get("client_id"):
+        raise HTTPException(status_code=400, detail="This job is not linked to a client record")
+    refreshed = await apply_client_defaults_to_job_data(dict(job), force_refresh=True)
+    update_keys = ["client_id", "client_name", "client", "client_tax_snapshot", "client_commercial_snapshot", "vat_treatment", "vat_rate", "drc_enabled", "cis_enabled", "cis_rate", "cis_deduction_basis", "payment_terms_days", "retention_percent"]
+    update_doc = {key: refreshed.get(key) for key in update_keys if key in refreshed}
+    await db.jobs.update_one({"id": job_id}, {"$set": update_doc})
+    updated = await db.jobs.find_one({"id": job_id})
+    return Job(**updated)
+
 # ==================== GOOGLE DRIVE JOB FOLDER AUTOMATION ====================
 
 def google_drive_config_missing() -> List[str]:
@@ -2381,6 +2658,7 @@ async def create_google_drive_job_folder(job_number: int, job_name: str) -> Dict
 async def create_job(job: JobCreate, admin: str = Depends(verify_admin)):
     """Create a new job, assign a job number, and create/copy its Google Drive folder."""
     job_dict = job.dict()
+    job_dict = await apply_client_defaults_to_job_data(job_dict, force_refresh=False)
 
     job_number = await get_next_job_number()
     display_name = build_job_display_name(job_number, job.name)

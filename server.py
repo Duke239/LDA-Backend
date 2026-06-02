@@ -2704,6 +2704,385 @@ async def get_job(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
     return Job(**job)
 
+
+# ==================== JOB DETAIL REPORT ENDPOINT ====================
+
+def _job_detail_money(value):
+    """Safely convert common currency/value fields to a float."""
+    try:
+        if value is None or value == "":
+            return 0.0
+        return round(float(value), 2)
+    except Exception:
+        return 0.0
+
+
+def _job_detail_first_existing(doc: Dict[str, Any], keys: List[str], default=None):
+    """Return the first populated value found in a dict using multiple possible field names."""
+    if not isinstance(doc, dict):
+        return default
+    for key in keys:
+        value = doc.get(key)
+        if value not in [None, ""]:
+            return value
+    return default
+
+
+def _job_detail_parse_date(value):
+    """Parse date/datetime/string values without crashing older records."""
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).date()
+        except Exception:
+            try:
+                return datetime.strptime(value[:10], "%Y-%m-%d").date()
+            except Exception:
+                return None
+    return None
+
+
+def _job_detail_date_to_iso(value):
+    parsed = _job_detail_parse_date(value)
+    return parsed.isoformat() if parsed else None
+
+
+def _job_detail_days_between(start_value, end_value):
+    start = _job_detail_parse_date(start_value)
+    end = _job_detail_parse_date(end_value)
+    if not start or not end:
+        return None
+    return max((end - start).days + 1, 0)
+
+
+async def _job_detail_collection_list(collection_name: str, query: Dict[str, Any], limit: int = 5000) -> List[Dict[str, Any]]:
+    """Return documents from a collection if it exists / is queryable."""
+    try:
+        return await db.get_collection(collection_name).find(query, {"_id": 0}).to_list(limit)
+    except Exception:
+        return []
+
+
+def _job_detail_status_is_approved(value: Any) -> bool:
+    status = str(value or "").strip().lower().replace(" ", "_")
+    return status in {"approved", "accepted", "client_approved", "clientapproved"}
+
+
+def _job_detail_status_is_rejected(value: Any) -> bool:
+    status = str(value or "").strip().lower().replace(" ", "_")
+    return status in {"rejected", "declined", "cancelled", "canceled", "void"}
+
+
+@api_router.get("/jobs/{job_id}/detail-report")
+async def get_job_detail_report(job_id: str):
+    """Compact job detail report for the Jobs page.
+
+    This endpoint intentionally reads from the existing LDA data structure:
+    - jobs.gantt_sections for programme
+    - jobs.commercial_markers for commercial markers/material forecasts
+    - variations collection for approved/pending variations
+    - schedule_entries/time_entries for workforce
+    - purchase_orders collection for POs
+    """
+    job = await db.jobs.find_one({"id": job_id, "archived": {"$ne": True}}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job_name = _job_detail_first_existing(job, ["display_name", "name", "job_name", "jobName", "title"], "Unnamed Job")
+    raw_job_name = _job_detail_first_existing(job, ["name", "job_name", "jobName", "title", "display_name"], "Unnamed Job")
+    client = _job_detail_first_existing(job, ["client_name", "clientName", "client", "job_client", "jobClient", "client_text"], "")
+    location = _job_detail_first_existing(job, ["location", "job_location", "jobLocation", "site_address", "siteAddress", "address"], "")
+    start_date = _job_detail_first_existing(job, ["planned_start_date", "start_date", "startDate", "project_start", "planned_start"], None)
+    end_date = _job_detail_first_existing(job, ["planned_end_date", "end_date", "endDate", "project_end", "planned_end"], None)
+
+    explicit_duration = _job_detail_first_existing(job, ["duration_days", "durationDays", "duration", "programme_duration"], None)
+    calculated_duration = _job_detail_days_between(start_date, end_date)
+    try:
+        duration_days = int(float(explicit_duration)) if explicit_duration not in [None, ""] else calculated_duration
+    except Exception:
+        duration_days = calculated_duration
+
+    original_value = _job_detail_money(_job_detail_first_existing(job, [
+        "original_quoted_cost",
+        "original_value",
+        "originalValue",
+        "quoted_cost",
+        "quotedCost",
+        "quote_value",
+        "quoteValue",
+        "contract_value",
+        "contractValue",
+        "value",
+        "job_value",
+        "jobValue",
+        "net_value",
+        "netValue",
+    ], 0))
+
+    # ---------------- Variations ----------------
+    variations = await _job_detail_collection_list("variations", {"job_id": job_id, "archived": {"$ne": True}})
+
+    approved_variations = []
+    pending_variations = []
+    rejected_variations = []
+
+    for variation in variations:
+        status = _job_detail_first_existing(variation, ["status", "approval_status", "approvalStatus"], "")
+        if _job_detail_status_is_approved(status):
+            approved_variations.append(variation)
+        elif _job_detail_status_is_rejected(status):
+            rejected_variations.append(variation)
+        else:
+            pending_variations.append(variation)
+
+    def variation_value(variation: Dict[str, Any]) -> float:
+        direct_value = _job_detail_first_existing(variation, [
+            "net_total",
+            "netTotal",
+            "value",
+            "variation_value",
+            "variationValue",
+            "total_value",
+            "totalValue",
+            "amount",
+        ], None)
+        if direct_value not in [None, ""]:
+            return _job_detail_money(direct_value)
+        return round(
+            _job_detail_money(variation.get("material_value"))
+            + _job_detail_money(variation.get("labour_value"))
+            + _job_detail_money(variation.get("subcontractor_value"))
+            + _job_detail_money(variation.get("other_value")),
+            2,
+        )
+
+    approved_variation_value = round(sum(variation_value(item) for item in approved_variations), 2)
+    pending_variation_value = round(sum(variation_value(item) for item in pending_variations), 2)
+    rejected_variation_value = round(sum(variation_value(item) for item in rejected_variations), 2)
+
+    # Prefer job-level variation totals if they already exist and are greater than the collection-derived value.
+    approved_variation_value = max(approved_variation_value, _job_detail_money(job.get("approved_variations_total")))
+    pending_variation_value = max(pending_variation_value, _job_detail_money(job.get("pending_variations_total")))
+    rejected_variation_value = max(rejected_variation_value, _job_detail_money(job.get("rejected_variations_total")))
+
+    current_contract_value = _job_detail_money(job.get("current_contract_value"))
+    revised_value = current_contract_value if current_contract_value else round(original_value + approved_variation_value, 2)
+
+    # ---------------- Programme ----------------
+    sections = job.get("gantt_sections") or []
+    if not isinstance(sections, list):
+        sections = []
+
+    section_dates = []
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        section_start = _job_detail_parse_date(_job_detail_first_existing(section, ["start_date", "startDate", "start"], None))
+        section_end = _job_detail_parse_date(_job_detail_first_existing(section, ["end_date", "endDate", "end"], None))
+        if section_start:
+            section_dates.append(section_start)
+        if section_end:
+            section_dates.append(section_end)
+
+    has_program = len(sections) > 0
+    programme_start = min(section_dates).isoformat() if section_dates else None
+    programme_end = max(section_dates).isoformat() if section_dates else None
+
+    # ---------------- Commercial markers ----------------
+    markers = job.get("commercial_markers") or []
+    if not isinstance(markers, list):
+        markers = []
+
+    has_commercial_markers = len(markers) > 0
+    commercial_marker_value = round(sum(_job_detail_money(_job_detail_first_existing(marker, [
+        "value",
+        "amount",
+        "net_value",
+        "netValue",
+        "application_value",
+        "applicationValue",
+        "expected_value",
+        "expectedValue",
+    ], 0)) for marker in markers if isinstance(marker, dict)), 2)
+
+    # ---------------- Workforce ----------------
+    schedule_entries = await _job_detail_collection_list("schedule_entries", {"job_id": job_id, "archived": {"$ne": True}})
+    time_entries = await _job_detail_collection_list("time_entries", {"job_id": job_id, "archived": {"$ne": True}})
+
+    workforce_names = set()
+    worker_ids = set()
+    for entry in schedule_entries + time_entries:
+        worker_name = _job_detail_first_existing(entry, ["worker_name", "workerName", "name"], None)
+        worker_id = _job_detail_first_existing(entry, ["worker_id", "workerId"], None)
+        if worker_name:
+            workforce_names.add(str(worker_name))
+        if worker_id:
+            worker_ids.add(str(worker_id))
+
+    # Pull names for schedule entries because schedule records normally only store worker_id.
+    if worker_ids:
+        workers = await db.workers.find({"id": {"$in": list(worker_ids)}}, {"_id": 0}).to_list(1000)
+        for worker in workers:
+            if worker.get("name"):
+                workforce_names.add(str(worker.get("name")))
+
+    # Also count worker assignments saved directly against Gantt sections.
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        for key in ["assigned_worker_ids", "worker_ids", "workers"]:
+            values = section.get(key) or []
+            if isinstance(values, list):
+                for value in values:
+                    if isinstance(value, dict):
+                        name = value.get("name") or value.get("worker_name") or value.get("workerName") or value.get("id")
+                        if name:
+                            workforce_names.add(str(name))
+                    elif value:
+                        worker_ids.add(str(value))
+
+    has_workforce = bool(workforce_names or worker_ids or schedule_entries or time_entries)
+
+    # ---------------- Materials forecast ----------------
+    material_markers = []
+    for marker in markers:
+        if not isinstance(marker, dict):
+            continue
+        marker_text = " ".join(str(marker.get(key, "")) for key in ["type", "label", "name", "category"]).lower()
+        if "material" in marker_text or "forecast" in marker_text:
+            material_markers.append(marker)
+
+    materials = await _job_detail_collection_list("materials", {"job_id": job_id, "archived": {"$ne": True}})
+
+    has_materials_forecast = bool(material_markers)
+    material_forecast_value = round(sum(_job_detail_money(_job_detail_first_existing(marker, [
+        "forecast_value",
+        "forecastValue",
+        "materials_value",
+        "materialsValue",
+        "material_value",
+        "materialValue",
+        "value",
+        "amount",
+        "net_value",
+        "netValue",
+    ], 0)) for marker in material_markers), 2)
+
+    actual_material_value = round(sum(
+        _job_detail_money(material.get("cost")) * (_job_detail_money(material.get("quantity")) or 1)
+        for material in materials
+    ), 2)
+
+    # ---------------- Purchase orders ----------------
+    purchase_orders = await _job_detail_collection_list("purchase_orders", {"job_id": job_id, "archived": {"$ne": True}})
+
+    def po_net(po: Dict[str, Any]) -> float:
+        value = _job_detail_first_existing(po, ["net_total", "netTotal", "net_value", "netValue", "subtotal", "total_net", "totalNet", "amount", "value"], None)
+        if value not in [None, ""]:
+            return _job_detail_money(value)
+        lines = po.get("lines") or []
+        if isinstance(lines, list):
+            return round(sum(_job_detail_money(_job_detail_first_existing(line, ["net_total", "netTotal", "line_net", "lineNet"], 0)) for line in lines if isinstance(line, dict)), 2)
+        return 0.0
+
+    def po_gross(po: Dict[str, Any]) -> float:
+        value = _job_detail_first_existing(po, ["gross_total", "grossTotal", "gross_value", "grossValue", "total", "total_gross", "totalGross", "grand_total", "grandTotal"], None)
+        if value not in [None, ""]:
+            return _job_detail_money(value)
+        lines = po.get("lines") or []
+        if isinstance(lines, list):
+            return round(sum(_job_detail_money(_job_detail_first_existing(line, ["gross_total", "grossTotal", "line_gross", "lineGross"], 0)) for line in lines if isinstance(line, dict)), 2)
+        return 0.0
+
+    po_net_value = round(sum(po_net(po) for po in purchase_orders), 2)
+    po_gross_value = round(sum(po_gross(po) for po in purchase_orders), 2)
+    if po_gross_value == 0 and po_net_value:
+        po_gross_value = round(po_net_value * 1.2, 2)
+
+    po_status_counts: Dict[str, int] = {}
+    for po in purchase_orders:
+        status = str(_job_detail_first_existing(po, ["status", "approval_status", "approvalStatus"], "Unknown")).strip() or "Unknown"
+        po_status_counts[status] = po_status_counts.get(status, 0) + 1
+
+    has_purchase_orders = len(purchase_orders) > 0
+
+    checklist_items = [
+        has_program,
+        has_commercial_markers,
+        has_workforce,
+        has_materials_forecast,
+        has_purchase_orders,
+    ]
+
+    return {
+        "job": {
+            "id": job_id,
+            "job_number": job.get("job_number"),
+            "name": job_name,
+            "raw_name": raw_job_name,
+            "client": client,
+            "location": location,
+            "status": job.get("status", ""),
+            "start_date": _job_detail_date_to_iso(start_date),
+            "end_date": _job_detail_date_to_iso(end_date),
+            "duration_days": duration_days,
+            "original_value": original_value,
+            "approved_variation_value": approved_variation_value,
+            "pending_variation_value": pending_variation_value,
+            "rejected_variation_value": rejected_variation_value,
+            "revised_value": revised_value,
+        },
+        "checks": {
+            "setup_score": f"{sum(1 for item in checklist_items if item)}/{len(checklist_items)}",
+            "has_program": has_program,
+            "has_commercial_markers": has_commercial_markers,
+            "has_workforce": has_workforce,
+            "has_materials_forecast": has_materials_forecast,
+            "has_purchase_orders": has_purchase_orders,
+        },
+        "programme": {
+            "sections_count": len(sections),
+            "start_date": programme_start,
+            "end_date": programme_end,
+        },
+        "commercial": {
+            "commercial_markers_count": len(markers),
+            "commercial_marker_value": commercial_marker_value,
+            "approved_variations_count": len(approved_variations),
+            "approved_variation_value": approved_variation_value,
+            "pending_variations_count": len(pending_variations),
+            "pending_variation_value": pending_variation_value,
+            "rejected_variations_count": len(rejected_variations),
+            "rejected_variation_value": rejected_variation_value,
+        },
+        "workforce": {
+            "worker_count": len(workforce_names or worker_ids),
+            "scheduled_entries_count": len(schedule_entries),
+            "time_entries_count": len(time_entries),
+            "workers": sorted([worker for worker in workforce_names if worker and worker != "None"]),
+        },
+        "materials": {
+            "forecast_count": len(material_markers),
+            "forecast_value": material_forecast_value,
+            "actual_material_entries_count": len(materials),
+            "actual_material_value": actual_material_value,
+        },
+        "purchase_orders": {
+            "po_count": len(purchase_orders),
+            "po_net_value": po_net_value,
+            "po_gross_value": po_gross_value,
+            "status_counts": po_status_counts,
+        },
+    }
+
 @api_router.put("/jobs/{job_id}", response_model=Job)
 async def update_job(job_id: str, job_update: JobUpdate, admin: str = Depends(verify_admin)):
     """Update job (Admin only)"""

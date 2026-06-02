@@ -2763,6 +2763,16 @@ def _job_detail_days_between(start_value, end_value):
     return max((end - start).days + 1, 0)
 
 
+
+def _job_detail_is_commercial_placeholder(section: Dict[str, Any]) -> bool:
+    section_type = str((section or {}).get("type") or (section or {}).get("section_type") or "").strip().lower()
+    return bool(
+        (section or {}).get("is_commercial_placeholder") is True
+        or (section or {}).get("commercial_placeholder") is True
+        or section_type in ["commercial_placeholder", "placeholder"]
+    )
+
+
 @api_router.get("/jobs/{job_id}/detail-report")
 async def get_job_detail_report(job_id: str, admin: str = Depends(verify_admin)):
     job = await db.jobs.find_one({"id": job_id, "archived": {"$ne": True}}, {"_id": 0})
@@ -2797,9 +2807,39 @@ async def get_job_detail_report(job_id: str, admin: str = Depends(verify_admin))
 
     gantt_sections = job.get("gantt_sections") or []
     commercial_markers = job.get("commercial_markers") or []
+    programme_sections = [section for section in gantt_sections if not _job_detail_is_commercial_placeholder(section)]
+    commercial_placeholder_sections = [section for section in gantt_sections if _job_detail_is_commercial_placeholder(section)]
+
+    def _section_value(section):
+        explicit = _job_detail_money(_job_detail_first(section, ["section_value", "value", "amount", "net_value"], 0))
+        if explicit > 0:
+            return explicit
+        return round(
+            _job_detail_money(section.get("labour_value", 0))
+            + _job_detail_money(section.get("material_value", 0))
+            + _job_detail_money(section.get("subcontractor_value", 0))
+            + _job_detail_money(section.get("other_value", 0)),
+            2,
+        )
+
+    commercial_placeholder_value = round(sum(_section_value(section) for section in commercial_placeholder_sections), 2)
+
+    programme_sections_with_dates = [section for section in programme_sections if _job_detail_first(section, ["start_date", "startDate", "start"], None) and _job_detail_first(section, ["end_date", "endDate", "end"], None)]
+    if not programme_sections and not commercial_placeholder_sections:
+        planning_status = "missing"
+        planning_status_label = "No programme"
+    elif not programme_sections and commercial_placeholder_sections:
+        planning_status = "partial"
+        planning_status_label = "Commercial placeholder only"
+    elif len(programme_sections_with_dates) < len(programme_sections):
+        planning_status = "partial"
+        planning_status_label = "Programme incomplete"
+    else:
+        planning_status = "assigned"
+        planning_status_label = "Operational programme ready"
 
     section_dates = []
-    for section in gantt_sections:
+    for section in programme_sections:
         section_start = _job_detail_parse_date(_job_detail_first(section, ["start_date", "startDate", "start"], None))
         section_end = _job_detail_parse_date(_job_detail_first(section, ["end_date", "endDate", "end"], None))
         if section_start:
@@ -2812,10 +2852,85 @@ async def get_job_detail_report(job_id: str, admin: str = Depends(verify_admin))
     material_entries = await db.materials.find({"job_id": job_id, "archived": {"$ne": True}}, {"_id": 0}).to_list(5000)
     purchase_orders = await db.purchase_orders.find({"job_id": job_id, "archived": {"$ne": True}}, {"_id": 0}).to_list(5000)
 
-    worker_ids = sorted({entry.get("worker_id") for entry in schedule_entries + time_entries if entry.get("worker_id")})
+    # Workforce is now a three-stage status:
+    # missing   = no workforce allocated to the programme
+    # allocated = workers selected/allocated to Gantt sections but not pushed/assigned to schedule
+    # assigned  = workforce has been pushed/assigned to the schedule
+    allocated_worker_ids = set()
+    allocated_worker_names = set()
+    assigned_section_count = 0
+
+    for section in programme_sections:
+        for key in ["assigned_worker_ids", "assignedWorkerIds", "worker_ids", "workerIds", "allocated_worker_ids", "allocatedWorkerIds"]:
+            values = section.get(key)
+            if isinstance(values, list):
+                for value in values:
+                    if value:
+                        allocated_worker_ids.add(str(value))
+
+        for key in ["assigned_workers", "assignedWorkers", "workers", "allocated_workers", "allocatedWorkers"]:
+            values = section.get(key)
+            if isinstance(values, list):
+                for value in values:
+                    if isinstance(value, dict):
+                        worker_id = value.get("id") or value.get("worker_id") or value.get("workerId")
+                        worker_name = value.get("name") or value.get("worker_name") or value.get("workerName")
+                        if worker_id:
+                            allocated_worker_ids.add(str(worker_id))
+                        if worker_name:
+                            allocated_worker_names.add(str(worker_name))
+                    elif value:
+                        allocated_worker_ids.add(str(value))
+
+        schedule_status = str(section.get("schedule_status") or section.get("scheduleStatus") or "").strip().lower()
+        if section.get("sent_to_schedule") is True or section.get("sentToSchedule") is True or schedule_status in ["scheduled", "partial_scheduled", "assigned"]:
+            assigned_section_count += 1
+
+    scheduled_worker_ids = {str(entry.get("worker_id")) for entry in schedule_entries if entry.get("worker_id")}
+    worker_ids = sorted(allocated_worker_ids.union(scheduled_worker_ids))
     workers = await db.workers.find({"id": {"$in": worker_ids}}, {"_id": 0}).to_list(1000) if worker_ids else []
     worker_lookup = {worker.get("id"): worker for worker in workers}
-    worker_names = sorted({worker_lookup.get(worker_id, {}).get("name", worker_id) for worker_id in worker_ids if worker_id})
+    worker_names = sorted({worker_lookup.get(worker_id, {}).get("name", worker_id) for worker_id in worker_ids if worker_id}.union(allocated_worker_names))
+
+    has_workforce_allocated = len(allocated_worker_ids) > 0 or len(allocated_worker_names) > 0
+    has_workforce_assigned = len(schedule_entries) > 0 or assigned_section_count > 0
+    if has_workforce_assigned:
+        workforce_status = "assigned"
+        workforce_status_label = "Assigned"
+    elif has_workforce_allocated:
+        workforce_status = "allocated"
+        workforce_status_label = "Allocated, not assigned"
+    else:
+        workforce_status = "missing"
+        workforce_status_label = "Missing"
+
+    # Job management is also a three-stage status:
+    # missing = neither Manager nor Supervisor assigned
+    # partial = either Manager or Supervisor assigned
+    # assigned = both Manager and Supervisor assigned
+    manager_id = _job_detail_first(job, ["manager_id", "managerId", "project_manager_id", "projectManagerId"], "")
+    manager_name = _job_detail_first(job, ["manager_name", "managerName", "project_manager_name", "projectManagerName"], "")
+    supervisor_id = _job_detail_first(job, ["supervisor_id", "supervisorId"], "")
+    supervisor_name = _job_detail_first(job, ["supervisor_name", "supervisorName"], "")
+
+    def _assigned_person(person_id, person_name):
+        name_value = str(person_name or "").strip().lower()
+        return bool(str(person_id or "").strip()) or (bool(name_value) and name_value not in ["unassigned", "none", "not set", "-"])
+
+    has_manager_assigned = _assigned_person(manager_id, manager_name)
+    has_supervisor_assigned = _assigned_person(supervisor_id, supervisor_name)
+
+    if has_manager_assigned and has_supervisor_assigned:
+        management_status = "assigned"
+        management_status_label = "Manager & Supervisor assigned"
+    elif has_manager_assigned or has_supervisor_assigned:
+        management_status = "partial"
+        management_status_label = "Partially assigned"
+    else:
+        management_status = "missing"
+        management_status_label = "Missing"
+
+    has_management = management_status == "assigned"
 
     material_forecast_value = 0.0
     for marker in commercial_markers:
@@ -2837,12 +2952,12 @@ async def get_job_detail_report(job_id: str, admin: str = Depends(verify_admin))
         status = str(po.get("status") or "Unknown").strip() or "Unknown"
         po_status_counts[status] = po_status_counts.get(status, 0) + 1
 
-    has_program = len(gantt_sections) > 0
-    has_commercial_markers = len(commercial_markers) > 0
-    has_workforce = len(schedule_entries) > 0 or len(time_entries) > 0
+    has_program = planning_status == "assigned"
+    has_commercial_markers = len(commercial_markers) > 0 or len(commercial_placeholder_sections) > 0
+    has_workforce = has_workforce_assigned
     has_materials_forecast = material_forecast_value > 0 or len(material_entries) > 0
     has_purchase_orders = len(purchase_orders) > 0
-    checklist = [has_program, has_commercial_markers, has_workforce, has_materials_forecast, has_purchase_orders]
+    checklist = [has_management, has_program, has_commercial_markers, has_workforce, has_materials_forecast, has_purchase_orders]
 
     return {
         "job": {
@@ -2852,10 +2967,10 @@ async def get_job_detail_report(job_id: str, admin: str = Depends(verify_admin))
             "location": job.get("location", ""),
             "status": job.get("status", ""),
             "division": _job_detail_first(job, ["division", "job_division", "jobDivision"], ""),
-            "manager_id": _job_detail_first(job, ["manager_id", "managerId", "project_manager_id", "projectManagerId"], ""),
-            "manager_name": _job_detail_first(job, ["manager_name", "managerName", "project_manager_name", "projectManagerName"], ""),
-            "supervisor_id": _job_detail_first(job, ["supervisor_id", "supervisorId"], ""),
-            "supervisor_name": _job_detail_first(job, ["supervisor_name", "supervisorName"], ""),
+            "manager_id": manager_id,
+            "manager_name": manager_name,
+            "supervisor_id": supervisor_id,
+            "supervisor_name": supervisor_name,
             "start_date": _job_detail_date_to_iso(start_date),
             "end_date": _job_detail_date_to_iso(end_date),
             "duration_days": duration_days,
@@ -2866,19 +2981,47 @@ async def get_job_detail_report(job_id: str, admin: str = Depends(verify_admin))
         },
         "checks": {
             "setup_score": f"{sum(1 for item in checklist if item)}/{len(checklist)}",
+            "has_management": has_management,
+            "has_manager_assigned": has_manager_assigned,
+            "has_supervisor_assigned": has_supervisor_assigned,
+            "management_status": management_status,
+            "management_status_label": management_status_label,
             "has_program": has_program,
+            "planning_status": planning_status,
+            "planning_status_label": planning_status_label,
             "has_commercial_markers": has_commercial_markers,
             "has_workforce": has_workforce,
+            "has_workforce_allocated": has_workforce_allocated,
+            "has_workforce_assigned": has_workforce_assigned,
+            "workforce_status": workforce_status,
+            "workforce_status_label": workforce_status_label,
             "has_materials_forecast": has_materials_forecast,
             "has_purchase_orders": has_purchase_orders,
         },
+        "management": {
+            "manager_id": manager_id,
+            "manager_name": manager_name,
+            "supervisor_id": supervisor_id,
+            "supervisor_name": supervisor_name,
+            "has_manager_assigned": has_manager_assigned,
+            "has_supervisor_assigned": has_supervisor_assigned,
+            "status": management_status,
+            "status_label": management_status_label,
+        },
         "programme": {
-            "sections_count": len(gantt_sections),
+            "sections_count": len(programme_sections),
+            "total_gantt_items_count": len(gantt_sections),
+            "commercial_placeholder_count": len(commercial_placeholder_sections),
+            "commercial_placeholder_value": commercial_placeholder_value,
+            "planning_status": planning_status,
+            "planning_status_label": planning_status_label,
             "start_date": min(section_dates).isoformat() if section_dates else None,
             "end_date": max(section_dates).isoformat() if section_dates else None,
         },
         "commercial": {
             "commercial_markers_count": len(commercial_markers),
+            "commercial_placeholder_count": len(commercial_placeholder_sections),
+            "commercial_placeholder_value": commercial_placeholder_value,
             "commercial_marker_value": round(sum(_job_detail_money(_job_detail_first(marker, ["value", "amount", "net_value", "application_value"], 0)) for marker in commercial_markers), 2),
             "approved_variations_count": len(approved_variations),
             "approved_variation_value": approved_variation_value,
@@ -2887,8 +3030,12 @@ async def get_job_detail_report(job_id: str, admin: str = Depends(verify_admin))
         },
         "workforce": {
             "worker_count": len(worker_names),
+            "allocated_worker_count": len(allocated_worker_ids) + len(allocated_worker_names),
+            "scheduled_worker_count": len(scheduled_worker_ids),
             "scheduled_entries_count": len(schedule_entries),
             "time_entries_count": len(time_entries),
+            "status": workforce_status,
+            "status_label": workforce_status_label,
             "workers": worker_names,
         },
         "materials": {

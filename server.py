@@ -6033,9 +6033,17 @@ def finance_to_number(value: Any, fallback: float = 0.0) -> float:
     try:
         if value is None or value == "":
             return fallback
+        if isinstance(value, str):
+            value = value.replace("£", "").replace(",", "").strip()
+            if not value:
+                return fallback
         return float(value)
     except (TypeError, ValueError):
         return fallback
+
+
+def finance_round_money(value: Any) -> float:
+    return round(finance_to_number(value, 0.0) + 0.0000001, 2)
 
 
 
@@ -6195,7 +6203,7 @@ def section_planned_value_by_date(section: Dict[str, Any], marker_date: Optional
 
 def normalise_finance_marker(marker: Dict[str, Any]) -> Dict[str, Any]:
     marker_type = str(marker.get("type") or marker.get("marker_type") or "application").strip().lower()
-    if marker_type == "final":
+    if marker_type in ["final", "final_application", "final_invoice"]:
         marker_type = "final_invoice"
     marker_id = marker.get("id") or str(uuid.uuid4())
     label = marker.get("label") or marker.get("name") or marker_type.replace("_", " ").title()
@@ -6204,20 +6212,61 @@ def normalise_finance_marker(marker: Dict[str, Any]) -> Dict[str, Any]:
         deposit_percentage = None
     else:
         deposit_percentage = max(0.0, min(100.0, finance_to_number(raw_deposit_percentage)))
+    value_mode = marker.get("value_mode") or marker.get("value_type") or marker.get("calculationMode") or marker.get("calculation_mode")
+    if not value_mode:
+        value_mode = "manual" if marker.get("manual") is True or marker.get("isManual") is True else "auto"
+    stored_value = finance_round_money(marker.get("net_value", marker.get("netValue", marker.get("value", marker.get("amount", marker.get("manual_value", 0))))))
+    manual_value = finance_round_money(marker.get("manual_value", stored_value if value_mode == "manual" else 0))
     return {
         **marker,
         "id": marker_id,
         "type": marker_type,
+        "marker_type": marker_type,
         "label": label,
-        "date": marker.get("date") or marker.get("marker_date") or "",
-        "value_mode": marker.get("value_mode") or marker.get("value_type") or "auto",
-        "manual_value": finance_to_number(marker.get("manual_value")),
+        "date": marker.get("date") or marker.get("marker_date") or marker.get("expected_date") or marker.get("payment_due_date") or marker.get("retention_due_date") or "",
+        "value_mode": "manual" if value_mode == "manual" else "auto",
+        "value_type": "manual" if value_mode == "manual" else "auto",
+        "calculationMode": "manual" if value_mode == "manual" else "auto",
+        "calculation_mode": "manual" if value_mode == "manual" else "auto",
+        "manual": value_mode == "manual",
+        "isManual": value_mode == "manual",
+        "auto": value_mode != "manual",
+        "isAuto": value_mode != "manual",
+        "manual_value": manual_value,
+        "value": stored_value,
+        "net_value": stored_value,
+        "netValue": stored_value,
+        "gross_value": finance_round_money(marker.get("gross_value", stored_value)),
         "deposit_percentage": deposit_percentage,
         "deduct_deposit": marker.get("deduct_deposit") is True or marker.get("deposit_deduction_enabled") is True or str(marker.get("deduct_deposit", "")).lower() == "true",
         "retention_percent": finance_to_number(marker.get("retention_percent", marker.get("retentionPercent", 0))),
         "notes": marker.get("notes") or "",
+        "status": marker.get("status") or marker.get("payment_status") or "expected",
     }
 
+
+def finance_marker_stored_value(marker: Dict[str, Any]) -> float:
+    return finance_round_money(marker.get("net_value", marker.get("netValue", marker.get("value", marker.get("amount", marker.get("manual_value", 0))))))
+
+
+def finance_marker_is_claimed(marker: Dict[str, Any]) -> bool:
+    status = str(marker.get("status") or marker.get("payment_status") or "").strip().lower()
+    return status in {"claimed", "submitted", "applied", "applied_submitted", "invoiced", "part_received", "part paid", "part_paid", "received", "paid"}
+
+
+def finance_marker_is_fixed(marker: Dict[str, Any]) -> bool:
+    marker_type = marker.get("type")
+    return bool(
+        marker_type in ["deposit", "final_invoice", "retention", "retention_release"]
+        or marker.get("value_mode") == "manual"
+        or marker.get("value_type") == "manual"
+        or marker.get("calculationMode") == "manual"
+        or marker.get("calculation_mode") == "manual"
+        or marker.get("manual") is True
+        or marker.get("isManual") is True
+        or marker.get("locked") is True
+        or finance_marker_is_claimed(marker)
+    )
 
 def finance_contract_value(job: Dict[str, Any], sections: Optional[List[Dict[str, Any]]] = None) -> float:
     section_source = sections if sections is not None else (job.get("gantt_sections") or [])
@@ -6246,11 +6295,40 @@ def build_finance_payment_schedule(job: Dict[str, Any], sections: List[Dict[str,
     contract_value = finance_contract_value(job, sections)
     earned_to_date = sum(section_finance_values(section).get("earned_value", 0.0) for section in sections)
 
-    deposit_total = sum(finance_deposit_marker_value(job, marker, contract_value) for marker in markers if marker.get("type") == "deposit")
-    deposit_recovery_markers = [marker for marker in markers if marker.get("type") in ["application", "interim"] and marker.get("deduct_deposit")]
-    deposit_recovery_each = deposit_total / len(deposit_recovery_markers) if deposit_recovery_markers else 0.0
+    fixed_total = 0.0
+    auto_indexes: List[int] = []
+    for index, marker in enumerate(markers):
+        marker_type = marker.get("type")
+        if marker_type == "deposit":
+            fixed_total += finance_deposit_marker_value(job, marker, contract_value)
+        elif marker_type in ["application", "interim"] and not finance_marker_is_fixed(marker):
+            auto_indexes.append(index)
+        else:
+            fixed_total += finance_marker_stored_value(marker)
 
-    previous_application_cumulative = 0.0
+    if auto_indexes and contract_value > 0:
+        remaining = max(0.0, finance_round_money(contract_value - fixed_total))
+        base = math.floor((remaining / len(auto_indexes)) * 100) / 100
+        allocated = 0.0
+        for i, marker_index in enumerate(auto_indexes):
+            value = finance_round_money(remaining - allocated) if i == len(auto_indexes) - 1 else finance_round_money(base)
+            allocated = finance_round_money(allocated + value)
+            markers[marker_index].update({
+                "value": value,
+                "net_value": value,
+                "netValue": value,
+                "gross_value": value,
+                "manual_value": 0.0,
+                "value_mode": "auto",
+                "value_type": "auto",
+                "calculationMode": "auto",
+                "calculation_mode": "auto",
+                "manual": False,
+                "isManual": False,
+                "auto": True,
+                "isAuto": True,
+            })
+
     previous_application_earned_cumulative = 0.0
     previous_net_payments = 0.0
     rows = []
@@ -6258,7 +6336,7 @@ def build_finance_payment_schedule(job: Dict[str, Any], sections: List[Dict[str,
     for marker in markers:
         marker_type = marker.get("type")
         marker_date = parse_iso_date_safe(marker.get("date"))
-        manual_value = finance_to_number(marker.get("manual_value"))
+        manual_value = finance_to_number(marker.get("manual_value")) or finance_marker_stored_value(marker)
         value_mode = marker.get("value_mode") or "auto"
         cumulative_planned = sum(section_planned_value_by_date(section, marker_date) for section in sections)
         cumulative_earned = sum(min(section_finance_values(section).get("earned_value", 0.0), section_planned_value_by_date(section, marker_date)) for section in sections)
@@ -6270,38 +6348,46 @@ def build_finance_payment_schedule(job: Dict[str, Any], sections: List[Dict[str,
             gross_value = finance_deposit_marker_value(job, marker, contract_value)
             earned_period = gross_value
         elif marker_type in ["application", "interim"]:
-            capped_cumulative = max(0.0, min(contract_value or cumulative_planned, cumulative_planned))
-            capped_earned = max(0.0, min(cumulative_earned, capped_cumulative))
-            gross_value = manual_value if value_mode == "manual" and manual_value > 0 else max(0.0, capped_cumulative - previous_application_cumulative)
+            capped_planned = max(0.0, min(contract_value or cumulative_planned, cumulative_planned))
+            capped_earned = max(0.0, min(contract_value or cumulative_earned, cumulative_earned))
+            stored_value = finance_marker_stored_value(marker)
+            if stored_value > 0:
+                gross_value = stored_value
+            elif value_mode == "manual" and manual_value > 0:
+                gross_value = manual_value
+            else:
+                gross_value = max(0.0, capped_planned - previous_net_payments)
             earned_period = max(0.0, capped_earned - previous_application_earned_cumulative)
-            if marker.get("deduct_deposit"):
-                deposit_deduction = min(gross_value, deposit_recovery_each)
-            previous_application_cumulative = max(previous_application_cumulative, capped_cumulative)
             previous_application_earned_cumulative = max(previous_application_earned_cumulative, capped_earned)
         elif marker_type == "final_invoice":
-            gross_value = manual_value if value_mode == "manual" and manual_value > 0 else max(0.0, contract_value - previous_net_payments)
+            stored_value = finance_marker_stored_value(marker)
+            gross_value = stored_value if stored_value > 0 else (manual_value if value_mode == "manual" and manual_value > 0 else max(0.0, contract_value - previous_net_payments))
             earned_period = max(0.0, earned_to_date - previous_application_earned_cumulative)
+            previous_application_earned_cumulative = max(previous_application_earned_cumulative, earned_to_date)
         elif marker_type == "retention":
             retention_percent = finance_to_number(marker.get("retention_percent"))
             gross_value = manual_value if manual_value > 0 else (contract_value * (retention_percent / 100.0) if retention_percent > 0 else 0.0)
             earned_period = gross_value
         else:
-            gross_value = manual_value if value_mode == "manual" and manual_value > 0 else cumulative_planned
+            stored_value = finance_marker_stored_value(marker)
+            gross_value = manual_value if value_mode == "manual" and manual_value > 0 else (stored_value or cumulative_planned)
             earned_period = min(gross_value, cumulative_earned)
 
         net_value = max(0.0, gross_value - deposit_deduction)
-        net_earned = max(0.0, earned_period - deposit_deduction)
+        net_earned = net_value if marker_type == "deposit" else max(0.0, earned_period - deposit_deduction)
         risk_value = max(0.0, net_value - net_earned)
         previous_net_payments += net_value
 
         rows.append({
             **marker,
-            "gross_value": round(gross_value, 2),
-            "deposit_deduction": round(deposit_deduction, 2),
-            "net_value": round(net_value, 2),
-            "earned_value": round(net_earned, 2),
-            "risk_value": round(risk_value, 2),
-            "contract_value": round(contract_value, 2),
+            "gross_value": finance_round_money(gross_value),
+            "deposit_deduction": finance_round_money(deposit_deduction),
+            "net_value": finance_round_money(net_value),
+            "netValue": finance_round_money(net_value),
+            "value": finance_round_money(net_value),
+            "earned_value": finance_round_money(net_earned),
+            "risk_value": finance_round_money(risk_value),
+            "contract_value": finance_round_money(contract_value),
         })
 
     return rows

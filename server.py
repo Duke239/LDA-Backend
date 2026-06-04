@@ -653,6 +653,7 @@ class GanttShiftProjectRequest(BaseModel):
     shift_schedule: bool = True
     shift_commercial_markers: bool = True
     shift_purchase_orders: bool = True
+    shift_work_orders: bool = True
 
 class GanttShiftSectionRequest(BaseModel):
     job_id: str
@@ -662,6 +663,7 @@ class GanttShiftSectionRequest(BaseModel):
     delta_days: int
     shift_schedule: bool = True
     shift_purchase_orders: bool = True
+    shift_work_orders: bool = True
 
 
 class FinanceRecord(BaseModel):
@@ -731,6 +733,145 @@ class FinanceRecordUpdate(BaseModel):
     notes: Optional[str] = None
     archived: Optional[bool] = None
 
+
+
+# ==================== CONTRACTOR WORK ORDER SYSTEM MODELS ====================
+
+WORK_ORDER_STATUSES = [
+    "draft",
+    "price_received",
+    "accepted",
+    "instructed",
+    "in_progress",
+    "complete",
+    "invoice_received",
+    "paid",
+    "cancelled",
+]
+
+WORK_ORDER_COMMITTED_STATUSES = {
+    "accepted",
+    "instructed",
+    "in_progress",
+    "complete",
+    "invoice_received",
+    "paid",
+}
+
+WORK_ORDER_CANCELLED_STATUSES = {"cancelled", "canceled", "void", "archived", "rejected"}
+
+class WorkOrder(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    wo_number: str = ""
+    job_id: str
+    job_name: str = ""
+    job_number: Optional[int] = None
+    division: str = ""
+    section_id: str = ""
+    section_name: str = ""
+    contractor_id: str = ""
+    contractor_name: str = ""
+    contractor_email: str = ""
+    trade: str = ""
+    description: str = ""
+    pricing_type: str = "fixed_price"  # fixed_price / day_rate / hourly / item_rate
+    quantity: float = 1.0
+    rate: float = 0.0
+    net_amount: float = 0.0
+    vat_rate: float = 20.0
+    vat_amount: float = 0.0
+    gross_amount: float = 0.0
+    cis_applicable: bool = False
+    cis_rate: float = 20.0
+    cis_deduction: float = 0.0
+    payment_requirement: str = "credit_terms"  # credit_terms / proforma / immediate
+    payment_terms_days: int = 30
+    expected_start_date: Optional[str] = None
+    expected_completion_date: Optional[str] = None
+    payment_due_date: Optional[str] = None
+    linked_application_marker_id: str = ""
+    status: str = "price_received"
+    notes: str = ""
+    requested_by_user_id: str = ""
+    requested_by_name: str = ""
+    requested_by_email: str = ""
+    requested_by_role: str = ""
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: Optional[datetime] = None
+    archived: bool = False
+
+class WorkOrderCreate(BaseModel):
+    wo_number: str = ""
+    job_id: str
+    job_name: str = ""
+    job_number: Optional[int] = None
+    division: str = ""
+    section_id: str = ""
+    section_name: str = ""
+    contractor_id: str = ""
+    contractor_name: str = ""
+    contractor_email: str = ""
+    trade: str = ""
+    description: str = ""
+    pricing_type: str = "fixed_price"
+    quantity: float = 1.0
+    rate: float = 0.0
+    net_amount: float = 0.0
+    vat_rate: float = 20.0
+    vat_amount: float = 0.0
+    gross_amount: float = 0.0
+    cis_applicable: bool = False
+    cis_rate: float = 20.0
+    cis_deduction: float = 0.0
+    payment_requirement: str = "credit_terms"
+    payment_terms_days: int = 30
+    expected_start_date: Optional[str] = None
+    expected_completion_date: Optional[str] = None
+    payment_due_date: Optional[str] = None
+    linked_application_marker_id: str = ""
+    status: str = "price_received"
+    notes: str = ""
+    requested_by_user_id: str = ""
+    requested_by_name: str = ""
+    requested_by_email: str = ""
+    requested_by_role: str = ""
+
+class WorkOrderUpdate(BaseModel):
+    wo_number: Optional[str] = None
+    job_id: Optional[str] = None
+    job_name: Optional[str] = None
+    job_number: Optional[int] = None
+    division: Optional[str] = None
+    section_id: Optional[str] = None
+    section_name: Optional[str] = None
+    contractor_id: Optional[str] = None
+    contractor_name: Optional[str] = None
+    contractor_email: Optional[str] = None
+    trade: Optional[str] = None
+    description: Optional[str] = None
+    pricing_type: Optional[str] = None
+    quantity: Optional[float] = None
+    rate: Optional[float] = None
+    net_amount: Optional[float] = None
+    vat_rate: Optional[float] = None
+    vat_amount: Optional[float] = None
+    gross_amount: Optional[float] = None
+    cis_applicable: Optional[bool] = None
+    cis_rate: Optional[float] = None
+    cis_deduction: Optional[float] = None
+    payment_requirement: Optional[str] = None
+    payment_terms_days: Optional[int] = None
+    expected_start_date: Optional[str] = None
+    expected_completion_date: Optional[str] = None
+    payment_due_date: Optional[str] = None
+    linked_application_marker_id: Optional[str] = None
+    status: Optional[str] = None
+    notes: Optional[str] = None
+    requested_by_user_id: Optional[str] = None
+    requested_by_name: Optional[str] = None
+    requested_by_email: Optional[str] = None
+    requested_by_role: Optional[str] = None
+    archived: Optional[bool] = None
 
 # ==================== PURCHASE ORDER SYSTEM MODELS ====================
 
@@ -2851,6 +2992,7 @@ async def get_job_detail_report(job_id: str, admin: str = Depends(verify_admin))
     time_entries = await db.time_entries.find({"job_id": job_id, "archived": {"$ne": True}}, {"_id": 0}).to_list(5000)
     material_entries = await db.materials.find({"job_id": job_id, "archived": {"$ne": True}}, {"_id": 0}).to_list(5000)
     purchase_orders = await db.purchase_orders.find({"job_id": job_id, "archived": {"$ne": True}}, {"_id": 0}).to_list(5000)
+    work_orders = await db.work_orders.find({"job_id": job_id, "archived": {"$ne": True}}, {"_id": 0}).to_list(5000)
 
     # Workforce is now a three-stage status:
     # missing   = no workforce allocated to the programme
@@ -2957,6 +3099,7 @@ async def get_job_detail_report(job_id: str, admin: str = Depends(verify_admin))
     has_workforce = has_workforce_assigned
     has_materials_forecast = material_forecast_value > 0 or len(material_entries) > 0
     has_purchase_orders = len(purchase_orders) > 0
+    has_work_orders = len(work_orders) > 0
     checklist = [has_management, has_program, has_commercial_markers, has_workforce, has_materials_forecast, has_purchase_orders]
 
     return {
@@ -2997,6 +3140,7 @@ async def get_job_detail_report(job_id: str, admin: str = Depends(verify_admin))
             "workforce_status_label": workforce_status_label,
             "has_materials_forecast": has_materials_forecast,
             "has_purchase_orders": has_purchase_orders,
+            "has_work_orders": has_work_orders,
         },
         "management": {
             "manager_id": manager_id,
@@ -3049,6 +3193,12 @@ async def get_job_detail_report(job_id: str, admin: str = Depends(verify_admin))
             "po_net_value": po_net_value,
             "po_gross_value": po_gross_value,
             "status_counts": po_status_counts,
+        },
+        "work_orders": {
+            "wo_count": len(work_orders),
+            "wo_net_value": round(sum(_job_detail_money(wo.get("net_amount", 0)) for wo in work_orders), 2),
+            "wo_gross_value": round(sum(_job_detail_money(wo.get("gross_amount", 0)) for wo in work_orders), 2),
+            "committed_net_value": round(sum(_job_detail_money(wo.get("net_amount", 0)) for wo in work_orders if str(wo.get("status", "")).lower() in WORK_ORDER_COMMITTED_STATUSES), 2),
         },
     }
 
@@ -5275,6 +5425,74 @@ async def _shift_linked_purchase_orders_for_section(job: Dict[str, Any], section
 
     return {"shifted_count": len(shifted), "purchase_orders": shifted}
 
+def _work_order_links_to_section(work_order: Dict[str, Any], section: Dict[str, Any]) -> bool:
+    if not work_order or not section:
+        return False
+    section_id = _normalise_link_value(section.get("id"))
+    section_name = _normalise_link_value(section.get("name"))
+    wo_section_ids = [
+        work_order.get("section_id"),
+        work_order.get("project_section_id"),
+        work_order.get("job_section_id"),
+    ]
+    wo_section_names = [
+        work_order.get("section_name"),
+        work_order.get("project_section_name"),
+        work_order.get("job_section_name"),
+    ]
+    if section_id and any(_normalise_link_value(value) == section_id for value in wo_section_ids):
+        return True
+    if section_name and any(_normalise_link_value(value) == section_name for value in wo_section_names):
+        return True
+    return False
+
+
+def _work_order_status_allows_date_shift(work_order: Dict[str, Any]) -> bool:
+    status = str(work_order.get("status") or "").strip().lower().replace(" ", "_")
+    return status not in WORK_ORDER_CANCELLED_STATUSES and status not in {"paid", "closed"}
+
+
+async def _shift_linked_work_orders_for_section(job: Dict[str, Any], section: Dict[str, Any], delta_days: int) -> Dict[str, Any]:
+    """Shift planned contractor WO dates for WOs linked to a moved section."""
+    if not job or not section or not delta_days:
+        return {"shifted_count": 0, "work_orders": []}
+
+    candidates = await db.work_orders.find({
+        "job_id": job.get("id"),
+        "archived": {"$ne": True},
+    }, {"_id": 0}).to_list(5000)
+
+    shifted = []
+    for work_order in candidates:
+        if not _work_order_status_allows_date_shift(work_order):
+            continue
+        if not _work_order_links_to_section(work_order, section):
+            continue
+
+        update = {"updated_at": datetime.utcnow()}
+        changed = False
+        for date_key in ["expected_start_date", "expected_completion_date", "payment_due_date"]:
+            if work_order.get(date_key):
+                update[date_key] = shift_iso_date(work_order.get(date_key), delta_days)
+                changed = True
+
+        update["last_programme_shift_at"] = datetime.utcnow().isoformat()
+        update["last_programme_shift_days"] = delta_days
+        update["last_programme_shift_section_id"] = section.get("id", "")
+        update["last_programme_shift_section_name"] = section.get("name", "")
+
+        if changed:
+            await db.work_orders.update_one({"id": work_order.get("id")}, {"$set": update})
+            shifted.append({
+                "id": work_order.get("id"),
+                "wo_number": work_order.get("wo_number", ""),
+                "contractor_name": work_order.get("contractor_name", ""),
+                "old_start_date": work_order.get("expected_start_date", ""),
+                "new_start_date": update.get("expected_start_date", work_order.get("expected_start_date", "")),
+            })
+
+    return {"shifted_count": len(shifted), "work_orders": shifted}
+
 async def _build_section_shift_preview(job: Dict[str, Any], section: Dict[str, Any], delta_days: int) -> Dict[str, Any]:
     entries = await _find_linked_section_schedule_entries(job, section)
     worker_ids = list({entry.get("worker_id") for entry in entries if entry.get("worker_id")})
@@ -5421,6 +5639,10 @@ async def shift_gantt_section(request: GanttShiftSectionRequest, admin: str = De
     if request.shift_purchase_orders:
         po_shift_result = await _shift_linked_purchase_orders_for_section(job, section, request.delta_days)
 
+    wo_shift_result = {"shifted_count": 0, "work_orders": []}
+    if request.shift_work_orders:
+        wo_shift_result = await _shift_linked_work_orders_for_section(job, section, request.delta_days)
+
     updated_sections = []
     updated_section = None
     has_blocked = bool(preview.get("blocked_count"))
@@ -5460,6 +5682,8 @@ async def shift_gantt_section(request: GanttShiftSectionRequest, admin: str = De
         "moved_schedule_entry_ids": moved_ids,
         "purchase_orders_shifted": po_shift_result.get("shifted_count", 0),
         "shifted_purchase_orders": po_shift_result.get("purchase_orders", []),
+        "work_orders_shifted": wo_shift_result.get("shifted_count", 0),
+        "shifted_work_orders": wo_shift_result.get("work_orders", []),
         "preview": preview,
     }
 
@@ -5581,6 +5805,14 @@ async def shift_gantt_project(request: GanttShiftProjectRequest, admin: str = De
             purchase_orders_shifted += result.get("shifted_count", 0)
             shifted_purchase_orders.extend(result.get("purchase_orders", []))
 
+    work_orders_shifted = 0
+    shifted_work_orders = []
+    if request.shift_work_orders and request.shift_sections:
+        for original_section in original_sections:
+            result = await _shift_linked_work_orders_for_section(job, dict(original_section), request.delta_days)
+            work_orders_shifted += result.get("shifted_count", 0)
+            shifted_work_orders.extend(result.get("work_orders", []))
+
     update_doc = {
         "planned_start_date": request.planned_start_date,
         "planned_end_date": request.planned_end_date,
@@ -5601,6 +5833,8 @@ async def shift_gantt_project(request: GanttShiftProjectRequest, admin: str = De
         "commercial_markers_shifted": len(updated_markers) if request.shift_commercial_markers else 0,
         "purchase_orders_shifted": purchase_orders_shifted,
         "shifted_purchase_orders": shifted_purchase_orders,
+        "work_orders_shifted": work_orders_shifted,
+        "shifted_work_orders": shifted_work_orders,
         "shifted_schedule_count": shifted_schedule_count,
         "clash_count": len(clashes),
         "clashes": clashes,
@@ -8388,6 +8622,226 @@ async def archive_supplier(supplier_id: str, admin: str = Depends(verify_admin))
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Supplier not found")
     return {"message": "Supplier archived successfully"}
+
+
+
+def normalise_work_order_status(value: Optional[str]) -> str:
+    status = str(value or "price_received").strip().lower().replace(" ", "_").replace("-", "_")
+    aliases = {
+        "price received": "price_received",
+        "quote_received": "price_received",
+        "quoted": "price_received",
+        "in progress": "in_progress",
+        "invoice received": "invoice_received",
+        "complete": "complete",
+        "completed": "complete",
+        "cancelled": "cancelled",
+        "canceled": "cancelled",
+    }
+    status = aliases.get(status, status)
+    return status if status in WORK_ORDER_STATUSES else "price_received"
+
+
+def calculate_work_order_totals(data: Dict[str, Any]) -> Dict[str, Any]:
+    pricing_type = str(data.get("pricing_type") or "fixed_price").strip().lower().replace(" ", "_")
+    if pricing_type not in {"fixed_price", "day_rate", "hourly", "item_rate"}:
+        pricing_type = "fixed_price"
+
+    quantity = max(0.0, finance_to_number(data.get("quantity"), 1.0))
+    rate = max(0.0, finance_to_number(data.get("rate"), 0.0))
+    net_amount = finance_to_number(data.get("net_amount"), 0.0)
+    if net_amount <= 0 and pricing_type in {"day_rate", "hourly", "item_rate"}:
+        net_amount = quantity * rate
+    net_amount = max(0.0, net_amount)
+
+    vat_rate = max(0.0, finance_to_number(data.get("vat_rate"), 20.0))
+    vat_amount = finance_to_number(data.get("vat_amount"), 0.0)
+    if vat_amount <= 0 and vat_rate > 0:
+        vat_amount = net_amount * (vat_rate / 100)
+    gross_amount = finance_to_number(data.get("gross_amount"), 0.0)
+    if gross_amount <= 0:
+        gross_amount = net_amount + vat_amount
+
+    cis_applicable = bool(data.get("cis_applicable"))
+    cis_rate = max(0.0, min(100.0, finance_to_number(data.get("cis_rate"), 20.0))) if cis_applicable else 0.0
+    cis_deduction = finance_to_number(data.get("cis_deduction"), 0.0)
+    if cis_applicable and cis_deduction <= 0:
+        cis_deduction = net_amount * (cis_rate / 100)
+
+    payment_terms_days = int(finance_to_number(data.get("payment_terms_days"), 30))
+    payment_requirement = str(data.get("payment_requirement") or "credit_terms").strip().lower()
+    if payment_requirement not in {"credit_terms", "proforma", "immediate"}:
+        payment_requirement = "credit_terms"
+
+    if not data.get("payment_due_date") and data.get("expected_completion_date"):
+        try:
+            completion = datetime.fromisoformat(str(data.get("expected_completion_date"))[:10])
+            if payment_requirement in {"proforma", "immediate"}:
+                data["payment_due_date"] = completion.date().isoformat()
+            else:
+                data["payment_due_date"] = (completion + timedelta(days=payment_terms_days)).date().isoformat()
+        except Exception:
+            pass
+
+    data["pricing_type"] = pricing_type
+    data["quantity"] = quantity
+    data["rate"] = rate
+    data["net_amount"] = round(net_amount, 2)
+    data["vat_rate"] = vat_rate
+    data["vat_amount"] = round(vat_amount, 2)
+    data["gross_amount"] = round(gross_amount, 2)
+    data["cis_applicable"] = cis_applicable
+    data["cis_rate"] = cis_rate
+    data["cis_deduction"] = round(cis_deduction, 2)
+    data["payment_requirement"] = payment_requirement
+    data["payment_terms_days"] = payment_terms_days
+    data["status"] = normalise_work_order_status(data.get("status"))
+    data["is_committed_cost"] = data["status"] in WORK_ORDER_COMMITTED_STATUSES
+    return data
+
+
+async def get_next_work_order_number() -> str:
+    today_prefix = f"WO-{datetime.utcnow().strftime('%Y%m%d')}-"
+    latest = await db.work_orders.find_one({"wo_number": {"$regex": f"^{today_prefix}"}}, sort=[("wo_number", -1)])
+    if latest and latest.get("wo_number"):
+        try:
+            next_number = int(str(latest["wo_number"]).split("-")[-1]) + 1
+        except Exception:
+            next_number = 1
+    else:
+        next_number = 1
+    return f"{today_prefix}{next_number:03d}"
+
+
+async def enrich_work_order_job_and_contractor(data: Dict[str, Any]) -> Dict[str, Any]:
+    job_id = str(data.get("job_id") or "").strip()
+    if not job_id:
+        raise HTTPException(status_code=400, detail="job_id is required")
+
+    job = await db.jobs.find_one({"id": job_id, "archived": {"$ne": True}}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    data["job_id"] = job_id
+    data["job_name"] = data.get("job_name") or job.get("display_name") or job.get("name", "")
+    data["job_number"] = data.get("job_number") if data.get("job_number") is not None else job.get("job_number")
+    data["division"] = data.get("division") or job.get("division", "")
+
+    section_id = str(data.get("section_id") or "").strip()
+    if section_id:
+        section = next((item for item in job.get("gantt_sections") or [] if str(item.get("id")) == section_id), None)
+        if section:
+            data["section_name"] = data.get("section_name") or section.get("name", "")
+            data["expected_start_date"] = data.get("expected_start_date") or section.get("start_date")
+            data["expected_completion_date"] = data.get("expected_completion_date") or section.get("end_date")
+
+    contractor_id = str(data.get("contractor_id") or "").strip()
+    if contractor_id:
+        contractor = await db.workers.find_one({"id": contractor_id, "archived": {"$ne": True}}, {"_id": 0})
+        if contractor:
+            data["contractor_name"] = data.get("contractor_name") or contractor.get("name", "")
+            data["contractor_email"] = data.get("contractor_email") or contractor.get("email", "")
+            if not data.get("trade"):
+                trades = contractor.get("trades") or []
+                data["trade"] = trades[0] if trades else contractor.get("trade", "")
+
+    return data
+
+
+@api_router.get("/work-orders")
+async def get_work_orders(
+    status: Optional[str] = Query(None),
+    job_id: Optional[str] = Query(None),
+    contractor_id: Optional[str] = Query(None),
+    section_id: Optional[str] = Query(None),
+    committed_only: bool = Query(False),
+    include_cancelled: bool = Query(True),
+    admin: str = Depends(verify_admin),
+):
+    filter_dict: Dict[str, Any] = {"archived": {"$ne": True}}
+    if status:
+        filter_dict["status"] = normalise_work_order_status(status)
+    elif not include_cancelled:
+        filter_dict["status"] = {"$nin": list(WORK_ORDER_CANCELLED_STATUSES)}
+    if committed_only:
+        filter_dict["status"] = {"$in": list(WORK_ORDER_COMMITTED_STATUSES)}
+    if job_id:
+        filter_dict["job_id"] = job_id
+    if contractor_id:
+        filter_dict["contractor_id"] = contractor_id
+    if section_id:
+        filter_dict["section_id"] = section_id
+    return await db.work_orders.find(filter_dict, {"_id": 0}).sort("created_at", -1).to_list(5000)
+
+
+@api_router.get("/jobs/{job_id}/work-orders")
+async def get_job_work_orders(job_id: str, include_cancelled: bool = Query(False), admin: str = Depends(verify_admin)):
+    filter_dict: Dict[str, Any] = {"job_id": job_id, "archived": {"$ne": True}}
+    if not include_cancelled:
+        filter_dict["status"] = {"$nin": list(WORK_ORDER_CANCELLED_STATUSES)}
+    return await db.work_orders.find(filter_dict, {"_id": 0}).sort("created_at", -1).to_list(5000)
+
+
+@api_router.get("/work-orders/{work_order_id}", response_model=WorkOrder)
+async def get_work_order(work_order_id: str, admin: str = Depends(verify_admin)):
+    work_order = await db.work_orders.find_one({"id": work_order_id, "archived": {"$ne": True}}, {"_id": 0})
+    if not work_order:
+        raise HTTPException(status_code=404, detail="Work order not found")
+    return WorkOrder(**work_order)
+
+
+@api_router.post("/work-orders", response_model=WorkOrder)
+async def create_work_order(work_order: WorkOrderCreate, admin: str = Depends(verify_admin)):
+    data = work_order.dict()
+    data = await enrich_work_order_job_and_contractor(data)
+    data = calculate_work_order_totals(data)
+    if not data.get("wo_number"):
+        data["wo_number"] = await get_next_work_order_number()
+    obj = WorkOrder(**data)
+    await db.work_orders.insert_one(obj.dict())
+    return obj
+
+
+@api_router.put("/work-orders/{work_order_id}", response_model=WorkOrder)
+async def update_work_order(work_order_id: str, update: WorkOrderUpdate, admin: str = Depends(verify_admin)):
+    existing = await db.work_orders.find_one({"id": work_order_id, "archived": {"$ne": True}}, {"_id": 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Work order not found")
+
+    update_data = {k: v for k, v in update.dict().items() if v is not None}
+    if not update_data:
+        return WorkOrder(**existing)
+
+    merged = {**existing, **update_data}
+    merged = await enrich_work_order_job_and_contractor(merged)
+    merged = calculate_work_order_totals(merged)
+    merged["updated_at"] = datetime.utcnow()
+
+    await db.work_orders.update_one({"id": work_order_id}, {"$set": merged})
+    updated = await db.work_orders.find_one({"id": work_order_id}, {"_id": 0})
+    return WorkOrder(**updated)
+
+
+@api_router.put("/work-orders/{work_order_id}/archive")
+async def archive_work_order(work_order_id: str, admin: str = Depends(verify_admin)):
+    result = await db.work_orders.update_one(
+        {"id": work_order_id},
+        {"$set": {"archived": True, "status": "cancelled", "updated_at": datetime.utcnow()}},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Work order not found")
+    return {"success": True, "message": "Work order archived"}
+
+
+@api_router.delete("/work-orders/{work_order_id}")
+async def delete_work_order(work_order_id: str, admin: str = Depends(verify_admin)):
+    result = await db.work_orders.update_one(
+        {"id": work_order_id},
+        {"$set": {"archived": True, "status": "cancelled", "updated_at": datetime.utcnow()}},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Work order not found")
+    return {"success": True, "message": "Work order deleted"}
 
 
 @api_router.get("/purchase-orders")

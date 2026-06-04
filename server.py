@@ -7304,6 +7304,47 @@ async def get_company_finance_dashboard():
         serialized["status"] = calculate_dashboard_finance_status(serialized)
         all_records.append(serialized)
 
+    # Contractor Work Orders are outgoing committed costs. They are kept separate
+    # from income/application records so FinancePage can show contractor spend
+    # without mixing it into client cash-in totals.
+    work_orders = await db.work_orders.find({
+        "archived": {"$ne": True},
+        "status": {"$nin": list(WORK_ORDER_CANCELLED_STATUSES)},
+    }, {"_id": 0}).sort("payment_due_date", 1).to_list(5000)
+
+    contractor_cost_records = []
+    for work_order in work_orders:
+        status_key = str(work_order.get("status") or "").strip().lower()
+        is_committed = status_key in WORK_ORDER_COMMITTED_STATUSES
+        due_date = work_order.get("payment_due_date") or work_order.get("expected_completion_date") or work_order.get("expected_start_date")
+        due_date_obj = parse_iso_date_safe(due_date)
+        in_next_4_weeks = bool(due_date_obj and today <= due_date_obj <= lookahead_end)
+        is_overdue = bool(due_date_obj and due_date_obj < today and status_key not in {"paid", "complete"})
+
+        contractor_cost_records.append({
+            "id": work_order.get("id", ""),
+            "wo_number": work_order.get("wo_number", ""),
+            "job_id": work_order.get("job_id", ""),
+            "job_name": work_order.get("job_name", ""),
+            "section_id": work_order.get("section_id", ""),
+            "section_name": work_order.get("section_name", ""),
+            "contractor_id": work_order.get("contractor_id", ""),
+            "contractor_name": work_order.get("contractor_name", ""),
+            "trade": work_order.get("trade", ""),
+            "description": work_order.get("description", ""),
+            "status": work_order.get("status", ""),
+            "is_committed": is_committed,
+            "net_amount": round(finance_to_number(work_order.get("net_amount")), 2),
+            "vat_amount": round(finance_to_number(work_order.get("vat_amount")), 2),
+            "gross_amount": round(finance_to_number(work_order.get("gross_amount")), 2),
+            "cis_deduction": round(finance_to_number(work_order.get("cis_deduction")), 2),
+            "payment_due_date": due_date,
+            "expected_start_date": work_order.get("expected_start_date"),
+            "expected_completion_date": work_order.get("expected_completion_date"),
+            "in_next_4_weeks": in_next_4_weeks,
+            "is_overdue": is_overdue,
+        })
+
     weeks = []
 
     for i in range(4):
@@ -7370,12 +7411,24 @@ async def get_company_finance_dashboard():
         if record_date and today <= record_date <= lookahead_end:
             future_records.append(record)
 
+    contractor_committed = [record for record in contractor_cost_records if record.get("is_committed")]
+    contractor_next_4_weeks = [record for record in contractor_committed if record.get("in_next_4_weeks")]
+    contractor_overdue = [record for record in contractor_committed if record.get("is_overdue")]
+
     summary = {
         "expected_next_4_weeks": round(sum(dashboard_finance_to_float(r.get("expected_amount")) for r in future_records), 2),
         "anticipated_next_4_weeks": round(sum(dashboard_finance_to_float(r.get("anticipated_amount"), dashboard_finance_to_float(r.get("expected_amount"))) for r in future_records), 2),
         "received_next_4_weeks": round(sum(dashboard_finance_to_float(r.get("received_amount")) for r in received_records), 2),
         "at_risk_next_4_weeks": round(sum(dashboard_finance_to_float(r.get("anticipated_amount"), dashboard_finance_to_float(r.get("expected_amount"))) for r in at_risk_records), 2),
         "overdue_next_4_weeks": round(sum(dashboard_finance_to_float(r.get("anticipated_amount"), dashboard_finance_to_float(r.get("expected_amount"))) for r in overdue_records), 2),
+        "contractor_committed_net_total": round(sum(record.get("net_amount", 0) for record in contractor_committed), 2),
+        "contractor_committed_gross_total": round(sum(record.get("gross_amount", 0) for record in contractor_committed), 2),
+        "contractor_due_next_4_weeks_net": round(sum(record.get("net_amount", 0) for record in contractor_next_4_weeks), 2),
+        "contractor_due_next_4_weeks_gross": round(sum(record.get("gross_amount", 0) for record in contractor_next_4_weeks), 2),
+        "contractor_overdue_net": round(sum(record.get("net_amount", 0) for record in contractor_overdue), 2),
+        "contractor_overdue_gross": round(sum(record.get("gross_amount", 0) for record in contractor_overdue), 2),
+        "work_order_count": len(contractor_cost_records),
+        "committed_work_order_count": len(contractor_committed),
         "record_count": len(all_records),
     }
 
@@ -7383,6 +7436,19 @@ async def get_company_finance_dashboard():
         "summary": summary,
         "weeks": weeks,
         "records": all_records,
+        "work_orders": contractor_cost_records,
+        "contractor_costs": {
+            "records": contractor_cost_records,
+            "committed_records": contractor_committed,
+            "next_4_weeks_records": contractor_next_4_weeks,
+            "overdue_records": contractor_overdue,
+            "committed_net_total": summary["contractor_committed_net_total"],
+            "committed_gross_total": summary["contractor_committed_gross_total"],
+            "due_next_4_weeks_net": summary["contractor_due_next_4_weeks_net"],
+            "due_next_4_weeks_gross": summary["contractor_due_next_4_weeks_gross"],
+            "overdue_net": summary["contractor_overdue_net"],
+            "overdue_gross": summary["contractor_overdue_gross"],
+        },
     }
 
 # ==================== PURCHASE ORDER SYSTEM ====================

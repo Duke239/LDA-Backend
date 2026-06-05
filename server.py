@@ -739,13 +739,18 @@ class FinanceRecordUpdate(BaseModel):
 
 WORK_ORDER_STATUSES = [
     "draft",
+    "price_requested",
     "price_received",
     "accepted",
     "instructed",
     "in_progress",
     "complete",
+    "awaiting_sign_off",
     "invoice_received",
+    "part_paid",
+    "retention_held",
     "paid",
+    "closed",
     "cancelled",
 ]
 
@@ -754,8 +759,12 @@ WORK_ORDER_COMMITTED_STATUSES = {
     "instructed",
     "in_progress",
     "complete",
+    "awaiting_sign_off",
     "invoice_received",
+    "part_paid",
+    "retention_held",
     "paid",
+    "closed",
 }
 
 WORK_ORDER_CANCELLED_STATUSES = {"cancelled", "canceled", "void", "archived", "rejected"}
@@ -789,6 +798,11 @@ class WorkOrder(BaseModel):
     expected_start_date: Optional[str] = None
     expected_completion_date: Optional[str] = None
     payment_due_date: Optional[str] = None
+    payment_schedule_mode: str = "single"  # single / weekly / monthly / manual / milestone
+    retention_percent: float = 0.0
+    retention_release_rule: str = "manual"  # manual / supervisor_sign_off / defects_period / client_payment_received
+    retention_release_date: Optional[str] = None
+    payment_schedule: List[Dict[str, Any]] = []
     linked_application_marker_id: str = ""
     status: str = "price_received"
     notes: str = ""
@@ -828,6 +842,11 @@ class WorkOrderCreate(BaseModel):
     expected_start_date: Optional[str] = None
     expected_completion_date: Optional[str] = None
     payment_due_date: Optional[str] = None
+    payment_schedule_mode: str = "single"  # single / weekly / monthly / manual / milestone
+    retention_percent: float = 0.0
+    retention_release_rule: str = "manual"  # manual / supervisor_sign_off / defects_period / client_payment_received
+    retention_release_date: Optional[str] = None
+    payment_schedule: List[Dict[str, Any]] = []
     linked_application_marker_id: str = ""
     status: str = "price_received"
     notes: str = ""
@@ -864,6 +883,11 @@ class WorkOrderUpdate(BaseModel):
     expected_start_date: Optional[str] = None
     expected_completion_date: Optional[str] = None
     payment_due_date: Optional[str] = None
+    payment_schedule_mode: Optional[str] = None
+    retention_percent: Optional[float] = None
+    retention_release_rule: Optional[str] = None
+    retention_release_date: Optional[str] = None
+    payment_schedule: Optional[List[Dict[str, Any]]] = None
     linked_application_marker_id: Optional[str] = None
     status: Optional[str] = None
     notes: Optional[str] = None
@@ -8698,19 +8722,78 @@ async def archive_supplier(supplier_id: str, admin: str = Depends(verify_admin))
 def normalise_work_order_status(value: Optional[str]) -> str:
     status = str(value or "price_received").strip().lower().replace(" ", "_").replace("-", "_")
     aliases = {
+        "price requested": "price_requested",
+        "awaiting_price": "price_requested",
         "price received": "price_received",
         "quote_received": "price_received",
         "quoted": "price_received",
         "in progress": "in_progress",
+        "awaiting sign off": "awaiting_sign_off",
+        "awaiting_signoff": "awaiting_sign_off",
+        "sign_off": "awaiting_sign_off",
         "invoice received": "invoice_received",
+        "part paid": "part_paid",
+        "retention held": "retention_held",
         "complete": "complete",
         "completed": "complete",
+        "closed": "closed",
         "cancelled": "cancelled",
         "canceled": "cancelled",
     }
     status = aliases.get(status, status)
     return status if status in WORK_ORDER_STATUSES else "price_received"
 
+
+
+def normalise_work_order_payment_schedule(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    raw_lines = data.get("payment_schedule")
+    if not isinstance(raw_lines, list):
+        raw_lines = []
+
+    vat_rate = max(0.0, finance_to_number(data.get("vat_rate"), 20.0))
+    cis_applicable = bool(data.get("cis_applicable"))
+    cis_rate = max(0.0, min(100.0, finance_to_number(data.get("cis_rate"), 20.0))) if cis_applicable else 0.0
+    cleaned: List[Dict[str, Any]] = []
+
+    for index, line in enumerate(raw_lines, start=1):
+        if not isinstance(line, dict):
+            continue
+        net_amount = round(max(0.0, finance_to_number(line.get("net_amount"), 0.0)), 2)
+        vat_amount = finance_to_number(line.get("vat_amount"), 0.0)
+        if vat_amount <= 0 and net_amount > 0 and vat_rate > 0:
+            vat_amount = net_amount * (vat_rate / 100)
+        gross_amount = finance_to_number(line.get("gross_amount"), 0.0)
+        if gross_amount <= 0 and net_amount > 0:
+            gross_amount = net_amount + vat_amount
+        cis_deduction = finance_to_number(line.get("cis_deduction"), 0.0)
+        if cis_applicable and cis_deduction <= 0 and net_amount > 0:
+            cis_deduction = net_amount * (cis_rate / 100)
+        retention_amount = finance_to_number(line.get("retention_amount"), 0.0)
+        cash_amount = finance_to_number(line.get("cash_amount"), 0.0)
+        if cash_amount <= 0 and (gross_amount > 0 or retention_amount != 0):
+            cash_amount = gross_amount - cis_deduction - retention_amount
+
+        status = str(line.get("status") or "not_due").strip().lower().replace(" ", "_").replace("-", "_")
+        if status not in {"not_due", "invoice_expected", "invoice_received", "approved", "part_paid", "paid", "held", "retention_release_due"}:
+            status = "not_due"
+
+        cleaned.append({
+            "id": str(line.get("id") or f"line-{index}"),
+            "label": str(line.get("label") or f"Payment {index}"),
+            "due_date": str(line.get("due_date") or "")[:10],
+            "percentage": finance_to_number(line.get("percentage"), 0.0),
+            "net_amount": round(net_amount, 2),
+            "vat_amount": round(vat_amount, 2),
+            "gross_amount": round(gross_amount, 2),
+            "cis_deduction": round(cis_deduction, 2),
+            "retention_amount": round(retention_amount, 2),
+            "cash_amount": round(cash_amount, 2),
+            "status": status,
+            "is_retention_release": bool(line.get("is_retention_release")),
+            "notes": str(line.get("notes") or ""),
+        })
+
+    return cleaned
 
 def calculate_work_order_totals(data: Dict[str, Any]) -> Dict[str, Any]:
     pricing_type = str(data.get("pricing_type") or "fixed_price").strip().lower().replace(" ", "_")
@@ -8765,6 +8848,17 @@ def calculate_work_order_totals(data: Dict[str, Any]) -> Dict[str, Any]:
     data["cis_deduction"] = round(cis_deduction, 2)
     data["payment_requirement"] = payment_requirement
     data["payment_terms_days"] = payment_terms_days
+    payment_schedule_mode = str(data.get("payment_schedule_mode") or "single").strip().lower().replace(" ", "_").replace("-", "_")
+    if payment_schedule_mode not in {"single", "weekly", "monthly", "manual", "milestone"}:
+        payment_schedule_mode = "single"
+    data["payment_schedule_mode"] = payment_schedule_mode
+    data["retention_percent"] = max(0.0, min(100.0, finance_to_number(data.get("retention_percent"), 0.0)))
+    retention_release_rule = str(data.get("retention_release_rule") or "manual").strip().lower().replace(" ", "_").replace("-", "_")
+    if retention_release_rule not in {"manual", "supervisor_sign_off", "defects_period", "client_payment_received"}:
+        retention_release_rule = "manual"
+    data["retention_release_rule"] = retention_release_rule
+    data["retention_release_date"] = str(data.get("retention_release_date") or "")[:10] or None
+    data["payment_schedule"] = normalise_work_order_payment_schedule(data)
     data["status"] = normalise_work_order_status(data.get("status"))
     data["is_committed_cost"] = data["status"] in WORK_ORDER_COMMITTED_STATUSES
     return data

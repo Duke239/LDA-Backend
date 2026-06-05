@@ -8745,10 +8745,152 @@ def normalise_work_order_status(value: Optional[str]) -> str:
 
 
 
+
+def work_order_date_to_iso(value: Any) -> str:
+    raw = str(value or "").strip()[:10]
+    if not raw:
+        return ""
+    try:
+        return datetime.fromisoformat(raw).date().isoformat()
+    except Exception:
+        return raw
+
+
+def work_order_get_friday_on_or_after(value: Any) -> str:
+    iso = work_order_date_to_iso(value) or datetime.utcnow().date().isoformat()
+    start = datetime.fromisoformat(iso)
+    days_until_friday = (4 - start.weekday()) % 7
+    return (start + timedelta(days=days_until_friday)).date().isoformat()
+
+
+def work_order_add_months(date_value: datetime, months: int) -> datetime:
+    month = date_value.month - 1 + months
+    year = date_value.year + month // 12
+    month = month % 12 + 1
+    day = min(date_value.day, 28)
+    return date_value.replace(year=year, month=month, day=day)
+
+
+def build_default_work_order_payment_schedule(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Build default WO payment lines server-side so finance still works if the UI only sends a mode."""
+    mode = str(data.get("payment_schedule_mode") or "single").strip().lower().replace(" ", "_").replace("-", "_")
+    if mode not in {"single", "weekly", "monthly", "manual", "milestone"}:
+        mode = "single"
+
+    net_total = round(max(0.0, finance_to_number(data.get("net_amount"), 0.0)), 2)
+    if net_total <= 0:
+        return []
+
+    vat_rate = max(0.0, finance_to_number(data.get("vat_rate"), 20.0))
+    cis_applicable = bool(data.get("cis_applicable"))
+    cis_rate = max(0.0, min(100.0, finance_to_number(data.get("cis_rate"), 20.0))) if cis_applicable else 0.0
+    retention_percent = max(0.0, min(100.0, finance_to_number(data.get("retention_percent"), 0.0)))
+
+    start_iso = work_order_date_to_iso(data.get("expected_start_date") or data.get("payment_due_date") or datetime.utcnow().date().isoformat())
+    completion_iso = work_order_date_to_iso(data.get("expected_completion_date") or data.get("payment_due_date") or start_iso)
+    due_fallback = work_order_date_to_iso(data.get("payment_due_date") or completion_iso or start_iso)
+    release_date = work_order_date_to_iso(data.get("retention_release_date"))
+
+    due_dates: List[str] = []
+    try:
+        start = datetime.fromisoformat(start_iso)
+        completion = datetime.fromisoformat(completion_iso)
+    except Exception:
+        start = datetime.utcnow()
+        completion = start
+
+    if mode == "weekly":
+        cursor = datetime.fromisoformat(work_order_get_friday_on_or_after(start_iso))
+        while cursor <= completion or not due_dates:
+            due_dates.append(cursor.date().isoformat())
+            cursor += timedelta(days=7)
+            if len(due_dates) > 104:
+                break
+    elif mode == "monthly":
+        cursor = start.replace(day=min(28, start.day))
+        while cursor <= completion or not due_dates:
+            due_dates.append(cursor.date().isoformat())
+            cursor = work_order_add_months(cursor, 1)
+            if len(due_dates) > 36:
+                break
+    elif mode == "milestone":
+        due_dates = [item for item in [start_iso, completion_iso] if item]
+    else:
+        due_dates = [due_fallback]
+
+    unique_dates: List[str] = []
+    for item in due_dates:
+        if item and item not in unique_dates:
+            unique_dates.append(item)
+    if not unique_dates:
+        unique_dates = [due_fallback or datetime.utcnow().date().isoformat()]
+
+    split_count = max(1, len(unique_dates))
+    remaining_net = net_total
+    remaining_retention = round(net_total * (retention_percent / 100), 2)
+    lines: List[Dict[str, Any]] = []
+
+    for index, due_date in enumerate(unique_dates, start=1):
+        is_last = index == len(unique_dates)
+        net = round(remaining_net, 2) if is_last else round(net_total / split_count, 2)
+        remaining_net = round(remaining_net - net, 2)
+        vat = round(net * (vat_rate / 100), 2)
+        gross = round(net + vat, 2)
+        cis = round(net * (cis_rate / 100), 2)
+        retention = round(remaining_retention, 2) if is_last else round(net * (retention_percent / 100), 2)
+        remaining_retention = round(remaining_retention - retention, 2)
+        if mode == "weekly":
+            label = f"Week {index} invoice"
+        elif mode == "monthly":
+            label = f"Month {index} invoice"
+        elif mode == "milestone":
+            label = "Start milestone" if index == 1 else "Completion milestone"
+        else:
+            label = "Main payment"
+        lines.append({
+            "id": f"line-{index}",
+            "label": label,
+            "due_date": due_date,
+            "percentage": round((net / max(1.0, net_total)) * 100, 2),
+            "net_amount": net,
+            "vat_amount": vat,
+            "gross_amount": gross,
+            "cis_deduction": cis,
+            "retention_amount": retention,
+            "cash_amount": round(gross - cis - retention, 2),
+            "status": "invoice_expected",
+            "is_retention_release": False,
+            "notes": "",
+        })
+
+    retention_total = round(net_total * (retention_percent / 100), 2)
+    if retention_total > 0:
+        lines.append({
+            "id": "retention-release",
+            "label": "Retention release",
+            "due_date": release_date,
+            "percentage": 0,
+            "net_amount": 0,
+            "vat_amount": 0,
+            "gross_amount": 0,
+            "cis_deduction": 0,
+            "retention_amount": -retention_total,
+            "cash_amount": retention_total,
+            "status": "retention_release_due" if release_date else "held",
+            "is_retention_release": True,
+            "notes": str(data.get("retention_release_rule") or "Release after sign-off"),
+        })
+
+    return lines
+
 def normalise_work_order_payment_schedule(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     raw_lines = data.get("payment_schedule")
     if not isinstance(raw_lines, list):
         raw_lines = []
+    # If the UI sends only a payment mode (for example weekly) but no lines, build
+    # the schedule here so the saved WO and Finance cashflow both have staged payments.
+    if not raw_lines:
+        raw_lines = build_default_work_order_payment_schedule(data)
 
     vat_rate = max(0.0, finance_to_number(data.get("vat_rate"), 20.0))
     cis_applicable = bool(data.get("cis_applicable"))

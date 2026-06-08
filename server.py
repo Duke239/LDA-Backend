@@ -515,6 +515,85 @@ async def apply_client_defaults_to_job_data(job_data: Dict[str, Any], force_refr
             job_data[key] = defaults.get(key)
     return job_data
 
+
+# ==================== SUBCONTRACTOR SYSTEM MODELS ====================
+
+class SubcontractorCompany(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    company_name: str
+    contact_name: str = ""
+    email: str = ""
+    phone: str = ""
+    trades: List[str] = []
+    cis_registered: bool = False
+    utr_number: str = ""
+    insurance_expiry: Optional[str] = None
+    notes: str = ""
+    active: bool = True
+    archived: bool = False
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: Optional[datetime] = None
+
+class SubcontractorCompanyCreate(BaseModel):
+    company_name: str
+    contact_name: str = ""
+    email: str = ""
+    phone: str = ""
+    trades: List[str] = []
+    cis_registered: bool = False
+    utr_number: str = ""
+    insurance_expiry: Optional[str] = None
+    notes: str = ""
+    active: bool = True
+
+class SubcontractorCompanyUpdate(BaseModel):
+    company_name: Optional[str] = None
+    contact_name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    trades: Optional[List[str]] = None
+    cis_registered: Optional[bool] = None
+    utr_number: Optional[str] = None
+    insurance_expiry: Optional[str] = None
+    notes: Optional[str] = None
+    active: Optional[bool] = None
+    archived: Optional[bool] = None
+
+class SubcontractorResource(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    subcontractor_id: str
+    name: str
+    trade: str = ""
+    capacity: int = 1
+    phone: str = ""
+    email: str = ""
+    notes: str = ""
+    active: bool = True
+    archived: bool = False
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: Optional[datetime] = None
+
+class SubcontractorResourceCreate(BaseModel):
+    subcontractor_id: str = ""
+    name: str
+    trade: str = ""
+    capacity: int = 1
+    phone: str = ""
+    email: str = ""
+    notes: str = ""
+    active: bool = True
+
+class SubcontractorResourceUpdate(BaseModel):
+    subcontractor_id: Optional[str] = None
+    name: Optional[str] = None
+    trade: Optional[str] = None
+    capacity: Optional[int] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    notes: Optional[str] = None
+    active: Optional[bool] = None
+    archived: Optional[bool] = None
+
 class GPSLocation(BaseModel):
     latitude: float
     longitude: float
@@ -591,7 +670,10 @@ class MaterialUpdate(BaseModel):
 
 class ScheduleEntry(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    worker_id: str
+    worker_id: Optional[str] = ""
+    resource_type: str = "worker"  # worker / subcontractor_resource
+    resource_id: Optional[str] = None
+    display_worker_name: str = ""
     job_id: Optional[str] = None
     scheduled_date: str  # YYYY-MM-DD
     notes: str = ""
@@ -607,7 +689,10 @@ class ScheduleEntry(BaseModel):
     updated_date: Optional[datetime] = None
 
 class ScheduleEntryCreate(BaseModel):
-    worker_id: str
+    worker_id: Optional[str] = ""
+    resource_type: str = "worker"
+    resource_id: Optional[str] = None
+    display_worker_name: str = ""
     job_id: Optional[str] = None
     scheduled_date: str  # YYYY-MM-DD
     notes: str = ""
@@ -622,6 +707,9 @@ class ScheduleEntryCreate(BaseModel):
 
 class ScheduleEntryUpdate(BaseModel):
     worker_id: Optional[str] = None
+    resource_type: Optional[str] = None
+    resource_id: Optional[str] = None
+    display_worker_name: Optional[str] = None
     job_id: Optional[str] = None
     scheduled_date: Optional[str] = None
     notes: Optional[str] = None
@@ -1618,6 +1706,7 @@ APP_SECTIONS = [
     "work-orders",
     "variations",
     "schedule",
+    "subcontractors",
     "purchase-orders",
     "finance",
     "price-builder",
@@ -1639,6 +1728,7 @@ DEFAULT_ROLE_PERMISSIONS = {
         "work-orders": True,
         "variations": True,
         "schedule": False,
+        "subcontractors": True,
         "purchase-orders": True,
         "finance": False,
         "price-builder": True,
@@ -1655,6 +1745,7 @@ DEFAULT_ROLE_PERMISSIONS = {
         "work-orders": True,
         "variations": True,
         "schedule": True,
+        "subcontractors": True,
         "purchase-orders": False,
         "finance": False,
         "price-builder": True,
@@ -1671,6 +1762,7 @@ DEFAULT_ROLE_PERMISSIONS = {
         "work-orders": True,
         "variations": True,
         "schedule": False,
+        "subcontractors": False,
         "purchase-orders": False,
         "finance": True,
         "price-builder": False,
@@ -4985,6 +5077,231 @@ async def archive_time_entry_endpoint(entry_id: str, admin: str = Depends(verify
     return {"message": "Time entry archived successfully"}
 
 
+
+# ==================== SUBCONTRACTOR SYSTEM ENDPOINTS ====================
+
+
+def normalise_subcontractor_trades(value: Any) -> List[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    return []
+
+
+def normalise_schedule_resource_values(resource_type: Optional[str], resource_id: Optional[str], worker_id: Optional[str]) -> Dict[str, str]:
+    final_type = str(resource_type or "worker").strip() or "worker"
+    if final_type not in ["worker", "subcontractor_resource"]:
+        final_type = "worker"
+    final_id = str(resource_id or worker_id or "").strip()
+    final_worker_id = final_id if final_type == "worker" else ""
+    return {"resource_type": final_type, "resource_id": final_id, "worker_id": final_worker_id}
+
+
+async def get_subcontractor_resource_display(resource_id: Optional[str]) -> Dict[str, Any]:
+    if not resource_id:
+        return {}
+    resource = await db.subcontractor_resources.find_one({"id": resource_id, "archived": {"$ne": True}}, {"_id": 0})
+    if not resource:
+        return {}
+    company = await db.subcontractors.find_one({"id": resource.get("subcontractor_id"), "archived": {"$ne": True}}, {"_id": 0}) or {}
+    company_name = company.get("company_name", "")
+    resource_name = resource.get("name", "")
+    display_name = f"{company_name} - {resource_name}".strip(" -")
+    return {
+        "resource": resource,
+        "company": company,
+        "display_name": display_name or resource_name or "Subcontractor Resource",
+    }
+
+
+@api_router.get("/subcontractors", response_model=List[Dict[str, Any]])
+@api_router.get("/subcontractors/", response_model=List[Dict[str, Any]])
+async def list_subcontractors(active_only: bool = Query(False), include_archived: bool = Query(False), admin: str = Depends(verify_admin)):
+    query: Dict[str, Any] = {}
+    if active_only:
+        query["active"] = True
+    if not include_archived:
+        query["archived"] = {"$ne": True}
+
+    companies = await db.subcontractors.find(query, {"_id": 0}).sort("company_name", 1).to_list(5000)
+    company_ids = [company.get("id") for company in companies if company.get("id")]
+    resource_query: Dict[str, Any] = {"subcontractor_id": {"$in": company_ids}} if company_ids else {"subcontractor_id": {"$in": []}}
+    if active_only:
+        resource_query["active"] = True
+    if not include_archived:
+        resource_query["archived"] = {"$ne": True}
+
+    resources = await db.subcontractor_resources.find(resource_query, {"_id": 0}).sort("name", 1).to_list(10000)
+    resources_by_company: Dict[str, List[Dict[str, Any]]] = {}
+    for resource in resources:
+        resources_by_company.setdefault(resource.get("subcontractor_id", ""), []).append(resource)
+
+    for company in companies:
+        company["resources"] = resources_by_company.get(company.get("id"), [])
+
+    return companies
+
+
+@api_router.post("/subcontractors", response_model=SubcontractorCompany)
+@api_router.post("/subcontractors/", response_model=SubcontractorCompany)
+async def create_subcontractor(subcontractor: SubcontractorCompanyCreate, admin: str = Depends(verify_admin)):
+    data = subcontractor.dict()
+    data["company_name"] = data.get("company_name", "").strip()
+    if not data["company_name"]:
+        raise HTTPException(status_code=400, detail="Company name is required")
+
+    duplicate = await db.subcontractors.find_one({
+        "company_name": {"$regex": f"^{re.escape(data['company_name'])}$", "$options": "i"},
+        "archived": {"$ne": True},
+    })
+    if duplicate:
+        raise HTTPException(status_code=400, detail="A subcontractor with this company name already exists")
+
+    data["trades"] = normalise_subcontractor_trades(data.get("trades"))
+    obj = SubcontractorCompany(**data)
+    await db.subcontractors.insert_one(obj.dict())
+    return obj
+
+
+@api_router.get("/subcontractors/schedule/resources/all")
+async def list_subcontractor_schedule_resources(active_only: bool = Query(True), admin: str = Depends(verify_admin)):
+    company_query: Dict[str, Any] = {"archived": {"$ne": True}}
+    resource_query: Dict[str, Any] = {"archived": {"$ne": True}}
+    if active_only:
+        company_query["active"] = True
+        resource_query["active"] = True
+
+    companies = await db.subcontractors.find(company_query, {"_id": 0}).to_list(5000)
+    company_lookup = {company.get("id"): company for company in companies if company.get("id")}
+    resources = await db.subcontractor_resources.find(resource_query, {"_id": 0}).sort("name", 1).to_list(10000)
+
+    output = []
+    for resource in resources:
+        company = company_lookup.get(resource.get("subcontractor_id"))
+        if not company:
+            continue
+        output.append({
+            "resource_type": "subcontractor_resource",
+            "resource_id": resource.get("id", ""),
+            "display_name": f"{company.get('company_name', '')} - {resource.get('name', '')}".strip(" -"),
+            "company_id": company.get("id", ""),
+            "company_name": company.get("company_name", ""),
+            "resource_name": resource.get("name", ""),
+            "trade": resource.get("trade", ""),
+            "capacity": resource.get("capacity", 1),
+            "active": resource.get("active", True),
+        })
+
+    output.sort(key=lambda item: item.get("display_name", "").lower())
+    return output
+
+
+@api_router.get("/subcontractors/{subcontractor_id}", response_model=Dict[str, Any])
+async def get_subcontractor(subcontractor_id: str, admin: str = Depends(verify_admin)):
+    company = await db.subcontractors.find_one({"id": subcontractor_id, "archived": {"$ne": True}}, {"_id": 0})
+    if not company:
+        raise HTTPException(status_code=404, detail="Subcontractor not found")
+    resources = await db.subcontractor_resources.find({"subcontractor_id": subcontractor_id, "archived": {"$ne": True}}, {"_id": 0}).sort("name", 1).to_list(1000)
+    company["resources"] = resources
+    return company
+
+
+@api_router.put("/subcontractors/{subcontractor_id}", response_model=SubcontractorCompany)
+async def update_subcontractor(subcontractor_id: str, update: SubcontractorCompanyUpdate, admin: str = Depends(verify_admin)):
+    existing = await db.subcontractors.find_one({"id": subcontractor_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Subcontractor not found")
+
+    update_data = {k: v for k, v in update.dict().items() if v is not None}
+    if "company_name" in update_data:
+        update_data["company_name"] = str(update_data["company_name"]).strip()
+        if not update_data["company_name"]:
+            raise HTTPException(status_code=400, detail="Company name is required")
+        duplicate = await db.subcontractors.find_one({
+            "id": {"$ne": subcontractor_id},
+            "company_name": {"$regex": f"^{re.escape(update_data['company_name'])}$", "$options": "i"},
+            "archived": {"$ne": True},
+        })
+        if duplicate:
+            raise HTTPException(status_code=400, detail="Another subcontractor already has this company name")
+    if "trades" in update_data:
+        update_data["trades"] = normalise_subcontractor_trades(update_data.get("trades"))
+    update_data["updated_at"] = datetime.utcnow()
+
+    await db.subcontractors.update_one({"id": subcontractor_id}, {"$set": update_data})
+    updated = await db.subcontractors.find_one({"id": subcontractor_id}, {"_id": 0})
+    return SubcontractorCompany(**updated)
+
+
+@api_router.delete("/subcontractors/{subcontractor_id}")
+async def delete_subcontractor(subcontractor_id: str, admin: str = Depends(verify_admin)):
+    existing = await db.subcontractors.find_one({"id": subcontractor_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Subcontractor not found")
+    now = datetime.utcnow()
+    await db.subcontractors.update_one({"id": subcontractor_id}, {"$set": {"active": False, "archived": True, "updated_at": now}})
+    await db.subcontractor_resources.update_many({"subcontractor_id": subcontractor_id}, {"$set": {"active": False, "archived": True, "updated_at": now}})
+    return {"success": True, "message": "Subcontractor archived"}
+
+
+@api_router.get("/subcontractors/{subcontractor_id}/resources", response_model=List[SubcontractorResource])
+async def list_subcontractor_resources(subcontractor_id: str, active_only: bool = Query(False), include_archived: bool = Query(False), admin: str = Depends(verify_admin)):
+    query: Dict[str, Any] = {"subcontractor_id": subcontractor_id}
+    if active_only:
+        query["active"] = True
+    if not include_archived:
+        query["archived"] = {"$ne": True}
+    resources = await db.subcontractor_resources.find(query, {"_id": 0}).sort("name", 1).to_list(1000)
+    return [SubcontractorResource(**resource) for resource in resources]
+
+
+@api_router.post("/subcontractors/{subcontractor_id}/resources", response_model=SubcontractorResource)
+async def create_subcontractor_resource(subcontractor_id: str, resource: SubcontractorResourceCreate, admin: str = Depends(verify_admin)):
+    company = await db.subcontractors.find_one({"id": subcontractor_id, "archived": {"$ne": True}})
+    if not company:
+        raise HTTPException(status_code=404, detail="Subcontractor not found")
+    data = resource.dict()
+    data["subcontractor_id"] = subcontractor_id
+    data["name"] = data.get("name", "").strip()
+    if not data["name"]:
+        raise HTTPException(status_code=400, detail="Worker/team name is required")
+    data["capacity"] = max(1, int(data.get("capacity") or 1))
+    obj = SubcontractorResource(**data)
+    await db.subcontractor_resources.insert_one(obj.dict())
+    return obj
+
+
+@api_router.put("/subcontractors/resources/{resource_id}", response_model=SubcontractorResource)
+async def update_subcontractor_resource(resource_id: str, update: SubcontractorResourceUpdate, admin: str = Depends(verify_admin)):
+    existing = await db.subcontractor_resources.find_one({"id": resource_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Subcontractor worker/team not found")
+    update_data = {k: v for k, v in update.dict().items() if v is not None}
+    if "name" in update_data:
+        update_data["name"] = str(update_data["name"]).strip()
+        if not update_data["name"]:
+            raise HTTPException(status_code=400, detail="Worker/team name is required")
+    if "capacity" in update_data:
+        update_data["capacity"] = max(1, int(update_data.get("capacity") or 1))
+    if "subcontractor_id" in update_data:
+        company = await db.subcontractors.find_one({"id": update_data["subcontractor_id"], "archived": {"$ne": True}})
+        if not company:
+            raise HTTPException(status_code=404, detail="Subcontractor not found")
+    update_data["updated_at"] = datetime.utcnow()
+    await db.subcontractor_resources.update_one({"id": resource_id}, {"$set": update_data})
+    updated = await db.subcontractor_resources.find_one({"id": resource_id}, {"_id": 0})
+    return SubcontractorResource(**updated)
+
+
+@api_router.delete("/subcontractors/resources/{resource_id}")
+async def delete_subcontractor_resource(resource_id: str, admin: str = Depends(verify_admin)):
+    existing = await db.subcontractor_resources.find_one({"id": resource_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Subcontractor worker/team not found")
+    await db.subcontractor_resources.update_one({"id": resource_id}, {"$set": {"active": False, "archived": True, "updated_at": datetime.utcnow()}})
+    return {"success": True, "message": "Subcontractor worker/team archived"}
+
 VALID_SCHEDULE_TYPES = {"job", "holiday", "sick", "unavailable"}
 ABSENCE_SCHEDULE_TYPES = {"holiday", "sick", "unavailable"}
 
@@ -5058,27 +5375,51 @@ async def get_schedule_entries(
 
     entries = await db.schedule_entries.find(filter_query).to_list(1000)
 
-    worker_ids = list({entry.get("worker_id") for entry in entries if entry.get("worker_id")})
+    worker_ids = list({entry.get("worker_id") or entry.get("resource_id") for entry in entries if (entry.get("worker_id") or entry.get("resource_id")) and (entry.get("resource_type") or "worker") == "worker"})
+    subcontractor_resource_ids = list({entry.get("resource_id") for entry in entries if entry.get("resource_type") == "subcontractor_resource" and entry.get("resource_id")})
     job_ids = list({entry.get("job_id") for entry in entries if entry.get("job_id")})
 
     workers = await db.workers.find({"id": {"$in": worker_ids}}).to_list(1000) if worker_ids else []
+    subcontractor_resources = await db.subcontractor_resources.find({"id": {"$in": subcontractor_resource_ids}}, {"_id": 0}).to_list(1000) if subcontractor_resource_ids else []
+    subcontractor_company_ids = list({resource.get("subcontractor_id") for resource in subcontractor_resources if resource.get("subcontractor_id")})
+    subcontractor_companies = await db.subcontractors.find({"id": {"$in": subcontractor_company_ids}}, {"_id": 0}).to_list(1000) if subcontractor_company_ids else []
     jobs = await db.jobs.find({"id": {"$in": job_ids}}).to_list(1000) if job_ids else []
 
     worker_lookup = {worker["id"]: worker for worker in workers if "id" in worker}
+    subcontractor_resource_lookup = {resource.get("id"): resource for resource in subcontractor_resources if resource.get("id")}
+    subcontractor_company_lookup = {company.get("id"): company for company in subcontractor_companies if company.get("id")}
     job_lookup = {job["id"]: job for job in jobs if "id" in job}
 
     result = []
     for entry in entries:
         entry.pop("_id", None)
-        worker = worker_lookup.get(entry.get("worker_id"), {})
+        normalised_resource = normalise_schedule_resource_values(entry.get("resource_type"), entry.get("resource_id"), entry.get("worker_id"))
+        entry.update(normalised_resource)
         job = job_lookup.get(entry.get("job_id"), {})
         schedule_type = normalise_schedule_type(entry.get("schedule_type"))
         entry["schedule_type"] = schedule_type
         entry["absence_type"] = entry.get("absence_type") or (schedule_type if is_absence_schedule_type(schedule_type) else None)
-        entry["worker_name"] = worker.get("name", "Unknown")
-        entry["worker_type"] = worker.get("worker_type", "worker")
-        entry["worker_division"] = worker.get("division", "")
-        entry["worker_trades"] = worker.get("trades", [worker.get("trade", "")] if worker.get("trade") else [])
+
+        if entry.get("resource_type") == "subcontractor_resource":
+            resource = subcontractor_resource_lookup.get(entry.get("resource_id"), {})
+            company = subcontractor_company_lookup.get(resource.get("subcontractor_id"), {})
+            display_name = entry.get("display_worker_name") or f"{company.get('company_name', '')} - {resource.get('name', '')}".strip(" -") or "Unknown subcontractor"
+            entry["worker_name"] = display_name
+            entry["display_worker_name"] = display_name
+            entry["worker_type"] = "subcontractor"
+            entry["worker_division"] = "Subcontractors"
+            entry["worker_trades"] = [resource.get("trade", "")] if resource.get("trade") else []
+            entry["subcontractor_company_id"] = company.get("id", "")
+            entry["subcontractor_company_name"] = company.get("company_name", "")
+            entry["subcontractor_resource_name"] = resource.get("name", "")
+        else:
+            worker = worker_lookup.get(entry.get("worker_id") or entry.get("resource_id"), {})
+            entry["worker_name"] = entry.get("display_worker_name") or worker.get("name", "Unknown")
+            entry["display_worker_name"] = entry["worker_name"]
+            entry["worker_type"] = worker.get("worker_type", "worker")
+            entry["worker_division"] = worker.get("division", "")
+            entry["worker_trades"] = worker.get("trades", [worker.get("trade", "")] if worker.get("trade") else [])
+
         if is_absence_schedule_type(schedule_type):
             entry["job_name"] = schedule_type_label(schedule_type)
             entry["job_client"] = ""
@@ -5200,10 +5541,18 @@ async def _push_gantt_section_to_schedule(request: GanttPushToScheduleRequest):
         worker = worker_lookup.get(worker_id, {})
         for scheduled_date in dates:
             existing = await db.schedule_entries.find_one({
-                "worker_id": worker_id,
+                "resource_type": "worker",
+                "resource_id": worker_id,
                 "scheduled_date": scheduled_date,
                 "archived": {"$ne": True},
             })
+            if not existing:
+                existing = await db.schedule_entries.find_one({
+                    "worker_id": worker_id,
+                    "scheduled_date": scheduled_date,
+                    "archived": {"$ne": True},
+                    "$or": [{"resource_type": {"$exists": False}}, {"resource_type": "worker"}],
+                })
             if existing:
                 existing_type = normalise_schedule_type(existing.get("schedule_type"))
                 existing_name = schedule_type_label(existing_type) if is_absence_schedule_type(existing_type) else await get_job_name(existing.get("job_id"))
@@ -5232,6 +5581,9 @@ async def _push_gantt_section_to_schedule(request: GanttPushToScheduleRequest):
 
             entry_obj = ScheduleEntry(
                 worker_id=worker_id,
+                resource_type="worker",
+                resource_id=worker_id,
+                display_worker_name=worker.get("name", ""),
                 job_id=request.job_id,
                 scheduled_date=scheduled_date,
                 notes=section_note,
@@ -5870,7 +6222,7 @@ async def shift_gantt_project(request: GanttShiftProjectRequest, admin: str = De
 
 @api_router.post("/schedule", response_model=ScheduleEntry)
 async def create_schedule_entry(schedule_entry: ScheduleEntryCreate, admin: str = Depends(verify_admin)):
-    """Allocate a worker to a job or block a day as holiday/sick/unavailable (Admin only)."""
+    """Allocate a direct worker or subcontractor worker/team to a job, or block a direct worker day as holiday/sick/unavailable."""
     try:
         datetime.fromisoformat(schedule_entry.scheduled_date)
     except ValueError:
@@ -5880,9 +6232,32 @@ async def create_schedule_entry(schedule_entry: ScheduleEntryCreate, admin: str 
     if schedule_type == "job" and not schedule_entry.job_id:
         raise HTTPException(status_code=400, detail="Select an active job first")
 
-    worker = await db.workers.find_one({"id": schedule_entry.worker_id, "active": True, "archived": {"$ne": True}})
-    if not worker:
-        raise HTTPException(status_code=404, detail="Active worker not found")
+    resource_values = normalise_schedule_resource_values(schedule_entry.resource_type, schedule_entry.resource_id, schedule_entry.worker_id)
+    resource_type = resource_values["resource_type"]
+    resource_id = resource_values["resource_id"]
+    worker_id = resource_values["worker_id"]
+
+    if not resource_id:
+        raise HTTPException(status_code=400, detail="Select a worker or subcontractor team")
+
+    display_worker_name = schedule_entry.display_worker_name or ""
+
+    if resource_type == "subcontractor_resource":
+        if schedule_type != "job":
+            raise HTTPException(status_code=400, detail="Holiday/sick/unavailable can only be recorded against direct workers")
+        resource_display = await get_subcontractor_resource_display(resource_id)
+        if not resource_display:
+            raise HTTPException(status_code=404, detail="Active subcontractor worker/team not found")
+        resource = resource_display.get("resource", {})
+        company = resource_display.get("company", {})
+        if resource.get("active") is False or company.get("active") is False:
+            raise HTTPException(status_code=404, detail="Active subcontractor worker/team not found")
+        display_worker_name = display_worker_name or resource_display.get("display_name", "")
+    else:
+        worker = await db.workers.find_one({"id": resource_id, "active": True, "archived": {"$ne": True}})
+        if not worker:
+            raise HTTPException(status_code=404, detail="Active worker not found")
+        display_worker_name = display_worker_name or worker.get("name", "")
 
     if schedule_type == "job":
         job = await db.jobs.find_one({"id": schedule_entry.job_id, "status": "active", "archived": {"$ne": True}})
@@ -5892,11 +6267,28 @@ async def create_schedule_entry(schedule_entry: ScheduleEntryCreate, admin: str 
         schedule_entry.job_id = None
         schedule_entry.absence_type = schedule_type
 
-    existing = await db.schedule_entries.find_one({"worker_id": schedule_entry.worker_id, "scheduled_date": schedule_entry.scheduled_date, "archived": {"$ne": True}})
+    existing = await db.schedule_entries.find_one({
+        "resource_type": resource_type,
+        "resource_id": resource_id,
+        "scheduled_date": schedule_entry.scheduled_date,
+        "archived": {"$ne": True},
+    })
+
+    # Backwards compatibility for old direct-worker records that only have worker_id.
+    if not existing and resource_type == "worker":
+        existing = await db.schedule_entries.find_one({
+            "worker_id": resource_id,
+            "scheduled_date": schedule_entry.scheduled_date,
+            "archived": {"$ne": True},
+            "$or": [{"resource_type": {"$exists": False}}, {"resource_type": "worker"}],
+        })
+
     if existing:
-        raise HTTPException(status_code=400, detail="This worker already has a schedule entry on this date")
+        raise HTTPException(status_code=400, detail="This worker or subcontractor team already has a schedule entry on this date")
 
     entry_dict = schedule_entry.dict()
+    entry_dict.update(resource_values)
+    entry_dict["display_worker_name"] = display_worker_name
     entry_dict["schedule_type"] = schedule_type
     if schedule_type != "job":
         entry_dict["job_id"] = None
@@ -5915,9 +6307,17 @@ async def update_schedule_entry(schedule_id: str, schedule_update: ScheduleEntry
     update_dict = {k: v for k, v in schedule_update.dict().items() if v is not None}
     if not update_dict:
         existing_entry.pop("_id", None)
+        existing_entry.update(normalise_schedule_resource_values(existing_entry.get("resource_type"), existing_entry.get("resource_id"), existing_entry.get("worker_id")))
         return ScheduleEntry(**existing_entry)
 
-    new_worker_id = update_dict.get("worker_id", existing_entry.get("worker_id"))
+    existing_resource = normalise_schedule_resource_values(existing_entry.get("resource_type"), existing_entry.get("resource_id"), existing_entry.get("worker_id"))
+    requested_resource_type = update_dict.get("resource_type", existing_resource["resource_type"])
+    requested_resource_id = update_dict.get("resource_id", update_dict.get("worker_id", existing_resource["resource_id"]))
+    requested_worker_id = update_dict.get("worker_id", existing_resource["worker_id"])
+    resource_values = normalise_schedule_resource_values(requested_resource_type, requested_resource_id, requested_worker_id)
+    new_resource_type = resource_values["resource_type"]
+    new_resource_id = resource_values["resource_id"]
+    new_worker_id = resource_values["worker_id"]
     new_date = update_dict.get("scheduled_date", existing_entry.get("scheduled_date"))
     new_schedule_type = normalise_schedule_type(update_dict.get("schedule_type", existing_entry.get("schedule_type")))
     new_job_id = update_dict.get("job_id", existing_entry.get("job_id"))
@@ -5928,10 +6328,27 @@ async def update_schedule_entry(schedule_id: str, schedule_update: ScheduleEntry
         except ValueError:
             raise HTTPException(status_code=400, detail="scheduled_date must be in YYYY-MM-DD format")
 
-    if "worker_id" in update_dict:
-        worker = await db.workers.find_one({"id": new_worker_id, "active": True, "archived": {"$ne": True}})
+    if not new_resource_id:
+        raise HTTPException(status_code=400, detail="Select a worker or subcontractor team")
+
+    display_worker_name = update_dict.get("display_worker_name") or existing_entry.get("display_worker_name") or ""
+
+    if new_resource_type == "subcontractor_resource":
+        if new_schedule_type != "job":
+            raise HTTPException(status_code=400, detail="Holiday/sick/unavailable can only be recorded against direct workers")
+        resource_display = await get_subcontractor_resource_display(new_resource_id)
+        if not resource_display:
+            raise HTTPException(status_code=404, detail="Active subcontractor worker/team not found")
+        resource = resource_display.get("resource", {})
+        company = resource_display.get("company", {})
+        if resource.get("active") is False or company.get("active") is False:
+            raise HTTPException(status_code=404, detail="Active subcontractor worker/team not found")
+        display_worker_name = display_worker_name or resource_display.get("display_name", "")
+    else:
+        worker = await db.workers.find_one({"id": new_resource_id, "active": True, "archived": {"$ne": True}})
         if not worker:
             raise HTTPException(status_code=404, detail="Active worker not found")
+        display_worker_name = display_worker_name or worker.get("name", "")
 
     if new_schedule_type == "job":
         if not new_job_id:
@@ -5945,11 +6362,30 @@ async def update_schedule_entry(schedule_id: str, schedule_update: ScheduleEntry
         update_dict["job_id"] = None
         update_dict["absence_type"] = new_schedule_type
 
+    update_dict.update(resource_values)
+    update_dict["display_worker_name"] = display_worker_name
     update_dict["schedule_type"] = new_schedule_type
 
-    duplicate = await db.schedule_entries.find_one({"id": {"$ne": schedule_id}, "worker_id": new_worker_id, "scheduled_date": new_date, "archived": {"$ne": True}})
+    duplicate = await db.schedule_entries.find_one({
+        "id": {"$ne": schedule_id},
+        "resource_type": new_resource_type,
+        "resource_id": new_resource_id,
+        "scheduled_date": new_date,
+        "archived": {"$ne": True},
+    })
+
+    # Backwards compatibility for old direct-worker records that only have worker_id.
+    if not duplicate and new_resource_type == "worker":
+        duplicate = await db.schedule_entries.find_one({
+            "id": {"$ne": schedule_id},
+            "worker_id": new_resource_id,
+            "scheduled_date": new_date,
+            "archived": {"$ne": True},
+            "$or": [{"resource_type": {"$exists": False}}, {"resource_type": "worker"}],
+        })
+
     if duplicate:
-        raise HTTPException(status_code=400, detail="This worker already has a schedule entry on this date")
+        raise HTTPException(status_code=400, detail="This worker or subcontractor team already has a schedule entry on this date")
 
     update_dict["updated_date"] = datetime.utcnow()
     result = await db.schedule_entries.update_one({"id": schedule_id}, {"$set": update_dict})
@@ -5958,6 +6394,7 @@ async def update_schedule_entry(schedule_id: str, schedule_update: ScheduleEntry
 
     updated_entry = await db.schedule_entries.find_one({"id": schedule_id})
     updated_entry.pop("_id", None)
+    updated_entry.update(normalise_schedule_resource_values(updated_entry.get("resource_type"), updated_entry.get("resource_id"), updated_entry.get("worker_id")))
     return ScheduleEntry(**updated_entry)
 
 @api_router.delete("/schedule/{schedule_id}")

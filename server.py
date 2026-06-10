@@ -6937,6 +6937,14 @@ async def create_cashflow_notification(
 
 
 async def create_job_cashflow_change_notifications(old_job: Dict[str, Any], new_job: Dict[str, Any], source: str = "job_update") -> List[Dict[str, Any]]:
+    """Create one useful cashflow notification for a job update.
+
+    The first version created separate earned-value and at-risk notifications. A single
+    progress slider move changes both values, so that felt like duplicate information.
+    This version combines the progress/earned/risk impact into one notification and
+    reserves separate notifications for genuinely different changes such as materials
+    forecast or tax/payment-term changes.
+    """
     if not old_job or not new_job:
         return []
 
@@ -6946,42 +6954,77 @@ async def create_job_cashflow_change_notifications(old_job: Dict[str, Any], new_
     new_summary = cashflow_notification_summary_for_job(new_job)
     created = []
 
-    earned_delta = notification_money(new_summary["earned_value"] - old_summary["earned_value"])
-    if abs(earned_delta) >= 250:
-        direction = "increased" if earned_delta > 0 else "reduced"
-        created.append(await create_cashflow_notification(
-            title=f"Earned value {direction}",
-            message=f"{job_name}: earned value {direction} by £{abs(earned_delta):,.0f}.",
-            job_id=job_id,
-            job_name=job_name,
-            event_type="earned_value_changed",
-            category="progress",
-            impact_amount=earned_delta,
-            severity=notification_severity_from_delta(earned_delta),
-            source=source,
-            source_id=job_id,
-            old_value=old_summary["earned_value"],
-            new_value=new_summary["earned_value"],
-            metadata={"old_summary": old_summary, "new_summary": new_summary},
-        ))
+    def section_key(section: Dict[str, Any]) -> str:
+        return str(
+            section.get("id")
+            or section.get("section_id")
+            or section.get("sectionId")
+            or section.get("name")
+            or section.get("section_name")
+            or ""
+        ).strip()
 
+    old_sections = {section_key(section): section for section in (old_job.get("gantt_sections") or []) if section_key(section)}
+    changed_progress_sections = []
+    for section in (new_job.get("gantt_sections") or []):
+        key = section_key(section)
+        old_section = old_sections.get(key)
+        if not old_section:
+            continue
+        old_progress = notification_progress(old_section)
+        new_progress = notification_progress(section)
+        if round(old_progress, 2) != round(new_progress, 2):
+            changed_progress_sections.append(
+                f"{section.get('name') or section.get('section_name') or 'Section'} ({old_progress:g}% → {new_progress:g}%)"
+            )
+
+    earned_delta = notification_money(new_summary["earned_value"] - old_summary["earned_value"])
     risk_delta = notification_money(new_summary["at_risk_value"] - old_summary["at_risk_value"])
-    if abs(risk_delta) >= 250:
-        direction = "increased" if risk_delta > 0 else "reduced"
+
+    if abs(earned_delta) >= 250 or abs(risk_delta) >= 250:
+        risk_direction = "increased" if risk_delta > 0 else "reduced" if risk_delta < 0 else "unchanged"
+        earned_direction = "increased" if earned_delta > 0 else "reduced" if earned_delta < 0 else "unchanged"
+
+        if risk_delta > 0:
+            title = "Cashflow risk increased"
+            severity = "critical" if abs(risk_delta) >= 2500 else "warning"
+            message = f"{job_name}: progress change increased cashflow risk by £{abs(risk_delta):,.0f}."
+        elif risk_delta < 0:
+            title = "Cashflow risk reduced"
+            severity = "info"
+            message = f"{job_name}: progress change reduced cashflow risk by £{abs(risk_delta):,.0f}."
+        else:
+            title = "Earned value changed"
+            severity = notification_severity_from_delta(earned_delta)
+            message = f"{job_name}: earned value {earned_direction} by £{abs(earned_delta):,.0f}."
+
+        impact_items = []
+        if earned_delta:
+            impact_items.append(f"Earned value {earned_direction} by £{abs(earned_delta):,.0f}")
+        if risk_delta:
+            impact_items.append(f"At-risk value {risk_direction} by £{abs(risk_delta):,.0f}")
+        impact_items.append(f"Current earned value: £{new_summary['earned_value']:,.0f}")
+        impact_items.append(f"Current at-risk value: £{new_summary['at_risk_value']:,.0f}")
+
         created.append(await create_cashflow_notification(
-            title=f"Cashflow risk {direction}",
-            message=f"{job_name}: cashflow risk {direction} by £{abs(risk_delta):,.0f}.",
+            title=title,
+            message=message,
             job_id=job_id,
             job_name=job_name,
-            event_type="cashflow_risk_changed",
+            event_type="progress_cashflow_changed",
             category="cashflow",
-            impact_amount=risk_delta,
-            severity="critical" if risk_delta > 0 and abs(risk_delta) >= 2500 else notification_severity_from_delta(risk_delta),
+            impact_amount=risk_delta if risk_delta else earned_delta,
+            severity=severity,
             source=source,
             source_id=job_id,
-            old_value=old_summary["at_risk_value"],
-            new_value=new_summary["at_risk_value"],
-            metadata={"old_summary": old_summary, "new_summary": new_summary},
+            old_value={"earned_value": old_summary["earned_value"], "at_risk_value": old_summary["at_risk_value"]},
+            new_value={"earned_value": new_summary["earned_value"], "at_risk_value": new_summary["at_risk_value"]},
+            metadata={
+                "old_summary": old_summary,
+                "new_summary": new_summary,
+                "impact_items": impact_items,
+                "changed_fields": changed_progress_sections,
+            },
         ))
 
     material_delta = notification_money(new_summary["material_forecast"] - old_summary["material_forecast"])
@@ -7000,7 +7043,14 @@ async def create_job_cashflow_change_notifications(old_job: Dict[str, Any], new_
             source_id=job_id,
             old_value=old_summary["material_forecast"],
             new_value=new_summary["material_forecast"],
-            metadata={"old_summary": old_summary, "new_summary": new_summary},
+            metadata={
+                "old_summary": old_summary,
+                "new_summary": new_summary,
+                "impact_items": [
+                    f"Material forecast {direction} by £{abs(material_delta):,.0f} net",
+                    f"New material forecast: £{new_summary['material_forecast']:,.0f} net",
+                ],
+            },
         ))
 
     watched_tax_keys = ["vat_treatment", "vat_rate", "drc_enabled", "cis_enabled", "cis_rate", "cis_deduction_basis", "payment_terms_days", "retention_percent"]
@@ -7019,7 +7069,7 @@ async def create_job_cashflow_change_notifications(old_job: Dict[str, Any], new_
             source_id=job_id,
             old_value={key: old_job.get(key) for key in changed_tax_keys},
             new_value={key: new_job.get(key) for key in changed_tax_keys},
-            metadata={"changed_fields": changed_tax_keys},
+            metadata={"changed_fields": changed_tax_keys, "old_summary": old_summary, "new_summary": new_summary},
         ))
 
     return [item for item in created if item]

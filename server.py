@@ -6795,15 +6795,22 @@ def notification_job_name(job: Dict[str, Any]) -> str:
     return str(job.get("display_name") or job.get("name") or job.get("job_name") or "Unallocated job")
 
 
+def notification_first_present(*values: Any) -> Any:
+    for value in values:
+        if value is not None and value != "":
+            return value
+    return 0.0
+
+
 def notification_section_value(section: Dict[str, Any]) -> float:
-    labour = notification_money(section.get("labour_value") or section.get("labor_value") or section.get("labour_budget") or section.get("labor_budget"))
-    materials = notification_money(section.get("material_value") or section.get("materials_value") or section.get("material_budget") or section.get("materials_budget"))
-    subcontractor = notification_money(section.get("subcontractor_value") or section.get("contractor_value") or section.get("subcontract_value") or section.get("subbie_value"))
-    other = notification_money(section.get("other_value") or section.get("other_budget"))
+    labour = notification_money(notification_first_present(section.get("labour_value"), section.get("labor_value"), section.get("labour_budget"), section.get("labor_budget")))
+    materials = notification_money(notification_first_present(section.get("material_value"), section.get("materials_value"), section.get("material_budget"), section.get("materials_budget")))
+    subcontractor = notification_money(notification_first_present(section.get("subcontractor_value"), section.get("contractor_value"), section.get("subcontract_value"), section.get("subbie_value")))
+    other = notification_money(notification_first_present(section.get("other_value"), section.get("other_budget")))
     calculated = labour + materials + subcontractor + other
-    if calculated > 0:
+    if calculated != 0:
         return round(calculated, 2)
-    return notification_money(section.get("section_value") or section.get("total_value") or section.get("value"))
+    return notification_money(notification_first_present(section.get("section_value"), section.get("total_value"), section.get("value")))
 
 
 def notification_progress(section: Dict[str, Any]) -> float:
@@ -6845,8 +6852,8 @@ def cashflow_notification_summary_for_job(job: Dict[str, Any]) -> Dict[str, floa
         progress = notification_progress(section) / 100.0
         total_value += value
         earned_value += value * progress
-        material_value += notification_money(section.get("material_value") or section.get("materials_value") or section.get("material_budget") or section.get("materials_budget"))
-        labour_value += notification_money(section.get("labour_value") or section.get("labor_value") or section.get("labour_budget") or section.get("labor_budget"))
+        material_value += notification_money(notification_first_present(section.get("material_value"), section.get("materials_value"), section.get("material_budget"), section.get("materials_budget")))
+        labour_value += notification_money(notification_first_present(section.get("labour_value"), section.get("labor_value"), section.get("labour_budget"), section.get("labor_budget")))
 
     application_value = 0.0
     for marker in job.get("commercial_markers") or []:
@@ -6857,7 +6864,7 @@ def cashflow_notification_summary_for_job(job: Dict[str, Any]) -> Dict[str, floa
     at_risk_value = max(0.0, application_value - earned_value)
 
     return {
-        "contract_value": notification_money(job.get("current_contract_value") or job.get("quoted_cost") or total_value),
+        "contract_value": notification_money(notification_first_present(job.get("current_contract_value"), (notification_money(job.get("quoted_cost")) + notification_money(job.get("approved_variations_total"))) if job.get("quoted_cost") is not None else total_value)),
         "programme_value": round(total_value, 2),
         "earned_value": round(earned_value, 2),
         "material_forecast": round(material_value, 2),

@@ -3333,6 +3333,10 @@ async def get_job(job_id: str):
 @api_router.put("/jobs/{job_id}", response_model=Job)
 async def update_job(job_id: str, job_update: JobUpdate, admin: str = Depends(verify_admin)):
     """Update job (Admin only)"""
+    existing_job = await db.jobs.find_one({"id": job_id}, {"_id": 0})
+    if not existing_job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
     update_dict = {k: v for k, v in job_update.dict().items() if v is not None}
 
     if "vat_treatment" in update_dict or "drc_enabled" in update_dict or "vat_rate" in update_dict:
@@ -3362,6 +3366,10 @@ async def update_job(job_id: str, job_update: JobUpdate, admin: str = Depends(ve
         raise HTTPException(status_code=404, detail="Job not found")
 
     updated_job = await db.jobs.find_one({"id": job_id})
+    try:
+        await create_job_cashflow_change_notifications(existing_job, {k: v for k, v in updated_job.items() if k != "_id"}, source="job_update")
+    except Exception as exc:
+        logger.warning(f"Cashflow notification check failed for job {job_id}: {exc}")
     return Job(**updated_job)
 
 @api_router.delete("/jobs/{job_id}")
@@ -6773,6 +6781,297 @@ def normalise_vat_treatment(value: Optional[str]) -> str:
     return aliases.get(treatment, treatment if treatment in ["standard_20", "reduced_5", "zero_rated", "exempt", "no_vat", "drc"] else "standard_20")
 
 
+# ==================== CASHFLOW IMPACT NOTIFICATIONS ====================
+
+def notification_iso_now() -> str:
+    return datetime.utcnow().isoformat()
+
+
+def notification_money(value: Any) -> float:
+    return round(finance_to_number(value, 0.0), 2)
+
+
+def notification_job_name(job: Dict[str, Any]) -> str:
+    return str(job.get("display_name") or job.get("name") or job.get("job_name") or "Unallocated job")
+
+
+def notification_section_value(section: Dict[str, Any]) -> float:
+    labour = notification_money(section.get("labour_value") or section.get("labor_value") or section.get("labour_budget") or section.get("labor_budget"))
+    materials = notification_money(section.get("material_value") or section.get("materials_value") or section.get("material_budget") or section.get("materials_budget"))
+    subcontractor = notification_money(section.get("subcontractor_value") or section.get("contractor_value") or section.get("subcontract_value") or section.get("subbie_value"))
+    other = notification_money(section.get("other_value") or section.get("other_budget"))
+    calculated = labour + materials + subcontractor + other
+    if calculated > 0:
+        return round(calculated, 2)
+    return notification_money(section.get("section_value") or section.get("total_value") or section.get("value"))
+
+
+def notification_progress(section: Dict[str, Any]) -> float:
+    return max(0.0, min(100.0, notification_money(
+        section.get("progress_percent") if section.get("progress_percent") is not None else
+        section.get("progressPercent") if section.get("progressPercent") is not None else
+        section.get("progress") if section.get("progress") is not None else
+        section.get("percent_complete") if section.get("percent_complete") is not None else
+        section.get("completion_percent")
+    )))
+
+
+def notification_marker_type(marker: Dict[str, Any]) -> str:
+    value = str(marker.get("type") or marker.get("marker_type") or "application").strip().lower()
+    if value in {"final", "final_invoice", "final_application"}:
+        return "final"
+    return value
+
+
+def notification_marker_value(marker: Dict[str, Any]) -> float:
+    return notification_money(
+        marker.get("net_value") if marker.get("net_value") is not None else
+        marker.get("netValue") if marker.get("netValue") is not None else
+        marker.get("manual_value") if marker.get("manual_value") is not None else
+        marker.get("value") if marker.get("value") is not None else
+        marker.get("amount")
+    )
+
+
+def cashflow_notification_summary_for_job(job: Dict[str, Any]) -> Dict[str, float]:
+    sections = [section for section in (job.get("gantt_sections") or []) if not bool(section.get("is_commercial_placeholder") or section.get("commercial_placeholder"))]
+    total_value = 0.0
+    earned_value = 0.0
+    material_value = 0.0
+    labour_value = 0.0
+
+    for section in sections:
+        value = notification_section_value(section)
+        progress = notification_progress(section) / 100.0
+        total_value += value
+        earned_value += value * progress
+        material_value += notification_money(section.get("material_value") or section.get("materials_value") or section.get("material_budget") or section.get("materials_budget"))
+        labour_value += notification_money(section.get("labour_value") or section.get("labor_value") or section.get("labour_budget") or section.get("labor_budget"))
+
+    application_value = 0.0
+    for marker in job.get("commercial_markers") or []:
+        if notification_marker_type(marker) in {"application", "interim", "final"}:
+            application_value += notification_marker_value(marker)
+
+    # Simple risk snapshot: applications scheduled/valued ahead of currently earned value.
+    at_risk_value = max(0.0, application_value - earned_value)
+
+    return {
+        "contract_value": notification_money(job.get("current_contract_value") or job.get("quoted_cost") or total_value),
+        "programme_value": round(total_value, 2),
+        "earned_value": round(earned_value, 2),
+        "material_forecast": round(material_value, 2),
+        "labour_value": round(labour_value, 2),
+        "application_value": round(application_value, 2),
+        "at_risk_value": round(at_risk_value, 2),
+    }
+
+
+def notification_severity_from_delta(value: float) -> str:
+    amount = abs(notification_money(value))
+    if amount >= 2500:
+        return "critical"
+    if amount >= 250:
+        return "warning"
+    return "info"
+
+
+async def create_cashflow_notification(
+    title: str,
+    message: str,
+    job_id: str = "",
+    job_name: str = "",
+    event_type: str = "cashflow_changed",
+    category: str = "cashflow",
+    impact_amount: float = 0.0,
+    severity: str = "info",
+    source: str = "system",
+    source_id: str = "",
+    old_value: Any = None,
+    new_value: Any = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    if not title or not message:
+        return {}
+
+    now = notification_iso_now()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "title": title,
+        "message": message,
+        "job_id": job_id or "",
+        "job_name": job_name or "",
+        "event_type": event_type,
+        "category": category,
+        "impact_amount": notification_money(impact_amount),
+        "severity": severity or notification_severity_from_delta(impact_amount),
+        "source": source,
+        "source_id": source_id or "",
+        "old_value": old_value,
+        "new_value": new_value,
+        "metadata": metadata or {},
+        "read": False,
+        "created_at": now,
+        "updated_at": now,
+        "archived": False,
+    }
+
+    # Prevent noisy duplicate notifications from repeated saves in a short period.
+    duplicate_window = (datetime.utcnow() - timedelta(minutes=3)).isoformat()
+    duplicate = await db.cashflow_notifications.find_one({
+        "event_type": doc["event_type"],
+        "job_id": doc["job_id"],
+        "source": doc["source"],
+        "source_id": doc["source_id"],
+        "message": doc["message"],
+        "created_at": {"$gte": duplicate_window},
+        "archived": {"$ne": True},
+    })
+    if duplicate:
+        duplicate.pop("_id", None)
+        return duplicate
+
+    await db.cashflow_notifications.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+async def create_job_cashflow_change_notifications(old_job: Dict[str, Any], new_job: Dict[str, Any], source: str = "job_update") -> List[Dict[str, Any]]:
+    if not old_job or not new_job:
+        return []
+
+    job_id = new_job.get("id") or old_job.get("id") or ""
+    job_name = notification_job_name(new_job or old_job)
+    old_summary = cashflow_notification_summary_for_job(old_job)
+    new_summary = cashflow_notification_summary_for_job(new_job)
+    created = []
+
+    earned_delta = notification_money(new_summary["earned_value"] - old_summary["earned_value"])
+    if abs(earned_delta) >= 250:
+        direction = "increased" if earned_delta > 0 else "reduced"
+        created.append(await create_cashflow_notification(
+            title=f"Earned value {direction}",
+            message=f"{job_name}: earned value {direction} by £{abs(earned_delta):,.0f}.",
+            job_id=job_id,
+            job_name=job_name,
+            event_type="earned_value_changed",
+            category="progress",
+            impact_amount=earned_delta,
+            severity=notification_severity_from_delta(earned_delta),
+            source=source,
+            source_id=job_id,
+            old_value=old_summary["earned_value"],
+            new_value=new_summary["earned_value"],
+            metadata={"old_summary": old_summary, "new_summary": new_summary},
+        ))
+
+    risk_delta = notification_money(new_summary["at_risk_value"] - old_summary["at_risk_value"])
+    if abs(risk_delta) >= 250:
+        direction = "increased" if risk_delta > 0 else "reduced"
+        created.append(await create_cashflow_notification(
+            title=f"Cashflow risk {direction}",
+            message=f"{job_name}: cashflow risk {direction} by £{abs(risk_delta):,.0f}.",
+            job_id=job_id,
+            job_name=job_name,
+            event_type="cashflow_risk_changed",
+            category="cashflow",
+            impact_amount=risk_delta,
+            severity="critical" if risk_delta > 0 and abs(risk_delta) >= 2500 else notification_severity_from_delta(risk_delta),
+            source=source,
+            source_id=job_id,
+            old_value=old_summary["at_risk_value"],
+            new_value=new_summary["at_risk_value"],
+            metadata={"old_summary": old_summary, "new_summary": new_summary},
+        ))
+
+    material_delta = notification_money(new_summary["material_forecast"] - old_summary["material_forecast"])
+    if abs(material_delta) >= 250:
+        direction = "increased" if material_delta > 0 else "reduced"
+        created.append(await create_cashflow_notification(
+            title=f"Material forecast {direction}",
+            message=f"{job_name}: material forecast {direction} by £{abs(material_delta):,.0f} net.",
+            job_id=job_id,
+            job_name=job_name,
+            event_type="material_forecast_changed",
+            category="materials",
+            impact_amount=material_delta,
+            severity=notification_severity_from_delta(material_delta),
+            source=source,
+            source_id=job_id,
+            old_value=old_summary["material_forecast"],
+            new_value=new_summary["material_forecast"],
+            metadata={"old_summary": old_summary, "new_summary": new_summary},
+        ))
+
+    watched_tax_keys = ["vat_treatment", "vat_rate", "drc_enabled", "cis_enabled", "cis_rate", "cis_deduction_basis", "payment_terms_days", "retention_percent"]
+    changed_tax_keys = [key for key in watched_tax_keys if old_job.get(key) != new_job.get(key)]
+    if changed_tax_keys:
+        created.append(await create_cashflow_notification(
+            title="Cashflow settings changed",
+            message=f"{job_name}: {', '.join(changed_tax_keys).replace('_', ' ')} changed. Cashflow may need review.",
+            job_id=job_id,
+            job_name=job_name,
+            event_type="tax_or_terms_changed",
+            category="cashflow",
+            impact_amount=0,
+            severity="warning",
+            source=source,
+            source_id=job_id,
+            old_value={key: old_job.get(key) for key in changed_tax_keys},
+            new_value={key: new_job.get(key) for key in changed_tax_keys},
+            metadata={"changed_fields": changed_tax_keys},
+        ))
+
+    return [item for item in created if item]
+
+
+@api_router.get("/notifications")
+async def get_cashflow_notifications(
+    unread_only: bool = Query(False),
+    category: Optional[str] = Query(None),
+    job_id: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    admin: str = Depends(verify_admin),
+):
+    query: Dict[str, Any] = {"archived": {"$ne": True}}
+    if unread_only:
+        query["read"] = False
+    if category and category != "all":
+        query["category"] = category
+    if job_id:
+        query["job_id"] = job_id
+    rows = await db.cashflow_notifications.find(query, {"_id": 0}).sort("created_at", -1).to_list(limit)
+    return rows
+
+
+@api_router.get("/notifications/unread-count")
+async def get_cashflow_notification_unread_count(admin: str = Depends(verify_admin)):
+    count = await db.cashflow_notifications.count_documents({"read": False, "archived": {"$ne": True}})
+    return {"unread": count}
+
+
+@api_router.put("/notifications/{notification_id}/read")
+async def mark_cashflow_notification_read(notification_id: str, admin: str = Depends(verify_admin)):
+    result = await db.cashflow_notifications.update_one(
+        {"id": notification_id, "archived": {"$ne": True}},
+        {"$set": {"read": True, "read_at": notification_iso_now(), "updated_at": notification_iso_now()}},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    row = await db.cashflow_notifications.find_one({"id": notification_id}, {"_id": 0})
+    return row
+
+
+@api_router.put("/notifications/mark-all-read")
+async def mark_all_cashflow_notifications_read(admin: str = Depends(verify_admin)):
+    now = notification_iso_now()
+    result = await db.cashflow_notifications.update_many(
+        {"read": False, "archived": {"$ne": True}},
+        {"$set": {"read": True, "read_at": now, "updated_at": now}},
+    )
+    return {"updated": result.modified_count}
+
+
 def normalise_job_tax_settings(job: Dict[str, Any]) -> Dict[str, Any]:
     treatment = normalise_vat_treatment(job.get("vat_treatment"))
     drc_enabled = bool(job.get("drc_enabled")) or treatment == "drc"
@@ -7639,6 +7938,25 @@ async def create_dashboard_finance_record(record: DashboardFinanceRecordCreate):
 
     await db.finance_dashboard_records.insert_one(data)
     await insert_finance_audit_log("create", data["id"], data, audit_actor_from_data(data))
+    try:
+        amount = notification_money(data.get("received_amount") or data.get("anticipated_amount") or data.get("expected_amount"))
+        title = "Payment received" if str(data.get("status", "")).lower() == "received" else "Finance record added"
+        await create_cashflow_notification(
+            title=title,
+            message=f"{data.get('project_name') or 'Project'}: {data.get('description') or data.get('type') or 'Finance record'} added for £{amount:,.0f}.",
+            job_id=data.get("project_id", ""),
+            job_name=data.get("project_name", ""),
+            event_type="finance_record_created",
+            category="payments",
+            impact_amount=amount,
+            severity=notification_severity_from_delta(amount),
+            source="finance_record",
+            source_id=data["id"],
+            new_value=amount,
+            metadata={"record": serialize_dashboard_finance_record(data)},
+        )
+    except Exception as exc:
+        logger.warning(f"Finance notification failed for record {data.get('id')}: {exc}")
 
     serialized = serialize_dashboard_finance_record(data)
     serialized["status"] = calculate_dashboard_finance_status(serialized)
@@ -7682,6 +8000,43 @@ async def update_dashboard_finance_record(record_id: str, update: DashboardFinan
 
     updated = await db.finance_dashboard_records.find_one({"id": record_id}, {"_id": 0})
     await insert_finance_update_audit_logs(existing, updated, update_data)
+    try:
+        old_amount = notification_money(existing.get("received_amount") or existing.get("anticipated_amount") or existing.get("expected_amount"))
+        new_amount = notification_money(updated.get("received_amount") or updated.get("anticipated_amount") or updated.get("expected_amount"))
+        amount_delta = notification_money(new_amount - old_amount)
+        old_status = str(existing.get("status") or "").lower()
+        new_status = str(updated.get("status") or "").lower()
+        should_notify = abs(amount_delta) >= 250 or old_status != new_status or existing.get("anticipated_date") != updated.get("anticipated_date") or existing.get("expected_date") != updated.get("expected_date")
+        if should_notify:
+            if new_status == "received" and old_status != "received":
+                title = "Payment received"
+                message = f"{updated.get('project_name') or 'Project'}: £{new_amount:,.0f} received for {updated.get('description') or updated.get('type') or 'finance record'}."
+                severity = "info"
+            elif new_status in {"at_risk", "overdue", "disputed"} and old_status != new_status:
+                title = f"Payment {new_status.replace('_', ' ')}"
+                message = f"{updated.get('project_name') or 'Project'}: {updated.get('description') or updated.get('type') or 'finance record'} is now {new_status.replace('_', ' ')}."
+                severity = "warning"
+            else:
+                title = "Finance cashflow changed"
+                message = f"{updated.get('project_name') or 'Project'}: finance forecast changed for {updated.get('description') or updated.get('type') or 'record'}."
+                severity = notification_severity_from_delta(amount_delta)
+            await create_cashflow_notification(
+                title=title,
+                message=message,
+                job_id=updated.get("project_id", ""),
+                job_name=updated.get("project_name", ""),
+                event_type="finance_record_updated",
+                category="payments",
+                impact_amount=amount_delta if amount_delta else new_amount,
+                severity=severity,
+                source="finance_record",
+                source_id=record_id,
+                old_value={"status": existing.get("status"), "amount": old_amount, "date": existing.get("anticipated_date") or existing.get("expected_date")},
+                new_value={"status": updated.get("status"), "amount": new_amount, "date": updated.get("anticipated_date") or updated.get("expected_date")},
+                metadata={"record": serialized_dashboard_finance_record(updated) if False else serialize_dashboard_finance_record(updated)},
+            )
+    except Exception as exc:
+        logger.warning(f"Finance update notification failed for record {record_id}: {exc}")
     serialized = serialize_dashboard_finance_record(updated)
     serialized["status"] = calculate_dashboard_finance_status(serialized)
 
@@ -9542,6 +9897,22 @@ async def create_work_order(work_order: WorkOrderCreate, admin: str = Depends(ve
         data["wo_number"] = await get_next_work_order_number()
     obj = WorkOrder(**data)
     await db.work_orders.insert_one(obj.dict())
+    try:
+        await create_cashflow_notification(
+            title="Work order created",
+            message=f"{obj.job_name or 'Project'}: work order {obj.wo_number or ''} created for £{notification_money(obj.net_amount):,.0f} net.",
+            job_id=obj.job_id,
+            job_name=obj.job_name,
+            event_type="work_order_created",
+            category="work_orders",
+            impact_amount=obj.net_amount,
+            severity=notification_severity_from_delta(obj.net_amount),
+            source="work_order",
+            source_id=obj.id,
+            new_value=obj.net_amount,
+        )
+    except Exception as exc:
+        logger.warning(f"Work order notification failed for {obj.id}: {exc}")
     return obj
 
 
@@ -9562,6 +9933,28 @@ async def update_work_order(work_order_id: str, update: WorkOrderUpdate, admin: 
 
     await db.work_orders.update_one({"id": work_order_id}, {"$set": merged})
     updated = await db.work_orders.find_one({"id": work_order_id}, {"_id": 0})
+    try:
+        old_amount = notification_money(existing.get("net_amount"))
+        new_amount = notification_money(updated.get("net_amount"))
+        old_status = str(existing.get("status") or "")
+        new_status = str(updated.get("status") or "")
+        if abs(new_amount - old_amount) >= 250 or old_status != new_status or existing.get("payment_due_date") != updated.get("payment_due_date"):
+            await create_cashflow_notification(
+                title="Work order cashflow changed",
+                message=f"{updated.get('job_name') or 'Project'}: work order {updated.get('wo_number') or ''} changed. Status {old_status or '-'} → {new_status or '-'}.",
+                job_id=updated.get("job_id", ""),
+                job_name=updated.get("job_name", ""),
+                event_type="work_order_updated",
+                category="work_orders",
+                impact_amount=new_amount - old_amount,
+                severity=notification_severity_from_delta(new_amount - old_amount),
+                source="work_order",
+                source_id=work_order_id,
+                old_value={"status": old_status, "amount": old_amount, "due": existing.get("payment_due_date")},
+                new_value={"status": new_status, "amount": new_amount, "due": updated.get("payment_due_date")},
+            )
+    except Exception as exc:
+        logger.warning(f"Work order update notification failed for {work_order_id}: {exc}")
     return WorkOrder(**updated)
 
 
@@ -10086,6 +10479,23 @@ async def create_purchase_order(po_data: PurchaseOrderCreate, admin: str = Depen
     await db.purchase_orders.insert_one(po_doc)
 
     try:
+        await create_cashflow_notification(
+            title="PO created",
+            message=f"{po_doc.get('job_name') or 'Project'}: PO {po_doc.get('po_number') or ''} created for £{notification_money(po_doc.get('net_total')):,.0f} net.",
+            job_id=po_doc.get("job_id", ""),
+            job_name=po_doc.get("job_name", ""),
+            event_type="purchase_order_created",
+            category="purchase_orders",
+            impact_amount=po_doc.get("net_total", 0),
+            severity=notification_severity_from_delta(po_doc.get("net_total", 0)),
+            source="purchase_order",
+            source_id=po_doc.get("id", ""),
+            new_value=po_doc.get("net_total", 0),
+        )
+    except Exception as exc:
+        logger.warning(f"PO notification failed for {po_doc.get('id')}: {exc}")
+
+    try:
         notification_result = await send_po_approval_notification(po_doc, requested_by=admin)
         await db.purchase_orders.update_one(
             {"id": po_obj.id},
@@ -10137,6 +10547,28 @@ async def update_purchase_order(po_id: str, po_update: PurchaseOrderUpdate, admi
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Purchase order not found")
     updated = await db.purchase_orders.find_one({"id": po_id})
+    try:
+        old_amount = notification_money(existing.get("net_total"))
+        new_amount = notification_money(updated.get("net_total"))
+        old_status = str(existing.get("status") or "")
+        new_status = str(updated.get("status") or "")
+        if abs(new_amount - old_amount) >= 250 or old_status != new_status or existing.get("payment_due_date") != updated.get("payment_due_date"):
+            await create_cashflow_notification(
+                title="PO cashflow changed",
+                message=f"{updated.get('job_name') or 'Project'}: PO {updated.get('po_number') or ''} changed. Status {old_status or '-'} → {new_status or '-'}.",
+                job_id=updated.get("job_id", ""),
+                job_name=updated.get("job_name", ""),
+                event_type="purchase_order_updated",
+                category="purchase_orders",
+                impact_amount=new_amount - old_amount,
+                severity=notification_severity_from_delta(new_amount - old_amount),
+                source="purchase_order",
+                source_id=po_id,
+                old_value={"status": old_status, "amount": old_amount, "due": existing.get("payment_due_date")},
+                new_value={"status": new_status, "amount": new_amount, "due": updated.get("payment_due_date")},
+            )
+    except Exception as exc:
+        logger.warning(f"PO update notification failed for {po_id}: {exc}")
     return PurchaseOrder(**updated)
 
 

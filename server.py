@@ -7122,6 +7122,331 @@ async def mark_all_cashflow_notifications_read(admin: str = Depends(verify_admin
     return {"updated": result.modified_count}
 
 
+# -----------------------------
+# Daily cashflow digest email
+# -----------------------------
+
+def digest_html_escape(value: Any) -> str:
+    return str(value or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def default_daily_digest_settings() -> Dict[str, Any]:
+    return {
+        "id": "default",
+        "enabled": False,
+        "recipient_email": os.environ.get("DAILY_DIGEST_TO_EMAIL", "").strip(),
+        "cc_emails": os.environ.get("DAILY_DIGEST_CC_EMAILS", "").strip(),
+        "send_time": os.environ.get("DAILY_DIGEST_SEND_TIME", "17:00").strip() or "17:00",
+        "include_zero_change_days": False,
+        "minimum_impact_amount": 0,
+        "scope": "cashflow_only",
+        "updated_at": notification_iso_now(),
+    }
+
+
+def normalise_digest_settings(data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    base = default_daily_digest_settings()
+    if data:
+        base.update({k: v for k, v in data.items() if k != "_id"})
+    base["enabled"] = bool(base.get("enabled"))
+    base["recipient_email"] = str(base.get("recipient_email") or "").strip()
+    base["cc_emails"] = str(base.get("cc_emails") or "").strip()
+    base["send_time"] = str(base.get("send_time") or "17:00").strip() or "17:00"
+    base["include_zero_change_days"] = bool(base.get("include_zero_change_days"))
+    try:
+        base["minimum_impact_amount"] = max(0, float(base.get("minimum_impact_amount") or 0))
+    except Exception:
+        base["minimum_impact_amount"] = 0
+    base["scope"] = str(base.get("scope") or "cashflow_only")
+    return base
+
+
+async def load_daily_digest_settings() -> Dict[str, Any]:
+    row = await db.notification_digest_settings.find_one({"id": "default"}, {"_id": 0})
+    return normalise_digest_settings(row)
+
+
+def split_digest_emails(value: Any) -> List[str]:
+    if isinstance(value, list):
+        raw = value
+    else:
+        raw = str(value or "").replace(";", ",").split(",")
+    return [str(item).strip() for item in raw if str(item).strip()]
+
+
+def digest_money(value: Any) -> str:
+    try:
+        number = float(value or 0)
+    except Exception:
+        number = 0.0
+    prefix = "-" if number < 0 else ""
+    return f"{prefix}£{abs(number):,.0f}"
+
+
+def digest_notification_time(value: Any) -> str:
+    if not value:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = pytz.utc.localize(parsed)
+        return parsed.astimezone(UK_TZ).strftime("%H:%M")
+    except Exception:
+        return str(value)[:16]
+
+
+def digest_date_window_utc(date_value: Optional[str] = None) -> Dict[str, Any]:
+    if date_value:
+        target_date = datetime.strptime(date_value, "%Y-%m-%d").date()
+    else:
+        target_date = get_uk_time().date()
+    start_uk = UK_TZ.localize(datetime.combine(target_date, datetime.min.time()))
+    end_uk = start_uk + timedelta(days=1)
+    start_utc = start_uk.astimezone(pytz.utc).replace(tzinfo=None)
+    end_utc = end_uk.astimezone(pytz.utc).replace(tzinfo=None)
+    return {
+        "date": target_date.isoformat(),
+        "display_date": target_date.strftime("%d/%m/%Y"),
+        "start_utc": start_utc.isoformat(),
+        "end_utc": end_utc.isoformat(),
+    }
+
+
+def build_daily_digest_bodies(notifications: List[Dict[str, Any]], settings: Dict[str, Any], display_date: str) -> Dict[str, str]:
+    count = len(notifications)
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for item in notifications:
+        category = str(item.get("category") or "cashflow").replace("_", " ").title()
+        grouped.setdefault(category, []).append(item)
+
+    subject = f"LDA Daily Cashflow Digest - {display_date}"
+    if count:
+        subject = f"LDA Daily Cashflow Digest - {count} change{'s' if count != 1 else ''} - {display_date}"
+
+    critical_count = sum(1 for item in notifications if str(item.get("severity") or "").lower() == "critical")
+    warning_count = sum(1 for item in notifications if str(item.get("severity") or "").lower() == "warning")
+    total_abs_impact = sum(abs(float(item.get("impact_amount") or 0)) for item in notifications)
+
+    text_lines = [
+        "LDA Daily Cashflow Digest",
+        f"Date: {display_date}",
+        "",
+        f"Total modifications: {count}",
+        f"Critical: {critical_count}",
+        f"Warnings: {warning_count}",
+        f"Total value movement shown: {digest_money(total_abs_impact)}",
+        "",
+    ]
+
+    html_sections = []
+    for category, rows in grouped.items():
+        text_lines.append(category)
+        text_lines.append("-" * len(category))
+        row_html = []
+        for item in rows:
+            impact = float(item.get("impact_amount") or 0)
+            impact_text = digest_money(impact) if impact else "-"
+            job_name = item.get("job_name") or "General"
+            time_text = digest_notification_time(item.get("created_at"))
+            title = item.get("title") or category
+            message = item.get("message") or ""
+            text_lines.append(f"{time_text} | {job_name} | {title} | {impact_text}")
+            if message:
+                text_lines.append(f"  {message}")
+            row_html.append(f"""
+              <tr>
+                <td style=\"padding:8px 10px;border-bottom:1px solid #e5e7eb;white-space:nowrap;color:#64748b;\">{digest_html_escape(time_text)}</td>
+                <td style=\"padding:8px 10px;border-bottom:1px solid #e5e7eb;font-weight:600;color:#0f172a;\">{digest_html_escape(job_name)}</td>
+                <td style=\"padding:8px 10px;border-bottom:1px solid #e5e7eb;color:#0f172a;\"><strong>{digest_html_escape(title)}</strong><br><span style=\"color:#475569;\">{digest_html_escape(message)}</span></td>
+                <td style=\"padding:8px 10px;border-bottom:1px solid #e5e7eb;text-align:right;font-weight:700;color:{'#dc2626' if impact > 0 else '#15803d' if impact < 0 else '#334155'};\">{digest_html_escape(impact_text)}</td>
+              </tr>
+            """)
+        html_sections.append(f"""
+          <h3 style=\"margin:24px 0 8px;color:#0f172a;\">{digest_html_escape(category)} <span style=\"color:#64748b;font-size:14px;\">({len(rows)})</span></h3>
+          <table style=\"width:100%;border-collapse:collapse;font-size:13px;background:#fff;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;\">
+            <thead>
+              <tr style=\"background:#f8fafc;color:#64748b;text-transform:uppercase;font-size:11px;letter-spacing:.04em;\">
+                <th style=\"text-align:left;padding:8px 10px;\">Time</th>
+                <th style=\"text-align:left;padding:8px 10px;\">Job</th>
+                <th style=\"text-align:left;padding:8px 10px;\">Modification</th>
+                <th style=\"text-align:right;padding:8px 10px;\">Impact</th>
+              </tr>
+            </thead>
+            <tbody>{''.join(row_html)}</tbody>
+          </table>
+        """)
+        text_lines.append("")
+
+    if not notifications:
+        text_lines.append("No cashflow-impacting modifications were recorded today.")
+        html_sections.append("<p style=\"color:#475569;\">No cashflow-impacting modifications were recorded today.</p>")
+
+    app_url = (os.environ.get("FRONTEND_PUBLIC_URL") or os.environ.get("PUBLIC_FRONTEND_URL") or os.environ.get("REACT_APP_FRONTEND_URL") or "").strip().rstrip("/")
+    notification_url = f"{app_url}/#/admin" if app_url else ""
+    button_html = f"<p style=\"margin:24px 0;\"><a href=\"{digest_html_escape(notification_url)}\" style=\"background:#d01f2f;color:#fff;text-decoration:none;padding:10px 14px;border-radius:6px;font-weight:700;\">Open LDA App</a></p>" if notification_url else ""
+
+    html_body = f"""
+    <div style=\"font-family:Arial,Helvetica,sans-serif;background:#f1f5f9;padding:24px;\">
+      <div style=\"max-width:980px;margin:0 auto;background:#ffffff;border-radius:12px;padding:24px;border:1px solid #e2e8f0;\">
+        <div style=\"border-bottom:3px solid #d01f2f;padding-bottom:14px;margin-bottom:18px;\">
+          <h2 style=\"margin:0;color:#0f172a;\">LDA Daily Cashflow Digest</h2>
+          <p style=\"margin:6px 0 0;color:#64748b;\">{digest_html_escape(display_date)}</p>
+        </div>
+        <div style=\"display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px;\">
+          <div style=\"background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px 14px;\"><div style=\"font-size:11px;color:#64748b;text-transform:uppercase;\">Modifications</div><div style=\"font-size:22px;font-weight:800;color:#0f172a;\">{count}</div></div>
+          <div style=\"background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:10px 14px;\"><div style=\"font-size:11px;color:#9a3412;text-transform:uppercase;\">Warnings</div><div style=\"font-size:22px;font-weight:800;color:#9a3412;\">{warning_count}</div></div>
+          <div style=\"background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px 14px;\"><div style=\"font-size:11px;color:#991b1b;text-transform:uppercase;\">Critical</div><div style=\"font-size:22px;font-weight:800;color:#991b1b;\">{critical_count}</div></div>
+          <div style=\"background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:10px 14px;\"><div style=\"font-size:11px;color:#166534;text-transform:uppercase;\">Value movement shown</div><div style=\"font-size:22px;font-weight:800;color:#166534;\">{digest_html_escape(digest_money(total_abs_impact))}</div></div>
+        </div>
+        {''.join(html_sections)}
+        {button_html}
+        <p style=\"margin-top:28px;color:#94a3b8;font-size:12px;\">This email was generated from LDA App cashflow notifications. It lists modifications recorded during the selected day.</p>
+      </div>
+    </div>
+    """
+
+    return {"subject": subject, "html_body": html_body, "text_body": "\n".join(text_lines)}
+
+
+async def send_daily_digest_email(to_emails: List[str], cc_emails: List[str], subject: str, html_body: str, text_body: str, payload_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not to_emails:
+        raise HTTPException(status_code=400, detail="Daily digest recipient email is not set")
+
+    power_automate_url = os.environ.get("POWER_AUTOMATE_DAILY_DIGEST_URL", "").strip()
+    power_automate_secret = os.environ.get("POWER_AUTOMATE_DAILY_DIGEST_SECRET", "").strip()
+    if power_automate_url:
+        payload = {
+            "secret": power_automate_secret,
+            "notification_type": "daily_cashflow_digest",
+            "to": ",".join(to_emails),
+            "cc": ",".join(cc_emails),
+            "subject": subject,
+            "html_body": html_body,
+            "text_body": text_body,
+            "count": len(payload_rows),
+            "notifications": payload_rows,
+        }
+        try:
+            response = requests.post(power_automate_url, json=payload, timeout=30)
+            response.raise_for_status()
+            return {"sent": True, "method": "power_automate", "status_code": response.status_code}
+        except Exception as exc:
+            logger.exception("Failed to send daily digest through Power Automate: %s", exc)
+            raise HTTPException(status_code=500, detail=f"Failed to send daily digest through Power Automate: {exc}")
+
+    smtp_host = os.environ.get("SMTP_HOST", "").strip()
+    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+    smtp_username = os.environ.get("SMTP_USERNAME", "").strip()
+    smtp_password = os.environ.get("SMTP_PASSWORD", "").strip()
+    smtp_from = os.environ.get("SMTP_FROM_EMAIL", smtp_username).strip()
+    smtp_from_name = os.environ.get("SMTP_FROM_NAME", "LDA Group").strip()
+    smtp_use_tls = os.environ.get("SMTP_USE_TLS", "true").lower() != "false"
+
+    if not smtp_host or not smtp_from:
+        raise HTTPException(status_code=500, detail="Daily digest email is not configured. Add POWER_AUTOMATE_DAILY_DIGEST_URL or SMTP settings in Render.")
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = f"{smtp_from_name} <{smtp_from}>" if smtp_from_name else smtp_from
+    msg["To"] = ", ".join(to_emails)
+    if cc_emails:
+        msg["Cc"] = ", ".join(cc_emails)
+    msg.set_content(text_body)
+    msg.add_alternative(html_body, subtype="html")
+
+    try:
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as smtp:
+            if smtp_use_tls:
+                smtp.starttls()
+            if smtp_username and smtp_password:
+                smtp.login(smtp_username, smtp_password)
+            smtp.send_message(msg)
+        return {"sent": True, "method": "smtp"}
+    except Exception as exc:
+        logger.exception("Failed to send daily digest email: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Failed to send daily digest email: {exc}")
+
+
+@api_router.get("/notifications/digest-settings")
+async def get_daily_digest_settings(admin: str = Depends(verify_admin)):
+    return await load_daily_digest_settings()
+
+
+@api_router.put("/notifications/digest-settings")
+async def update_daily_digest_settings(settings: Dict[str, Any], admin: str = Depends(verify_admin)):
+    next_settings = normalise_digest_settings(settings)
+    next_settings["id"] = "default"
+    next_settings["updated_at"] = notification_iso_now()
+    next_settings["updated_by"] = admin
+    await db.notification_digest_settings.update_one(
+        {"id": "default"},
+        {"$set": next_settings, "$setOnInsert": {"created_at": notification_iso_now()}},
+        upsert=True,
+    )
+    return next_settings
+
+
+@api_router.post("/notifications/send-daily-digest")
+async def send_daily_digest(
+    date_value: Optional[str] = Query(None, alias="date"),
+    force: bool = Query(False),
+    admin: str = Depends(verify_admin),
+):
+    settings = await load_daily_digest_settings()
+    if not settings.get("enabled") and not force:
+        return {"sent": False, "status": "disabled", "message": "Daily digest is disabled"}
+
+    window = digest_date_window_utc(date_value)
+    minimum_impact = float(settings.get("minimum_impact_amount") or 0)
+    query: Dict[str, Any] = {
+        "archived": {"$ne": True},
+        "created_at": {"$gte": window["start_utc"], "$lt": window["end_utc"]},
+    }
+    rows = await db.cashflow_notifications.find(query, {"_id": 0}).sort("created_at", 1).to_list(1000)
+    # Use absolute impact so both increases and reductions are included.
+    if minimum_impact > 0:
+        rows = [row for row in rows if abs(float(row.get("impact_amount") or 0)) >= minimum_impact]
+
+    to_emails = split_digest_emails(settings.get("recipient_email"))
+    cc_emails = split_digest_emails(settings.get("cc_emails"))
+    if not rows and not settings.get("include_zero_change_days"):
+        return {"sent": False, "status": "no_changes", "date": window["date"], "count": 0, "message": "No modifications recorded for the selected day"}
+
+    sent_key = f"{window['date']}|{','.join(to_emails)}|{','.join(cc_emails)}"
+    if not force:
+        existing = await db.notification_digest_sent_log.find_one({"sent_key": sent_key, "status": "sent"}, {"_id": 0})
+        if existing:
+            return {"sent": False, "status": "already_sent", "date": window["date"], "count": len(rows), "last_sent_at": existing.get("sent_at")}
+
+    bodies = build_daily_digest_bodies(rows, settings, window["display_date"])
+    email_result = await send_daily_digest_email(
+        to_emails=to_emails,
+        cc_emails=cc_emails,
+        subject=bodies["subject"],
+        html_body=bodies["html_body"],
+        text_body=bodies["text_body"],
+        payload_rows=rows,
+    )
+
+    sent_doc = {
+        "id": str(uuid.uuid4()),
+        "sent_key": sent_key,
+        "date": window["date"],
+        "recipient_email": ",".join(to_emails),
+        "cc_emails": ",".join(cc_emails),
+        "count": len(rows),
+        "subject": bodies["subject"],
+        "status": "sent" if email_result.get("sent") else "failed",
+        "method": email_result.get("method"),
+        "sent_at": notification_iso_now(),
+        "sent_by": admin,
+    }
+    await db.notification_digest_sent_log.insert_one(sent_doc)
+    sent_doc.pop("_id", None)
+
+    return {"sent": True, "status": "sent", "date": window["date"], "count": len(rows), "email": email_result, "log": sent_doc}
+
+
 def normalise_job_tax_settings(job: Dict[str, Any]) -> Dict[str, Any]:
     treatment = normalise_vat_treatment(job.get("vat_treatment"))
     drc_enabled = bool(job.get("drc_enabled")) or treatment == "drc"

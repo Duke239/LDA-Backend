@@ -7211,6 +7211,45 @@ def digest_date_window_utc(date_value: Optional[str] = None) -> Dict[str, Any]:
         "end_utc": end_utc.isoformat(),
     }
 
+async def get_daily_digest_rows_and_window(settings: Dict[str, Any], date_value: Optional[str] = None, minimum_impact_override: Optional[float] = None) -> Dict[str, Any]:
+    window = digest_date_window_utc(date_value)
+    if minimum_impact_override is None:
+        minimum_impact = float(settings.get("minimum_impact_amount") or 0)
+    else:
+        minimum_impact = max(0, float(minimum_impact_override or 0))
+
+    query: Dict[str, Any] = {
+        "archived": {"$ne": True},
+        "created_at": {"$gte": window["start_utc"], "$lt": window["end_utc"]},
+    }
+    rows = await db.cashflow_notifications.find(query, {"_id": 0}).sort("created_at", 1).to_list(1000)
+
+    # Use absolute impact so both risk increases and risk reductions are included.
+    if minimum_impact > 0:
+        rows = [row for row in rows if abs(float(row.get("impact_amount") or 0)) >= minimum_impact]
+
+    return {"window": window, "rows": rows, "minimum_impact": minimum_impact}
+
+
+def digest_item_for_power_automate(item: Dict[str, Any]) -> Dict[str, Any]:
+    impact = float(item.get("impact_amount") or 0)
+    return {
+        "id": item.get("id"),
+        "time": digest_notification_time(item.get("created_at")),
+        "created_at": item.get("created_at"),
+        "job_id": item.get("job_id"),
+        "job_name": item.get("job_name") or "General",
+        "category": str(item.get("category") or "cashflow").replace("_", " ").title(),
+        "severity": item.get("severity") or "info",
+        "title": item.get("title") or "Cashflow modification",
+        "message": item.get("message") or "",
+        "impact_amount": impact,
+        "impact_text": digest_money(impact) if impact else "-",
+        "changed_by": item.get("created_by") or item.get("updated_by") or "",
+        "source": item.get("source") or "",
+        "metadata": item.get("metadata") or {},
+    }
+
 
 def build_daily_digest_bodies(notifications: List[Dict[str, Any]], settings: Dict[str, Any], display_date: str) -> Dict[str, str]:
     count = len(notifications)
@@ -7386,6 +7425,93 @@ async def update_daily_digest_settings(settings: Dict[str, Any], admin: str = De
     return next_settings
 
 
+@api_router.get("/notifications/daily-digest-data")
+async def get_daily_digest_data_for_power_automate(
+    date_value: Optional[str] = Query(None, alias="date"),
+    minimum_impact: Optional[float] = Query(None),
+    admin: str = Depends(verify_admin),
+):
+    settings = await load_daily_digest_settings()
+    digest = await get_daily_digest_rows_and_window(settings, date_value, minimum_impact)
+    rows = digest["rows"]
+    window = digest["window"]
+    items = [digest_item_for_power_automate(row) for row in rows]
+
+    category_counts: Dict[str, int] = {}
+    for item in items:
+        category_counts[item["category"]] = category_counts.get(item["category"], 0) + 1
+
+    return {
+        "date": window["date"],
+        "display_date": window["display_date"],
+        "enabled": bool(settings.get("enabled")),
+        "recipient_email": settings.get("recipient_email") or "",
+        "cc_emails": settings.get("cc_emails") or "",
+        "minimum_impact_amount": digest["minimum_impact"],
+        "total_changes": len(items),
+        "critical_count": sum(1 for item in items if str(item.get("severity") or "").lower() == "critical"),
+        "warning_count": sum(1 for item in items if str(item.get("severity") or "").lower() == "warning"),
+        "total_abs_impact": sum(abs(float(item.get("impact_amount") or 0)) for item in items),
+        "category_counts": category_counts,
+        "items": items,
+    }
+
+
+@api_router.get("/notifications/daily-digest-html")
+async def get_daily_digest_html_for_power_automate(
+    date_value: Optional[str] = Query(None, alias="date"),
+    minimum_impact: Optional[float] = Query(None),
+    admin: str = Depends(verify_admin),
+):
+    settings = await load_daily_digest_settings()
+    digest = await get_daily_digest_rows_and_window(settings, date_value, minimum_impact)
+    rows = digest["rows"]
+    window = digest["window"]
+    bodies = build_daily_digest_bodies(rows, settings, window["display_date"])
+    items = [digest_item_for_power_automate(row) for row in rows]
+
+    return {
+        "date": window["date"],
+        "display_date": window["display_date"],
+        "enabled": bool(settings.get("enabled")),
+        "send_email": bool(settings.get("enabled")) and (bool(rows) or bool(settings.get("include_zero_change_days"))),
+        "recipient_email": settings.get("recipient_email") or "",
+        "cc_emails": settings.get("cc_emails") or "",
+        "subject": bodies["subject"],
+        "html_body": bodies["html_body"],
+        "text_body": bodies["text_body"],
+        "count": len(rows),
+        "items": items,
+    }
+
+
+@api_router.post("/notifications/daily-digest/mark-sent")
+async def mark_daily_digest_sent_from_power_automate(payload: Dict[str, Any], admin: str = Depends(verify_admin)):
+    date_value = str(payload.get("date") or get_uk_time().date().isoformat())
+    recipient_email = str(payload.get("recipient_email") or payload.get("to") or "").strip()
+    cc_emails = str(payload.get("cc_emails") or payload.get("cc") or "").strip()
+    status = str(payload.get("status") or "sent").strip().lower()
+    sent_key = f"{date_value}|{recipient_email}|{cc_emails}"
+    sent_doc = {
+        "id": str(uuid.uuid4()),
+        "sent_key": sent_key,
+        "date": date_value,
+        "recipient_email": recipient_email,
+        "cc_emails": cc_emails,
+        "count": int(payload.get("count") or 0),
+        "subject": payload.get("subject") or "LDA Daily Cashflow Digest",
+        "status": status,
+        "method": "power_automate",
+        "power_automate_run_id": payload.get("run_id") or payload.get("flow_run_id") or "",
+        "sent_at": notification_iso_now(),
+        "sent_by": admin,
+        "payload": {k: v for k, v in payload.items() if k not in {"html_body", "text_body"}},
+    }
+    await db.notification_digest_sent_log.insert_one(sent_doc)
+    sent_doc.pop("_id", None)
+    return {"saved": True, "log": sent_doc}
+
+
 @api_router.post("/notifications/send-daily-digest")
 async def send_daily_digest(
     date_value: Optional[str] = Query(None, alias="date"),
@@ -7396,16 +7522,9 @@ async def send_daily_digest(
     if not settings.get("enabled") and not force:
         return {"sent": False, "status": "disabled", "message": "Daily digest is disabled"}
 
-    window = digest_date_window_utc(date_value)
-    minimum_impact = float(settings.get("minimum_impact_amount") or 0)
-    query: Dict[str, Any] = {
-        "archived": {"$ne": True},
-        "created_at": {"$gte": window["start_utc"], "$lt": window["end_utc"]},
-    }
-    rows = await db.cashflow_notifications.find(query, {"_id": 0}).sort("created_at", 1).to_list(1000)
-    # Use absolute impact so both increases and reductions are included.
-    if minimum_impact > 0:
-        rows = [row for row in rows if abs(float(row.get("impact_amount") or 0)) >= minimum_impact]
+    digest = await get_daily_digest_rows_and_window(settings, date_value)
+    window = digest["window"]
+    rows = digest["rows"]
 
     to_emails = split_digest_emails(settings.get("recipient_email"))
     cc_emails = split_digest_emails(settings.get("cc_emails"))

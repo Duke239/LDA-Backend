@@ -3486,15 +3486,47 @@ async def build_weekly_application_manager_groups(
             if finance_marker_is_claimed(marker):
                 continue
 
-            scheduled_value = finance_to_number(marker.get("net_value"))
-            anticipated_value = min(
-                scheduled_value,
-                finance_to_number(marker.get("earned_value")),
+            # Project managers must work against the full application valuation,
+            # before deposit recovery, CIS and VAT cash-treatment adjustments.
+            application_value = finance_to_number(
+                marker.get("gross_value")
+                or marker.get("application_value")
+                or marker.get("value")
+                or marker.get("net_value")
             )
-            at_risk = max(0.0, scheduled_value - anticipated_value)
+            deposit_deduction = finance_to_number(marker.get("deposit_deduction"))
+            receipt_basis_net = finance_to_number(marker.get("net_value"))
+
+            # earned_value is net of deposit recovery. Add the recovery back for
+            # a like-for-like comparison with the full application valuation.
+            anticipated_application_value = min(
+                application_value,
+                max(
+                    0.0,
+                    finance_to_number(marker.get("earned_value"))
+                    + deposit_deduction,
+                ),
+            )
+
+            tax_snapshot = calculate_finance_tax_snapshot(job, receipt_basis_net)
+            expected_cash_receipt = finance_to_number(
+                tax_snapshot.get("expected_cash_value")
+            )
+            cis_deduction_value = finance_to_number(
+                tax_snapshot.get("cis_deduction_value")
+            )
+            vat_value = finance_to_number(tax_snapshot.get("vat_value"))
+
+            at_risk = max(
+                0.0,
+                application_value - anticipated_application_value,
+            )
             achieved_percent = (
-                round((anticipated_value / scheduled_value) * 100, 1)
-                if scheduled_value > 0
+                round(
+                    (anticipated_application_value / application_value) * 100,
+                    1,
+                )
+                if application_value > 0
                 else 0.0
             )
 
@@ -3535,8 +3567,26 @@ async def build_weekly_application_manager_groups(
                 "application": marker.get("label") or "Application",
                 "due_date": marker_date.isoformat(),
                 "due_date_label": marker_date.strftime("%d %b %Y"),
-                "scheduled_value": round(scheduled_value, 2),
-                "anticipated_value": round(anticipated_value, 2),
+                "application_value": round(application_value, 2),
+                "scheduled_value": round(application_value, 2),
+                "anticipated_application_value": round(
+                    anticipated_application_value,
+                    2,
+                ),
+                "anticipated_value": round(
+                    anticipated_application_value,
+                    2,
+                ),
+                "deposit_deduction": round(deposit_deduction, 2),
+                "receipt_basis_net": round(receipt_basis_net, 2),
+                "vat_treatment": tax_snapshot.get("vat_treatment"),
+                "drc_enabled": bool(tax_snapshot.get("drc_enabled")),
+                "vat_rate": finance_to_number(tax_snapshot.get("vat_rate")),
+                "vat_value": round(vat_value, 2),
+                "cis_enabled": bool(tax_snapshot.get("cis_enabled")),
+                "cis_rate": finance_to_number(tax_snapshot.get("cis_rate")),
+                "cis_deduction_value": round(cis_deduction_value, 2),
+                "expected_cash_receipt": round(expected_cash_receipt, 2),
                 "at_risk_value": round(at_risk, 2),
                 "achieved_percent": achieved_percent,
                 "status": "at_risk" if at_risk > 0.01 else "on_track",
@@ -3574,6 +3624,13 @@ async def build_weekly_application_manager_groups(
         )
         group["at_risk_total"] = round(
             sum(item["at_risk_value"] for item in group["applications"]), 2
+        )
+        group["expected_cash_receipt_total"] = round(
+            sum(
+                item.get("expected_cash_receipt", 0)
+                for item in group["applications"]
+            ),
+            2,
         )
 
     manager_groups.sort(key=lambda item: item.get("manager_name") or "")
@@ -3613,19 +3670,22 @@ def build_weekly_application_email(
                 <span style="color:#64748b;font-size:12px;">{weekly_application_escape(item.get('application'))}</span>
               </td>
               <td style="padding:10px;border-bottom:1px solid #e2e8f0;white-space:nowrap;">{weekly_application_escape(item.get('due_date_label'))}</td>
-              <td style="padding:10px;border-bottom:1px solid #e2e8f0;text-align:right;">{weekly_application_money(item.get('scheduled_value'))}</td>
-              <td style="padding:10px;border-bottom:1px solid #e2e8f0;text-align:right;">{weekly_application_money(item.get('anticipated_value'))}</td>
+              <td style="padding:10px;border-bottom:1px solid #e2e8f0;text-align:right;">{weekly_application_money(item.get('application_value'))}</td>
+              <td style="padding:10px;border-bottom:1px solid #e2e8f0;text-align:right;">{weekly_application_money(item.get('anticipated_application_value'))}</td>
+              <td style="padding:10px;border-bottom:1px solid #e2e8f0;text-align:right;">{weekly_application_money(item.get('expected_cash_receipt'))}</td>
               <td style="padding:10px;border-bottom:1px solid #e2e8f0;text-align:right;color:{risk_colour};font-weight:700;">{weekly_application_money(item.get('at_risk_value'))}</td>
               <td style="padding:10px;border-bottom:1px solid #e2e8f0;text-align:center;">{item.get('achieved_percent', 0):.1f}%</td>
+              <td style="padding:10px;border-bottom:1px solid #e2e8f0;text-align:left;font-size:12px;">{'DRC' if item.get('drc_enabled') else f"VAT {item.get('vat_rate', 0):g}%"}{f" · CIS {item.get('cis_rate', 0):g}%" if item.get('cis_enabled') else ''}</td>
               <td style="padding:10px;border-bottom:1px solid #e2e8f0;text-align:center;">{item.get('stale_progress_sections_count', 0)}</td>
             </tr>
             """
         )
         text_rows.append(
             f"- {item.get('job_name')} / {item.get('application')} / "
-            f"Due {item.get('due_date_label')} / Scheduled "
-            f"{weekly_application_money(item.get('scheduled_value'))} / "
-            f"Anticipated {weekly_application_money(item.get('anticipated_value'))} / "
+            f"Due {item.get('due_date_label')} / Application "
+            f"{weekly_application_money(item.get('application_value'))} / "
+            f"Anticipated {weekly_application_money(item.get('anticipated_application_value'))} / "
+            f"Expected receipt {weekly_application_money(item.get('expected_cash_receipt'))} / "
             f"At risk {weekly_application_money(item.get('at_risk_value'))}"
         )
 
@@ -3645,10 +3705,12 @@ def build_weekly_application_email(
               <tr style="background:#f8fafc;">
                 <th style="padding:10px;text-align:left;border-bottom:2px solid #cbd5e1;">Project</th>
                 <th style="padding:10px;text-align:left;border-bottom:2px solid #cbd5e1;">Due</th>
-                <th style="padding:10px;text-align:right;border-bottom:2px solid #cbd5e1;">Scheduled</th>
+                <th style="padding:10px;text-align:right;border-bottom:2px solid #cbd5e1;">Application</th>
                 <th style="padding:10px;text-align:right;border-bottom:2px solid #cbd5e1;">Anticipated</th>
+                <th style="padding:10px;text-align:right;border-bottom:2px solid #cbd5e1;">Expected receipt</th>
                 <th style="padding:10px;text-align:right;border-bottom:2px solid #cbd5e1;">At risk</th>
                 <th style="padding:10px;text-align:center;border-bottom:2px solid #cbd5e1;">Achieved</th>
+                <th style="padding:10px;text-align:left;border-bottom:2px solid #cbd5e1;">Tax</th>
                 <th style="padding:10px;text-align:center;border-bottom:2px solid #cbd5e1;">Stale sections</th>
               </tr>
             </thead>
@@ -3724,6 +3786,10 @@ async def send_weekly_application_email(
         "scheduled_total": manager_group.get("scheduled_total", 0),
         "anticipated_total": manager_group.get("anticipated_total", 0),
         "at_risk_total": manager_group.get("at_risk_total", 0),
+        "expected_cash_receipt_total": manager_group.get(
+            "expected_cash_receipt_total",
+            0,
+        ),
         "applications": manager_group.get("applications") or [],
     }
 

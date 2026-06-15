@@ -3330,6 +3330,64 @@ async def get_job(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
     return Job(**job)
 
+async def remove_stale_commercial_marker_finance_records(job_id: str) -> Dict[str, int]:
+    """Remove obsolete forecast rows whenever a job's commercial markers change.
+
+    Commercial markers on the job are the source of truth for planned deposits,
+    applications, finals and retention. Only genuine transaction history is kept:
+    submitted/applied, invoiced, part-received and received/paid records.
+    """
+    keep_statuses = {
+        "submitted",
+        "applied",
+        "applied_submitted",
+        "invoiced",
+        "part_received",
+        "part_paid",
+        "received",
+        "paid",
+        "disputed",
+    }
+    marker_types = {
+        "deposit",
+        "application",
+        "interim",
+        "final",
+        "final_invoice",
+        "final_application",
+        "retention",
+    }
+
+    records = await db.finance_dashboard_records.find(
+        {
+            "project_id": job_id,
+            "archived": {"$ne": True},
+            "type": {"$in": list(marker_types)},
+        },
+        {"_id": 0, "id": 1, "status": 1, "source": 1},
+    ).to_list(5000)
+
+    stale_ids = []
+    for record in records:
+        status = str(record.get("status") or "expected").strip().lower().replace(" ", "_")
+        source = str(record.get("source") or "").strip().lower()
+
+        # Variations have their own lifecycle and are not commercial-marker rows.
+        if source == "variation":
+            continue
+        if status in keep_statuses:
+            continue
+        if record.get("id"):
+            stale_ids.append(record["id"])
+
+    deleted = 0
+    if stale_ids:
+        result = await db.finance_dashboard_records.delete_many({"id": {"$in": stale_ids}})
+        deleted = result.deleted_count
+
+    return {"matched": len(records), "deleted": deleted}
+
+
 @api_router.put("/jobs/{job_id}", response_model=Job)
 async def update_job(job_id: str, job_update: JobUpdate, admin: str = Depends(verify_admin)):
     """Update job (Admin only)"""
@@ -3364,6 +3422,17 @@ async def update_job(job_id: str, job_update: JobUpdate, admin: str = Depends(ve
     result = await db.jobs.update_one({"id": job_id}, {"$set": update_dict})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Job not found")
+
+    # Commercial markers are the single source of truth for planned cash-in.
+    # When they are edited, remove every obsolete unreceived forecast row so
+    # old dates/amounts cannot remain in the company cashflow forecast.
+    if "commercial_markers" in update_dict:
+        cleanup = await remove_stale_commercial_marker_finance_records(job_id)
+        logger.info(
+            "Commercial marker finance cleanup for job %s: %s",
+            job_id,
+            cleanup,
+        )
 
     updated_job = await db.jobs.find_one({"id": job_id})
     try:

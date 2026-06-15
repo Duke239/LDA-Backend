@@ -3360,7 +3360,10 @@ async def remove_stale_commercial_marker_finance_records(job_id: str) -> Dict[st
 
     records = await db.finance_dashboard_records.find(
         {
-            "project_id": job_id,
+            "$or": [
+                {"project_id": job_id},
+                {"job_id": job_id},
+            ],
             "archived": {"$ne": True},
             "type": {"$in": list(marker_types)},
         },
@@ -3386,6 +3389,59 @@ async def remove_stale_commercial_marker_finance_records(job_id: str) -> Dict[st
         deleted = result.deleted_count
 
     return {"matched": len(records), "deleted": deleted}
+
+
+@api_router.post("/finance-records/cleanup-commercial-marker-forecasts")
+async def cleanup_all_commercial_marker_forecasts(
+    admin: str = Depends(verify_admin),
+):
+    """One-off/admin cleanup across every non-archived project.
+
+    Removes obsolete, unreceived forecast rows created from older Gantt
+    commercial markers. Submitted, invoiced, part-received, received/paid and
+    disputed transaction history is preserved.
+    """
+    jobs = await db.jobs.find(
+        {"archived": {"$ne": True}},
+        {"_id": 0, "id": 1, "name": 1},
+    ).to_list(5000)
+
+    total_matched = 0
+    total_deleted = 0
+    cleaned_jobs = []
+
+    for job in jobs:
+        job_id = str(job.get("id") or "").strip()
+        if not job_id:
+            continue
+
+        cleanup = await remove_stale_commercial_marker_finance_records(job_id)
+        total_matched += int(cleanup.get("matched", 0))
+        total_deleted += int(cleanup.get("deleted", 0))
+
+        if cleanup.get("deleted", 0):
+            cleaned_jobs.append({
+                "job_id": job_id,
+                "job_name": job.get("name") or "Unnamed job",
+                **cleanup,
+            })
+
+    logger.info(
+        "All-project commercial marker cleanup complete: %s matched, %s deleted across %s jobs",
+        total_matched,
+        total_deleted,
+        len(cleaned_jobs),
+    )
+
+    return {
+        "success": True,
+        "message": "Commercial marker forecast cleanup completed",
+        "jobs_checked": len(jobs),
+        "jobs_cleaned": len(cleaned_jobs),
+        "records_matched": total_matched,
+        "records_deleted": total_deleted,
+        "cleaned_jobs": cleaned_jobs,
+    }
 
 
 @api_router.put("/jobs/{job_id}", response_model=Job)

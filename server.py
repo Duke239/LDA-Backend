@@ -3391,6 +3391,399 @@ async def remove_stale_commercial_marker_finance_records(job_id: str) -> Dict[st
     return {"matched": len(records), "deleted": deleted}
 
 
+
+def weekly_application_money(value: Any) -> str:
+    return f"£{finance_to_number(value):,.2f}"
+
+
+def weekly_application_escape(value: Any) -> str:
+    import html
+    return html.escape(str(value or ""))
+
+
+def weekly_application_date_label(value: Any) -> str:
+    parsed = parse_iso_date_safe(value)
+    return parsed.strftime("%d %b %Y") if parsed else str(value or "")
+
+
+def weekly_application_section_last_updated(section: Dict[str, Any]) -> Optional[date]:
+    for key in [
+        "progress_updated_at",
+        "progress_updated_date",
+        "updated_at",
+        "updated_date",
+        "last_updated",
+    ]:
+        raw = section.get(key)
+        if not raw:
+            continue
+        try:
+            if isinstance(raw, datetime):
+                return raw.date()
+            return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).date()
+        except Exception:
+            parsed = parse_iso_date_safe(raw)
+            if parsed:
+                return parsed
+    return None
+
+
+async def build_weekly_application_manager_groups(
+    week_start: Optional[date] = None,
+) -> Dict[str, Any]:
+    start = week_start or get_uk_time().date()
+    start = start - timedelta(days=start.weekday())
+    end = start + timedelta(days=6)
+    stale_before = start - timedelta(days=7)
+
+    jobs = await db.jobs.find(
+        {
+            "archived": {"$ne": True},
+            "status": {"$nin": ["cancelled", "canceled", "deleted", "void"]},
+        },
+        {"_id": 0},
+    ).to_list(5000)
+
+    worker_ids = {
+        str(job.get("manager_id") or "").strip()
+        for job in jobs
+        if str(job.get("manager_id") or "").strip()
+    }
+    workers = await db.workers.find(
+        {"id": {"$in": list(worker_ids)}},
+        {"_id": 0},
+    ).to_list(5000) if worker_ids else []
+    worker_lookup = {str(item.get("id")): item for item in workers}
+
+    groups: Dict[str, Dict[str, Any]] = {}
+    skipped_no_manager = []
+    total_applications = 0
+
+    for job in jobs:
+        sections = job.get("gantt_sections") or []
+        schedule_rows = build_finance_payment_schedule(job, sections)
+
+        manager = worker_lookup.get(str(job.get("manager_id") or "").strip(), {})
+        manager_name = (
+            job.get("manager_name")
+            or manager.get("name")
+            or "Project Manager"
+        )
+        manager_email = str(
+            job.get("manager_email")
+            or manager.get("email")
+            or ""
+        ).strip()
+
+        for marker in schedule_rows:
+            if marker.get("type") not in ["application", "interim", "final_invoice"]:
+                continue
+
+            marker_date = parse_iso_date_safe(marker.get("date"))
+            if not marker_date or marker_date < start or marker_date > end:
+                continue
+
+            if finance_marker_is_claimed(marker):
+                continue
+
+            scheduled_value = finance_to_number(marker.get("net_value"))
+            anticipated_value = min(
+                scheduled_value,
+                finance_to_number(marker.get("earned_value")),
+            )
+            at_risk = max(0.0, scheduled_value - anticipated_value)
+            achieved_percent = (
+                round((anticipated_value / scheduled_value) * 100, 1)
+                if scheduled_value > 0
+                else 0.0
+            )
+
+            contributing_sections = []
+            stale_sections = []
+            missing_progress_sections = []
+
+            for section in sections:
+                planned_at_marker = section_planned_value_by_date(section, marker_date)
+                if planned_at_marker <= 0:
+                    continue
+
+                values = section_finance_values(section)
+                progress = finance_to_number(values.get("progress_percent"))
+                last_updated = weekly_application_section_last_updated(section)
+
+                section_row = {
+                    "section_id": section.get("id"),
+                    "section_name": section.get("name") or "Unnamed section",
+                    "progress_percent": round(progress, 1),
+                    "planned_value_to_marker": round(planned_at_marker, 2),
+                    "last_progress_update": last_updated.isoformat() if last_updated else None,
+                }
+                contributing_sections.append(section_row)
+
+                if progress <= 0:
+                    missing_progress_sections.append(section_row)
+                if not last_updated or last_updated < stale_before:
+                    stale_sections.append(section_row)
+
+            application = {
+                "job_id": job.get("id"),
+                "job_name": job.get("name") or "Unnamed job",
+                "client": job.get("client_name") or job.get("client") or "",
+                "manager_name": manager_name,
+                "manager_email": manager_email,
+                "marker_id": marker.get("id"),
+                "application": marker.get("label") or "Application",
+                "due_date": marker_date.isoformat(),
+                "due_date_label": marker_date.strftime("%d %b %Y"),
+                "scheduled_value": round(scheduled_value, 2),
+                "anticipated_value": round(anticipated_value, 2),
+                "at_risk_value": round(at_risk, 2),
+                "achieved_percent": achieved_percent,
+                "status": "at_risk" if at_risk > 0.01 else "on_track",
+                "contributing_sections_count": len(contributing_sections),
+                "stale_progress_sections_count": len(stale_sections),
+                "missing_progress_sections_count": len(missing_progress_sections),
+                "stale_progress_sections": stale_sections,
+                "missing_progress_sections": missing_progress_sections,
+            }
+
+            if not manager_email:
+                skipped_no_manager.append(application)
+                continue
+
+            key = manager_email.lower()
+            if key not in groups:
+                groups[key] = {
+                    "manager_name": manager_name,
+                    "manager_email": manager_email,
+                    "applications": [],
+                }
+            groups[key]["applications"].append(application)
+            total_applications += 1
+
+    manager_groups = list(groups.values())
+    for group in manager_groups:
+        group["applications"].sort(
+            key=lambda item: (item.get("due_date") or "", item.get("job_name") or "")
+        )
+        group["scheduled_total"] = round(
+            sum(item["scheduled_value"] for item in group["applications"]), 2
+        )
+        group["anticipated_total"] = round(
+            sum(item["anticipated_value"] for item in group["applications"]), 2
+        )
+        group["at_risk_total"] = round(
+            sum(item["at_risk_value"] for item in group["applications"]), 2
+        )
+
+    manager_groups.sort(key=lambda item: item.get("manager_name") or "")
+
+    return {
+        "week_start": start.isoformat(),
+        "week_end": end.isoformat(),
+        "manager_count": len(manager_groups),
+        "application_count": total_applications,
+        "managers": manager_groups,
+        "skipped_no_manager_email": skipped_no_manager,
+    }
+
+
+def build_weekly_application_email(
+    manager_group: Dict[str, Any],
+    week_start: str,
+    week_end: str,
+) -> Dict[str, str]:
+    manager_name = manager_group.get("manager_name") or "Project Manager"
+    applications = manager_group.get("applications") or []
+    subject = (
+        f"Applications due this week – progress update required "
+        f"({weekly_application_date_label(week_start)} to "
+        f"{weekly_application_date_label(week_end)})"
+    )
+
+    rows = []
+    text_rows = []
+    for item in applications:
+        risk_colour = "#b91c1c" if item.get("at_risk_value", 0) > 0.01 else "#166534"
+        rows.append(
+            f"""
+            <tr>
+              <td style="padding:10px;border-bottom:1px solid #e2e8f0;">
+                <strong>{weekly_application_escape(item.get('job_name'))}</strong><br>
+                <span style="color:#64748b;font-size:12px;">{weekly_application_escape(item.get('application'))}</span>
+              </td>
+              <td style="padding:10px;border-bottom:1px solid #e2e8f0;white-space:nowrap;">{weekly_application_escape(item.get('due_date_label'))}</td>
+              <td style="padding:10px;border-bottom:1px solid #e2e8f0;text-align:right;">{weekly_application_money(item.get('scheduled_value'))}</td>
+              <td style="padding:10px;border-bottom:1px solid #e2e8f0;text-align:right;">{weekly_application_money(item.get('anticipated_value'))}</td>
+              <td style="padding:10px;border-bottom:1px solid #e2e8f0;text-align:right;color:{risk_colour};font-weight:700;">{weekly_application_money(item.get('at_risk_value'))}</td>
+              <td style="padding:10px;border-bottom:1px solid #e2e8f0;text-align:center;">{item.get('achieved_percent', 0):.1f}%</td>
+              <td style="padding:10px;border-bottom:1px solid #e2e8f0;text-align:center;">{item.get('stale_progress_sections_count', 0)}</td>
+            </tr>
+            """
+        )
+        text_rows.append(
+            f"- {item.get('job_name')} / {item.get('application')} / "
+            f"Due {item.get('due_date_label')} / Scheduled "
+            f"{weekly_application_money(item.get('scheduled_value'))} / "
+            f"Anticipated {weekly_application_money(item.get('anticipated_value'))} / "
+            f"At risk {weekly_application_money(item.get('at_risk_value'))}"
+        )
+
+    html_body = f"""
+    <div style="background:#f1f5f9;padding:24px;font-family:Arial,sans-serif;color:#0f172a;">
+      <div style="max-width:960px;margin:0 auto;background:white;border-radius:12px;overflow:hidden;border:1px solid #e2e8f0;">
+        <div style="background:#991b1b;color:white;padding:22px 26px;">
+          <h1 style="margin:0;font-size:22px;">Applications due this week</h1>
+          <p style="margin:6px 0 0;color:#fecaca;">Progress update required</p>
+        </div>
+        <div style="padding:24px 26px;">
+          <p>Hi {weekly_application_escape(manager_name)},</p>
+          <p>The following application(s) are due this week for projects you are managing.</p>
+
+          <table style="width:100%;border-collapse:collapse;margin:20px 0;font-size:13px;">
+            <thead>
+              <tr style="background:#f8fafc;">
+                <th style="padding:10px;text-align:left;border-bottom:2px solid #cbd5e1;">Project</th>
+                <th style="padding:10px;text-align:left;border-bottom:2px solid #cbd5e1;">Due</th>
+                <th style="padding:10px;text-align:right;border-bottom:2px solid #cbd5e1;">Scheduled</th>
+                <th style="padding:10px;text-align:right;border-bottom:2px solid #cbd5e1;">Anticipated</th>
+                <th style="padding:10px;text-align:right;border-bottom:2px solid #cbd5e1;">At risk</th>
+                <th style="padding:10px;text-align:center;border-bottom:2px solid #cbd5e1;">Achieved</th>
+                <th style="padding:10px;text-align:center;border-bottom:2px solid #cbd5e1;">Stale sections</th>
+              </tr>
+            </thead>
+            <tbody>{''.join(rows)}</tbody>
+          </table>
+
+          <div style="background:#fff7ed;border-left:4px solid #ea580c;padding:14px 16px;margin:20px 0;">
+            <strong>Action required</strong>
+            <ul style="margin:10px 0 0;padding-left:20px;">
+              <li>Update the progress percentage for every active section.</li>
+              <li>Confirm completed work is accurately reflected.</li>
+              <li>Check incomplete work has not been overstated.</li>
+              <li>Review variations or additional works that should be included.</li>
+              <li>Ensure the anticipated application value is as close as possible to the amount expected to be submitted.</li>
+            </ul>
+          </div>
+
+          <p style="color:#475569;font-size:13px;">
+            Anticipated values are calculated from the latest section progress recorded in the project programme.
+            Out-of-date progress may result in an inaccurate application value or an avoidable amount being shown as at risk.
+          </p>
+        </div>
+      </div>
+    </div>
+    """
+
+    text_body = "\n".join([
+        f"Hi {manager_name},",
+        "",
+        "The following applications are due this week:",
+        *text_rows,
+        "",
+        "Please update every active section's progress and review variations so the anticipated application value is as close as possible to the amount expected to be submitted.",
+        "",
+        "LDA Group",
+    ])
+
+    return {"subject": subject, "html_body": html_body, "text_body": text_body}
+
+
+async def send_weekly_application_email(
+    manager_group: Dict[str, Any],
+    week_start: str,
+    week_end: str,
+) -> Dict[str, Any]:
+    email = build_weekly_application_email(manager_group, week_start, week_end)
+    power_automate_url = os.environ.get(
+        "POWER_AUTOMATE_WEEKLY_APPLICATION_URL",
+        os.environ.get("POWER_AUTOMATE_DAILY_DIGEST_URL", ""),
+    ).strip()
+    power_automate_secret = os.environ.get(
+        "POWER_AUTOMATE_WEEKLY_APPLICATION_SECRET",
+        os.environ.get("POWER_AUTOMATE_DAILY_DIGEST_SECRET", ""),
+    ).strip()
+
+    if not power_automate_url:
+        raise HTTPException(
+            status_code=500,
+            detail="Weekly application reminder email is not configured. Add POWER_AUTOMATE_WEEKLY_APPLICATION_URL in Render.",
+        )
+
+    payload = {
+        "secret": power_automate_secret,
+        "notification_type": "weekly_application_reminder",
+        "to": manager_group.get("manager_email"),
+        "cc": os.environ.get("WEEKLY_APPLICATION_CC_EMAILS", ""),
+        "subject": email["subject"],
+        "html_body": email["html_body"],
+        "text_body": email["text_body"],
+        "week_start": week_start,
+        "week_end": week_end,
+        "application_count": len(manager_group.get("applications") or []),
+        "scheduled_total": manager_group.get("scheduled_total", 0),
+        "anticipated_total": manager_group.get("anticipated_total", 0),
+        "at_risk_total": manager_group.get("at_risk_total", 0),
+        "applications": manager_group.get("applications") or [],
+    }
+
+    response = requests.post(power_automate_url, json=payload, timeout=30)
+    response.raise_for_status()
+    return {
+        "sent": True,
+        "to": manager_group.get("manager_email"),
+        "status_code": response.status_code,
+    }
+
+
+@api_router.get("/weekly-application-reminders/preview")
+async def preview_weekly_application_reminders(
+    week_start: Optional[str] = Query(None),
+    admin: str = Depends(verify_admin),
+):
+    parsed_start = parse_iso_date_safe(week_start) if week_start else None
+    return await build_weekly_application_manager_groups(parsed_start)
+
+
+@api_router.post("/weekly-application-reminders/send")
+async def send_weekly_application_reminders(
+    week_start: Optional[str] = Query(None),
+    admin: str = Depends(verify_admin),
+):
+    parsed_start = parse_iso_date_safe(week_start) if week_start else None
+    digest = await build_weekly_application_manager_groups(parsed_start)
+
+    results = []
+    errors = []
+    for group in digest.get("managers") or []:
+        try:
+            result = await send_weekly_application_email(
+                group,
+                digest["week_start"],
+                digest["week_end"],
+            )
+            results.append(result)
+        except Exception as exc:
+            errors.append({
+                "manager_name": group.get("manager_name"),
+                "manager_email": group.get("manager_email"),
+                "error": str(exc),
+            })
+
+    return {
+        "success": len(errors) == 0,
+        "week_start": digest["week_start"],
+        "week_end": digest["week_end"],
+        "manager_count": digest["manager_count"],
+        "application_count": digest["application_count"],
+        "emails_sent": len(results),
+        "emails_failed": len(errors),
+        "results": results,
+        "errors": errors,
+        "skipped_no_manager_email": digest.get("skipped_no_manager_email") or [],
+    }
+
+
 @api_router.post("/finance-records/cleanup-commercial-marker-forecasts")
 async def cleanup_all_commercial_marker_forecasts(
     admin: str = Depends(verify_admin),

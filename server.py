@@ -373,6 +373,13 @@ class JobUpdate(BaseModel):
     tax_notes: Optional[str] = None
 
 
+class BulkUnassignAllPersonnelRequest(BaseModel):
+    confirmation: str
+    include_archived_jobs: bool = True
+    cancel_open_daily_checks: bool = True
+
+
+
 # ==================== CLIENT / CUSTOMER SYSTEM MODELS ====================
 
 class ClientContact(BaseModel):
@@ -3018,6 +3025,144 @@ async def get_jobs(active_only: bool = Query(False), include_archived: bool = Qu
 
     jobs = await db.jobs.find(filter_dict).sort("name", 1).to_list(1000)
     return [Job(**job) for job in jobs]
+
+
+@api_router.post("/jobs/unassign-all-personnel")
+async def unassign_all_job_personnel(
+    request: BulkUnassignAllPersonnelRequest,
+    super_admin: Dict[str, Any] = Depends(get_super_admin_user),
+):
+    """Remove every assigned manager/supervisor/personnel reference from every job.
+
+    This is intentionally Super Admin only and requires an exact confirmation phrase.
+    It also disables and cancels open Daily Progress Check records so stale WhatsApp
+    messages, reminders and escalation emails cannot continue after the reset.
+    """
+    required_confirmation = "CLEAR ALL JOB PERSONNEL"
+    if str(request.confirmation or "").strip() != required_confirmation:
+        raise HTTPException(
+            status_code=400,
+            detail=f'Type "{required_confirmation}" exactly to confirm this action',
+        )
+
+    job_filter: Dict[str, Any] = {}
+    if not request.include_archived_jobs:
+        job_filter["archived"] = {"$ne": True}
+
+    now = datetime.utcnow()
+    cleared_fields = {
+        # Current/legacy office and project manager fields.
+        "manager_id": "",
+        "manager_name": "",
+        "manager_email": "",
+        "manager_phone": "",
+        "project_manager_id": "",
+        "project_manager_name": "",
+        "project_manager_email": "",
+        "project_manager_phone": "",
+        "projectManagerId": "",
+        "projectManagerName": "",
+        "projectManagerEmail": "",
+        "projectManagerPhone": "",
+
+        # Daily Progress office manager fields.
+        "office_manager_id": "",
+        "office_manager_name": "",
+        "office_manager_email": "",
+        "office_manager_phone": "",
+        "officeManagerId": "",
+        "officeManagerName": "",
+        "officeManagerEmail": "",
+        "officeManagerPhone": "",
+
+        # Daily Progress operations manager fields.
+        "operations_manager_id": "",
+        "operations_manager_name": "",
+        "operations_manager_email": "",
+        "operations_manager_phone": "",
+        "operation_manager_id": "",
+        "operation_manager_name": "",
+        "operation_manager_email": "",
+        "operation_manager_phone": "",
+        "operationsManagerId": "",
+        "operationsManagerName": "",
+        "operationsManagerEmail": "",
+        "operationsManagerPhone": "",
+
+        # Current/legacy supervisor, site supervisor and lead-man fields.
+        "supervisor_id": "",
+        "supervisor_name": "",
+        "supervisor_email": "",
+        "supervisor_phone": "",
+        "site_supervisor_id": "",
+        "site_supervisor_name": "",
+        "site_supervisor_email": "",
+        "site_supervisor_phone": "",
+        "siteSupervisorId": "",
+        "siteSupervisorName": "",
+        "siteSupervisorEmail": "",
+        "siteSupervisorPhone": "",
+        "lead_man_id": "",
+        "lead_man_name": "",
+        "lead_man_email": "",
+        "lead_man_phone": "",
+        "leadManId": "",
+        "leadManName": "",
+        "leadManEmail": "",
+        "leadManPhone": "",
+
+        "personnel_assignments_cleared_at": now,
+        "personnel_assignments_cleared_by": super_admin.get("name") or super_admin.get("email") or "Super Admin",
+        "updated_at": now,
+    }
+
+    job_result = await db.jobs.update_many(job_filter, {"$set": cleared_fields})
+
+    cancelled_checks = 0
+    if request.cancel_open_daily_checks:
+        check_result = await db.daily_progress_checks.update_many(
+            {
+                "status": {"$nin": ["completed", "cancelled", "canceled", "closed"]},
+            },
+            {
+                "$set": {
+                    "status": "cancelled",
+                    "notification_enabled": False,
+                    "cancelled_at": now,
+                    "cancelled_reason": "All job personnel assignments cleared",
+                    "cancelled_by": super_admin.get("name") or super_admin.get("email") or "Super Admin",
+                    "updated_at": now,
+                }
+            },
+        )
+        cancelled_checks = check_result.modified_count
+
+    await db.audit_logs.insert_one({
+        "id": str(uuid.uuid4()),
+        "record_type": "job_personnel_bulk_reset",
+        "record_id": "all_jobs",
+        "project_id": None,
+        "project_name": None,
+        "action": "clear_all_job_personnel",
+        "field": "assigned_personnel",
+        "field_label": "Assigned Personnel",
+        "old_value": "Assigned personnel across jobs",
+        "new_value": "Cleared",
+        "changed_by": super_admin.get("name") or super_admin.get("email") or "Super Admin",
+        "changed_by_email": super_admin.get("email", ""),
+        "changed_by_role": super_admin.get("role", "super_admin"),
+        "changed_at": now.isoformat(),
+        "description": f"Cleared all assigned personnel from {job_result.modified_count} jobs and cancelled {cancelled_checks} open Daily Progress Checks.",
+    })
+
+    return {
+        "success": True,
+        "message": "All assigned personnel have been cleared from all selected jobs",
+        "jobs_matched": job_result.matched_count,
+        "jobs_updated": job_result.modified_count,
+        "daily_checks_cancelled": cancelled_checks,
+        "included_archived_jobs": request.include_archived_jobs,
+    }
 
 
 
@@ -15351,12 +15496,22 @@ async def build_daily_progress_check_for_job(job: Dict[str, Any], check_day: dat
     if not application_date:
         return None
 
-    operations_manager_id = str(job.get("operations_manager_id") or job.get("manager_id") or "").strip()
-    operations_manager = await db.workers.find_one({"id": operations_manager_id}, {"_id": 0}) if operations_manager_id else None
-    operations_manager = operations_manager or {}
-    operations_name = job.get("operations_manager_name") or operations_manager.get("name") or job.get("manager_name") or "Operations Manager"
+    # Daily Progress correspondence must only go to the explicitly assigned
+    # Operations Manager. Never fall back to Project Manager or Supervisor.
+    operations_manager_id = str(job.get("operations_manager_id") or "").strip()
+    if not operations_manager_id:
+        return None
+    operations_manager = await db.workers.find_one(
+        {"id": operations_manager_id, "active": True, "archived": {"$ne": True}},
+        {"_id": 0},
+    )
+    if not operations_manager:
+        return None
+    operations_name = operations_manager.get("name") or job.get("operations_manager_name") or "Operations Manager"
     operations_phone = str(operations_manager.get("phone") or job.get("operations_manager_phone") or "").strip()
     operations_email = str(operations_manager.get("email") or job.get("operations_manager_email") or "").strip()
+    if not operations_phone:
+        return None
 
     office_manager_id = str(job.get("office_manager_id") or "").strip()
     office_manager = await db.workers.find_one({"id": office_manager_id}, {"_id": 0}) if office_manager_id else None
@@ -15438,6 +15593,7 @@ async def build_daily_progress_check_for_job(job: Dict[str, Any], check_day: dat
         "created_at": now,
         "updated_at": now,
         "notification_log": [],
+        "notification_enabled": True,
     }
     await db.daily_progress_checks.update_one(
         {"check_date": check_day.isoformat(), "job_id": job.get("id"), "application_id": application.get("id")},
@@ -15522,7 +15678,7 @@ async def send_twilio_whatsapp(kind: str, check: Dict[str, Any], token: Optional
     to_number = normalise_whatsapp_number(check.get("operations_manager_phone"))
     frontend_url = daily_progress_frontend_url()
     active_token = token or check.get("mobile_token")
-    mobile_link = f"{frontend_url}/#/daily-progress/{active_token}" if frontend_url and active_token else ""
+    mobile_link = f"{frontend_url}/daily-progress/{active_token}" if frontend_url and active_token else ""
 
     missing = []
     if not account_sid: missing.append("TWILIO_ACCOUNT_SID")
@@ -15582,7 +15738,7 @@ async def daily_progress_send_webhook(kind: str, check: Dict[str, Any], token: O
     url = os.environ.get("POWER_AUTOMATE_DAILY_PROGRESS_URL", "").strip()
     secret = os.environ.get("POWER_AUTOMATE_DAILY_PROGRESS_SECRET", "").strip()
     frontend_url = daily_progress_frontend_url()
-    mobile_link = f"{frontend_url}/#/daily-progress/{token or check.get('mobile_token')}" if frontend_url and (token or check.get("mobile_token")) else ""
+    mobile_link = f"{frontend_url}/daily-progress/{token or check.get('mobile_token')}" if frontend_url and (token or check.get("mobile_token")) else ""
     if not url:
         return {"sent": False, "reason": "POWER_AUTOMATE_DAILY_PROGRESS_URL is not configured"}
     payload = {
@@ -15802,9 +15958,19 @@ async def remind_incomplete_daily_progress(request: DailyProgressTriggerRequest)
     configured = daily_progress_trigger_secret()
     if configured and not secrets.compare_digest(request.secret, configured): raise HTTPException(status_code=403, detail="Invalid trigger secret")
     check_day = parse_iso_date_safe(request.check_date) if request.check_date else get_uk_time().date()
-    docs = await db.daily_progress_checks.find({"check_date": check_day.isoformat(), "operations_submitted_at": None}, {"_id": 0}).to_list(5000)
+    docs = await db.daily_progress_checks.find({"check_date": check_day.isoformat(), "operations_submitted_at": None, "notification_enabled": {"$ne": False}, "status": {"$nin": ["cancelled", "canceled", "completed", "closed"]}}, {"_id": 0}).to_list(5000)
     results = []
     for doc in docs:
+        job = await db.jobs.find_one({"id": doc.get("job_id")}, {"_id": 0, "operations_manager_id": 1})
+        current_ops_id = str((job or {}).get("operations_manager_id") or "").strip()
+        saved_ops_id = str(doc.get("operations_manager_id") or "").strip()
+        if not current_ops_id or current_ops_id != saved_ops_id:
+            await db.daily_progress_checks.update_one(
+                {"id": doc.get("id")},
+                {"$set": {"status": "cancelled", "notification_enabled": False, "cancelled_at": datetime.utcnow(), "cancelled_reason": "Operations Manager unassigned or changed", "updated_at": datetime.utcnow()}},
+            )
+            results.append({"check_id": doc.get("id"), "result": {"sent": False, "reason": "Operations Manager unassigned or changed"}})
+            continue
         results.append({"check_id": doc.get("id"), "result": await daily_progress_send_webhook("daily_progress_reminder", doc, None)})
     return {"success": True, "count": len(results), "results": results}
 
@@ -15814,9 +15980,19 @@ async def escalate_daily_progress(request: DailyProgressTriggerRequest):
     configured = daily_progress_trigger_secret()
     if configured and not secrets.compare_digest(request.secret, configured): raise HTTPException(status_code=403, detail="Invalid trigger secret")
     check_day = parse_iso_date_safe(request.check_date) if request.check_date else get_uk_time().date()
-    docs = await db.daily_progress_checks.find({"check_date": check_day.isoformat(), "$or": [{"operations_submitted_at": None}, {"help_count": {"$gt": 0}}]}, {"_id": 0}).to_list(5000)
+    docs = await db.daily_progress_checks.find({"check_date": check_day.isoformat(), "notification_enabled": {"$ne": False}, "status": {"$nin": ["cancelled", "canceled", "completed", "closed"]}, "$or": [{"operations_submitted_at": None}, {"help_count": {"$gt": 0}}]}, {"_id": 0}).to_list(5000)
     results = []
     for doc in docs:
+        job = await db.jobs.find_one({"id": doc.get("job_id")}, {"_id": 0, "operations_manager_id": 1, "office_manager_id": 1})
+        current_ops_id = str((job or {}).get("operations_manager_id") or "").strip()
+        saved_ops_id = str(doc.get("operations_manager_id") or "").strip()
+        if not current_ops_id or current_ops_id != saved_ops_id:
+            await db.daily_progress_checks.update_one(
+                {"id": doc.get("id")},
+                {"$set": {"status": "cancelled", "notification_enabled": False, "cancelled_at": datetime.utcnow(), "cancelled_reason": "Operations Manager unassigned or changed", "updated_at": datetime.utcnow()}},
+            )
+            results.append({"check_id": doc.get("id"), "result": {"sent": False, "reason": "Operations Manager unassigned or changed"}})
+            continue
         kind = "daily_progress_help_escalation" if doc.get("help_count", 0) > 0 else "daily_progress_no_update_escalation"
         results.append({"check_id": doc.get("id"), "result": await daily_progress_send_webhook(kind, doc, None)})
     return {"success": True, "count": len(results), "results": results}

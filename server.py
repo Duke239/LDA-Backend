@@ -1721,6 +1721,7 @@ APP_SECTIONS = [
     "clients",
     "jobs",
     "project-management",
+    "daily-progress-checks",
     "work-orders",
     "variations",
     "schedule",
@@ -1733,7 +1734,7 @@ APP_SECTIONS = [
     "settings",
 ]
 
-ROLE_PERMISSION_ROLES = ["super_admin", "admin", "project_manager", "accounts", "worker"]
+ROLE_PERMISSION_ROLES = ["super_admin", "admin", "project_manager", "office_manager", "operations_manager", "site_supervisor", "accounts", "worker"]
 
 DEFAULT_ROLE_PERMISSIONS = {
     "super_admin": {section: True for section in APP_SECTIONS},
@@ -1743,6 +1744,7 @@ DEFAULT_ROLE_PERMISSIONS = {
         "clients": True,
         "jobs": True,
         "project-management": False,
+        "daily-progress-checks": True,
         "work-orders": True,
         "variations": True,
         "schedule": False,
@@ -1760,6 +1762,7 @@ DEFAULT_ROLE_PERMISSIONS = {
         "clients": False,
         "jobs": False,
         "project-management": True,
+        "daily-progress-checks": True,
         "work-orders": True,
         "variations": True,
         "schedule": True,
@@ -1771,12 +1774,34 @@ DEFAULT_ROLE_PERMISSIONS = {
         "materials-reports": False,
         "settings": False,
     },
+    "office_manager": {
+        "dashboard": False, "workers": False, "clients": False, "jobs": False,
+        "project-management": True, "daily-progress-checks": True, "work-orders": True,
+        "variations": True, "schedule": True, "subcontractors": False,
+        "purchase-orders": False, "finance": True, "price-builder": False,
+        "time-reports": False, "materials-reports": False, "settings": False,
+    },
+    "operations_manager": {
+        "dashboard": False, "workers": False, "clients": False, "jobs": False,
+        "project-management": True, "daily-progress-checks": False, "work-orders": True,
+        "variations": True, "schedule": True, "subcontractors": False,
+        "purchase-orders": False, "finance": False, "price-builder": False,
+        "time-reports": False, "materials-reports": False, "settings": False,
+    },
+    "site_supervisor": {
+        "dashboard": False, "workers": False, "clients": False, "jobs": False,
+        "project-management": False, "daily-progress-checks": False, "work-orders": False,
+        "variations": False, "schedule": True, "subcontractors": False,
+        "purchase-orders": False, "finance": False, "price-builder": False,
+        "time-reports": False, "materials-reports": False, "settings": False,
+    },
     "accounts": {
         "dashboard": False,
         "workers": False,
         "clients": False,
         "jobs": False,
         "project-management": False,
+        "daily-progress-checks": False,
         "work-orders": True,
         "variations": True,
         "schedule": False,
@@ -1796,6 +1821,9 @@ DEFAULT_ROLE_LANDING_PAGES = {
     "super_admin": "dashboard",
     "admin": "dashboard",
     "project_manager": "project-management",
+    "office_manager": "daily-progress-checks",
+    "operations_manager": "project-management",
+    "site_supervisor": "schedule",
     "accounts": "finance",
     "worker": "dashboard",
 }

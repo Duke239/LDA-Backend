@@ -15592,7 +15592,16 @@ async def build_daily_progress_check_for_job(job: Dict[str, Any], check_day: dat
 
     token = daily_progress_token()
     token_hash = hashlib.sha256(token.encode()).hexdigest()
-    application_value = finance_to_number(application.get("gross_value") or application.get("application_value") or application.get("value") or expected_total)
+    application_value = finance_to_number(
+        application.get("application_to_send")
+        or application.get("claimable_net_value")
+        or application.get("supported_net_value")
+        or application.get("net_value")
+        or application.get("gross_value")
+        or application.get("application_value")
+        or application.get("value")
+        or expected_total
+    )
     supported_application = min(application_value, supported_total)
     check_id = str(uuid.uuid4())
     now = datetime.utcnow()

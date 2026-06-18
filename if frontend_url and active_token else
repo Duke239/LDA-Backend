@@ -15522,7 +15522,7 @@ async def send_twilio_whatsapp(kind: str, check: Dict[str, Any], token: Optional
     to_number = normalise_whatsapp_number(check.get("operations_manager_phone"))
     frontend_url = daily_progress_frontend_url()
     active_token = token or check.get("mobile_token")
-    mobile_link = f"{frontend_url}/daily-progress/{active_token}" if frontend_url and active_token else ""
+    mobile_link = f"{frontend_url}/#/daily-progress/{active_token}" if frontend_url and active_token else ""
 
     missing = []
     if not account_sid: missing.append("TWILIO_ACCOUNT_SID")
@@ -15582,7 +15582,7 @@ async def daily_progress_send_webhook(kind: str, check: Dict[str, Any], token: O
     url = os.environ.get("POWER_AUTOMATE_DAILY_PROGRESS_URL", "").strip()
     secret = os.environ.get("POWER_AUTOMATE_DAILY_PROGRESS_SECRET", "").strip()
     frontend_url = daily_progress_frontend_url()
-    mobile_link = f"{frontend_url}/daily-progress/{token or check.get('mobile_token')}" if frontend_url and (token or check.get("mobile_token")) else ""
+    mobile_link = f"{frontend_url}/#/daily-progress/{token or check.get('mobile_token')}" if frontend_url and (token or check.get("mobile_token")) else ""
     if not url:
         return {"sent": False, "reason": "POWER_AUTOMATE_DAILY_PROGRESS_URL is not configured"}
     payload = {

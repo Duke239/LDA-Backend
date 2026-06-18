@@ -8569,42 +8569,12 @@ def build_finance_payment_schedule(job: Dict[str, Any], sections: List[Dict[str,
     contract_value = finance_contract_value(job, sections)
     earned_to_date = sum(section_finance_values(section).get("earned_value", 0.0) for section in sections)
 
-    fixed_total = 0.0
-    auto_indexes: List[int] = []
-    for index, marker in enumerate(markers):
-        marker_type = marker.get("type")
-        if marker_type == "deposit":
-            fixed_total += finance_deposit_marker_value(job, marker, contract_value)
-        elif marker_type in ["application", "interim"] and not finance_marker_is_fixed(marker):
-            auto_indexes.append(index)
-        else:
-            fixed_total += finance_marker_stored_value(marker)
-
-    if auto_indexes and contract_value > 0:
-        remaining = max(0.0, finance_round_money(contract_value - fixed_total))
-        base = math.floor((remaining / len(auto_indexes)) * 100) / 100
-        allocated = 0.0
-        for i, marker_index in enumerate(auto_indexes):
-            value = finance_round_money(remaining - allocated) if i == len(auto_indexes) - 1 else finance_round_money(base)
-            allocated = finance_round_money(allocated + value)
-            markers[marker_index].update({
-                "value": value,
-                "net_value": value,
-                "netValue": value,
-                "gross_value": value,
-                "manual_value": 0.0,
-                "value_mode": "auto",
-                "value_type": "auto",
-                "calculationMode": "auto",
-                "calculation_mode": "auto",
-                "manual": False,
-                "isManual": False,
-                "auto": True,
-                "isAuto": True,
-            })
+    # Do not pre-allocate automatic application markers by equal split.
+    # Automatic application values must follow the programme/Gantt valuation
+    # at each marker date, matching the Project Management Gantt calculation.
 
     previous_application_earned_cumulative = 0.0
-    previous_net_payments = 0.0
+    previous_gross_applications = 0.0
     rows = []
 
     for marker in markers:
@@ -8630,12 +8600,12 @@ def build_finance_payment_schedule(job: Dict[str, Any], sections: List[Dict[str,
             elif value_mode == "manual" and manual_value > 0:
                 gross_value = manual_value
             else:
-                gross_value = max(0.0, capped_planned - previous_net_payments)
+                gross_value = max(0.0, capped_planned - previous_gross_applications)
             earned_period = max(0.0, capped_earned - previous_application_earned_cumulative)
             previous_application_earned_cumulative = max(previous_application_earned_cumulative, capped_earned)
         elif marker_type == "final_invoice":
             stored_value = finance_marker_stored_value(marker)
-            gross_value = stored_value if stored_value > 0 else (manual_value if value_mode == "manual" and manual_value > 0 else max(0.0, contract_value - previous_net_payments))
+            gross_value = stored_value if stored_value > 0 else (manual_value if value_mode == "manual" and manual_value > 0 else max(0.0, contract_value - previous_gross_applications))
             earned_period = max(0.0, earned_to_date - previous_application_earned_cumulative)
             previous_application_earned_cumulative = max(previous_application_earned_cumulative, earned_to_date)
         elif marker_type == "retention":
@@ -8650,7 +8620,13 @@ def build_finance_payment_schedule(job: Dict[str, Any], sections: List[Dict[str,
         net_value = max(0.0, gross_value - deposit_deduction)
         net_earned = net_value if marker_type == "deposit" else max(0.0, earned_period - deposit_deduction)
         risk_value = max(0.0, net_value - net_earned)
-        previous_net_payments += net_value
+        # Deposits and retention must not reduce the gross value of later
+        # programme-driven applications. Only earlier application-like gross
+        # values are deducted from the cumulative planned valuation.
+        if marker_type in ["application", "interim", "final_invoice"]:
+            previous_gross_applications = finance_round_money(
+                previous_gross_applications + gross_value
+            )
 
         rows.append({
             **marker,
@@ -15914,7 +15890,12 @@ async def submit_daily_progress_mobile(token: str, request: DailyProgressSubmitR
         old_progress = max(0.0, min(100.0, finance_to_number(section.get("progress_percent"))))
         new_progress = 100.0 if item.mark_complete else (old_progress if item.progress_percent is None else max(0.0, min(100.0, item.progress_percent)))
         section["progress_percent"] = round(new_progress, 1)
+        # Keep legacy/frontend aliases in sync so every Gantt view reads the
+        # same progress value after a mobile Daily Progress update.
+        section["progress"] = round(new_progress, 1)
+        section["progressPercent"] = round(new_progress, 1)
         section["progress_updated_at"] = now.isoformat()
+        section["updated_at"] = now.isoformat()
         section["progress_updated_by_id"] = request.submitted_by_id or check.get("operations_manager_id")
         section["progress_updated_by_name"] = request.submitted_by_name or check.get("operations_manager_name")
         if item.revised_completion_date:
@@ -15934,7 +15915,12 @@ async def submit_daily_progress_mobile(token: str, request: DailyProgressSubmitR
                 row["last_progress_update"] = now.isoformat()
                 break
 
-    await db.jobs.update_one({"id": job.get("id")}, {"$set": {"gantt_sections": gantt_sections, "updated_at": now}})
+    job_update_result = await db.jobs.update_one(
+        {"id": job.get("id")},
+        {"$set": {"gantt_sections": gantt_sections, "updated_at": now}},
+    )
+    if job_update_result.matched_count == 0:
+        raise HTTPException(status_code=409, detail="The project could not be updated")
     supported = round(sum(finance_to_number(row.get("supported_value")) for row in check_sections), 2)
     app_value = finance_to_number(check.get("application_value"))
     help_count = sum(1 for row in check_sections if row.get("needs_help"))

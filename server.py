@@ -8564,80 +8564,258 @@ def finance_deposit_marker_value(job: Dict[str, Any], marker: Dict[str, Any], co
 
 
 def build_finance_payment_schedule(job: Dict[str, Any], sections: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Build the commercial payment schedule using the same rules as ProjectGantt.js.
+
+    Important rules:
+    - Auto application values come from cumulative programme value at each marker date.
+    - A stale stored marker value is only used for manual or already-claimed markers.
+    - Deposit recovery is shared equally across every selected application marker.
+    - Progress-supported value and carry-forward are calculated separately from the
+      planned application value.
+    """
     markers = [normalise_finance_marker(marker) for marker in (job.get("commercial_markers") or [])]
     markers = sorted([marker for marker in markers if marker.get("date")], key=lambda item: item.get("date") or "")
     contract_value = finance_contract_value(job, sections)
-    earned_to_date = sum(section_finance_values(section).get("earned_value", 0.0) for section in sections)
 
-    # Do not pre-allocate automatic application markers by equal split.
-    # Automatic application values must follow the programme/Gantt valuation
-    # at each marker date, matching the Project Management Gantt calculation.
-
-    previous_application_earned_cumulative = 0.0
     previous_gross_applications = 0.0
-    rows = []
+    previous_application_earned_cumulative = 0.0
+    retention_held_total = 0.0
+    base_rows: List[Dict[str, Any]] = []
 
     for marker in markers:
         marker_type = marker.get("type")
         marker_date = parse_iso_date_safe(marker.get("date"))
-        manual_value = finance_to_number(marker.get("manual_value")) or finance_marker_stored_value(marker)
+        stored_value = finance_marker_stored_value(marker)
+        manual_value = finance_to_number(marker.get("manual_value")) or stored_value
         value_mode = marker.get("value_mode") or "auto"
-        cumulative_planned = sum(section_planned_value_by_date(section, marker_date) for section in sections)
-        cumulative_earned = sum(min(section_finance_values(section).get("earned_value", 0.0), section_planned_value_by_date(section, marker_date)) for section in sections)
+
+        cumulative_planned = sum(
+            section_planned_value_by_date(section, marker_date)
+            for section in sections
+        )
+        cumulative_earned = sum(
+            min(
+                section_finance_values(section).get("earned_value", 0.0),
+                section_planned_value_by_date(section, marker_date),
+            )
+            for section in sections
+        )
+
         gross_value = 0.0
-        earned_period = 0.0
-        deposit_deduction = 0.0
+        earned_value = 0.0
+        retention_deduction = 0.0
 
         if marker_type == "deposit":
             gross_value = finance_deposit_marker_value(job, marker, contract_value)
-            earned_period = gross_value
-        elif marker_type in ["application", "interim"]:
-            capped_planned = max(0.0, min(contract_value or cumulative_planned, cumulative_planned))
-            capped_earned = max(0.0, min(contract_value or cumulative_earned, cumulative_earned))
-            stored_value = finance_marker_stored_value(marker)
-            if stored_value > 0:
-                gross_value = stored_value
-            elif value_mode == "manual" and manual_value > 0:
-                gross_value = manual_value
-            else:
-                gross_value = max(0.0, capped_planned - previous_gross_applications)
-            earned_period = max(0.0, capped_earned - previous_application_earned_cumulative)
-            previous_application_earned_cumulative = max(previous_application_earned_cumulative, capped_earned)
-        elif marker_type == "final_invoice":
-            stored_value = finance_marker_stored_value(marker)
-            gross_value = stored_value if stored_value > 0 else (manual_value if value_mode == "manual" and manual_value > 0 else max(0.0, contract_value - previous_gross_applications))
-            earned_period = max(0.0, earned_to_date - previous_application_earned_cumulative)
-            previous_application_earned_cumulative = max(previous_application_earned_cumulative, earned_to_date)
-        elif marker_type == "retention":
-            retention_percent = finance_to_number(marker.get("retention_percent"))
-            gross_value = manual_value if manual_value > 0 else (contract_value * (retention_percent / 100.0) if retention_percent > 0 else 0.0)
-            earned_period = gross_value
-        else:
-            stored_value = finance_marker_stored_value(marker)
-            gross_value = manual_value if value_mode == "manual" and manual_value > 0 else (stored_value or cumulative_planned)
-            earned_period = min(gross_value, cumulative_earned)
+            earned_value = gross_value
 
-        net_value = max(0.0, gross_value - deposit_deduction)
-        net_earned = net_value if marker_type == "deposit" else max(0.0, earned_period - deposit_deduction)
-        risk_value = max(0.0, net_value - net_earned)
-        # Deposits and retention must not reduce the gross value of later
-        # programme-driven applications. Only earlier application-like gross
-        # values are deducted from the cumulative planned valuation.
-        if marker_type in ["application", "interim", "final_invoice"]:
+        elif marker_type in ["application", "interim"]:
+            if value_mode == "manual" or finance_marker_is_claimed(marker):
+                gross_value = manual_value or stored_value
+            else:
+                gross_value = max(0.0, cumulative_planned - previous_gross_applications)
+
+            earned_value = max(0.0, cumulative_earned - previous_application_earned_cumulative)
+            previous_application_earned_cumulative = max(
+                previous_application_earned_cumulative,
+                cumulative_earned,
+            )
             previous_gross_applications = finance_round_money(
                 previous_gross_applications + gross_value
             )
 
+        elif marker_type == "final_invoice":
+            gross_value = (
+                manual_value
+                or stored_value
+                or max(0.0, contract_value - previous_gross_applications)
+            )
+            earned_value = max(
+                0.0,
+                contract_value - previous_application_earned_cumulative,
+            )
+            previous_application_earned_cumulative = max(
+                previous_application_earned_cumulative,
+                contract_value,
+            )
+            previous_gross_applications = finance_round_money(
+                previous_gross_applications + gross_value
+            )
+
+        elif marker_type == "retention":
+            retention_percent = finance_to_number(marker.get("retention_percent"))
+            gross_value = (
+                manual_value
+                if manual_value > 0
+                else contract_value * (retention_percent / 100.0)
+            )
+            earned_value = gross_value
+            retention_held_total = finance_round_money(retention_held_total + gross_value)
+            retention_deduction = gross_value
+
+        elif marker_type == "retention_release":
+            gross_value = manual_value if manual_value > 0 else retention_held_total
+            earned_value = gross_value
+
+        else:
+            gross_value = (
+                manual_value
+                if value_mode == "manual" and manual_value > 0
+                else stored_value or max(0.0, cumulative_planned - previous_gross_applications)
+            )
+            earned_value = min(
+                gross_value,
+                max(0.0, cumulative_earned - previous_application_earned_cumulative),
+            )
+
+        base_rows.append({
+            "marker": marker,
+            "type": marker_type,
+            "gross_value": finance_round_money(gross_value),
+            "earned_value_gross": finance_round_money(earned_value),
+            "cumulative_earned_value": finance_round_money(cumulative_earned),
+            "retention_deduction": finance_round_money(retention_deduction),
+            "retention_held_total": finance_round_money(retention_held_total),
+        })
+
+    total_deposit_value = finance_round_money(sum(
+        finance_to_number(row.get("gross_value"))
+        for row in base_rows
+        if row.get("type") == "deposit"
+    ))
+
+    recovery_rows = [
+        row for row in base_rows
+        if row.get("type") in ["application", "interim", "final_invoice"]
+        and row.get("marker", {}).get("deduct_deposit") is True
+        and finance_to_number(row.get("gross_value")) > 0
+    ]
+    total_selected_gross = finance_round_money(sum(
+        finance_to_number(row.get("gross_value")) for row in recovery_rows
+    ))
+    deposit_recovery_limit = min(total_deposit_value, total_selected_gross)
+    recovery_count = len(recovery_rows)
+    equal_share = (
+        int((deposit_recovery_limit / recovery_count) * 100) / 100.0
+        if recovery_count > 0
+        else 0.0
+    )
+
+    recovery_by_marker_id: Dict[str, float] = {}
+    allocated = 0.0
+    for index, row in enumerate(recovery_rows):
+        marker = row.get("marker") or {}
+        marker_id = str(marker.get("id") or index)
+        is_last = index == recovery_count - 1
+        deduction = (
+            finance_round_money(deposit_recovery_limit - allocated)
+            if is_last
+            else finance_round_money(equal_share)
+        )
+        deduction = min(
+            finance_to_number(row.get("gross_value")),
+            max(0.0, deduction),
+        )
+        allocated = finance_round_money(allocated + deduction)
+        recovery_by_marker_id[marker_id] = finance_round_money(deduction)
+
+    rows: List[Dict[str, Any]] = []
+    carried_forward_gross = 0.0
+    cumulative_supported_gross = 0.0
+
+    for index, row in enumerate(base_rows):
+        marker = row.get("marker") or {}
+        marker_type = row.get("type")
+        gross_value = finance_to_number(row.get("gross_value"))
+        earned_value_gross = finance_to_number(row.get("earned_value_gross"))
+        cumulative_earned_value = finance_to_number(row.get("cumulative_earned_value"))
+        retention_deduction = finance_to_number(row.get("retention_deduction"))
+        marker_id = str(marker.get("id") or index)
+        deposit_deduction = finance_to_number(recovery_by_marker_id.get(marker_id, 0.0))
+
+        scheduled_net_value = (
+            0.0
+            if marker_type == "retention"
+            else max(0.0, gross_value - deposit_deduction - retention_deduction)
+        )
+
+        is_application_like = marker_type in ["application", "interim", "final_invoice"]
+        carry_forward_in = finance_round_money(carried_forward_gross) if is_application_like else 0.0
+        gross_due_including_carry = (
+            finance_round_money(gross_value + carry_forward_in)
+            if is_application_like
+            else finance_round_money(gross_value)
+        )
+
+        gross_supported_this_application = gross_value
+        carry_forward_out = 0.0
+        if is_application_like:
+            available_earned_gross = max(
+                0.0,
+                cumulative_earned_value - cumulative_supported_gross,
+            )
+            gross_supported_this_application = min(
+                gross_due_including_carry,
+                available_earned_gross,
+            )
+            carry_forward_out = max(
+                0.0,
+                gross_due_including_carry - gross_supported_this_application,
+            )
+            cumulative_supported_gross = finance_round_money(
+                cumulative_supported_gross + gross_supported_this_application
+            )
+            carried_forward_gross = finance_round_money(carry_forward_out)
+
+        application_to_send = (
+            max(
+                0.0,
+                finance_round_money(
+                    gross_supported_this_application
+                    - deposit_deduction
+                    - retention_deduction
+                ),
+            )
+            if is_application_like
+            else finance_round_money(scheduled_net_value)
+        )
+
+        net_earned_value = (
+            scheduled_net_value
+            if marker_type in ["deposit", "retention_release"]
+            else max(0.0, earned_value_gross - deposit_deduction - retention_deduction)
+        )
+        if is_application_like:
+            net_earned_value = application_to_send
+
+        risk_value = (
+            carry_forward_out
+            if is_application_like
+            else max(0.0, scheduled_net_value - net_earned_value)
+        )
+
         rows.append({
             **marker,
+            "type": marker_type,
             "gross_value": finance_round_money(gross_value),
             "deposit_deduction": finance_round_money(deposit_deduction),
-            "net_value": finance_round_money(net_value),
-            "netValue": finance_round_money(net_value),
-            "value": finance_round_money(net_value),
-            "earned_value": finance_round_money(net_earned),
+            "retention_deduction": finance_round_money(retention_deduction),
+            "planned_net_value": finance_round_money(scheduled_net_value),
+            "scheduled_net_value": finance_round_money(scheduled_net_value),
+            "net_value": finance_round_money(scheduled_net_value),
+            "netValue": finance_round_money(scheduled_net_value),
+            "value": finance_round_money(scheduled_net_value),
+            "application_to_send": finance_round_money(application_to_send),
+            "claimable_net_value": finance_round_money(application_to_send),
+            "supported_net_value": finance_round_money(application_to_send),
+            "earned_value": finance_round_money(net_earned_value),
             "risk_value": finance_round_money(risk_value),
+            "carry_forward_in": finance_round_money(carry_forward_in),
+            "carry_forward_out": finance_round_money(carry_forward_out),
+            "deferred_to_next": finance_round_money(carry_forward_out),
+            "gross_due_including_carry": finance_round_money(gross_due_including_carry),
             "contract_value": finance_round_money(contract_value),
+            "retention_held_total": finance_round_money(row.get("retention_held_total")),
         })
 
     return rows
@@ -15592,11 +15770,13 @@ async def build_daily_progress_check_for_job(job: Dict[str, Any], check_day: dat
 
     token = daily_progress_token()
     token_hash = hashlib.sha256(token.encode()).hexdigest()
+    # The APPLICATION figure on the mobile page is the planned net application
+    # value shown on the Gantt (programme value less deposit/retention recovery).
+    # Progress-supported value is shown separately in SUPPORTED.
     application_value = finance_to_number(
-        application.get("application_to_send")
-        or application.get("claimable_net_value")
-        or application.get("supported_net_value")
-        or application.get("net_value")
+        application.get("net_value")
+        or application.get("scheduled_net_value")
+        or application.get("planned_net_value")
         or application.get("gross_value")
         or application.get("application_value")
         or application.get("value")

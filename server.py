@@ -15962,6 +15962,7 @@ async def daily_progress_send_webhook(kind: str, check: Dict[str, Any], token: O
     secret = os.environ.get("POWER_AUTOMATE_DAILY_PROGRESS_SECRET", "").strip()
     frontend_url = daily_progress_frontend_url()
     mobile_link = f"{frontend_url}/#/daily-progress/{token or check.get('mobile_token')}" if frontend_url and (token or check.get("mobile_token")) else ""
+    office_review_link = f"{frontend_url}/#/daily-progress-office/{check.get('id')}" if frontend_url and check.get("id") else ""
     if not url:
         return {"sent": False, "reason": "POWER_AUTOMATE_DAILY_PROGRESS_URL is not configured"}
     payload = {
@@ -15972,6 +15973,7 @@ async def daily_progress_send_webhook(kind: str, check: Dict[str, Any], token: O
         "application_label": check.get("application_label"), "application_date": check.get("application_date"),
         "application_value": check.get("application_value"), "at_risk_value": check.get("at_risk_value"),
         "help_count": check.get("help_count", 0), "mobile_link": mobile_link,
+        "office_review_link": office_review_link,
         "sections_needing_review": [row for row in check.get("sections", []) if row.get("needs_review")],
     }
     response = requests.post(url, json=payload, timeout=30)

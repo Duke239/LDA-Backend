@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Query, Depends, File, UploadFile
+from fastapi import FastAPI, APIRouter, HTTPException, Query, Depends, File, UploadFile, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials, HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
@@ -15339,7 +15339,7 @@ def daily_progress_next_application(job: Dict[str, Any], today: date) -> Optiona
 
 
 def daily_progress_public_check(doc: Dict[str, Any]) -> Dict[str, Any]:
-    clean = {k: v for k, v in doc.items() if k not in ["_id", "token_hash"]}
+    clean = {k: v for k, v in doc.items() if k not in ["_id", "token_hash", "mobile_token"]}
     return clean
 
 
@@ -15433,6 +15433,7 @@ async def build_daily_progress_check_for_job(job: Dict[str, Any], check_day: dat
         "office_reviewed_at": None,
         "help_count": 0,
         "token_hash": token_hash,
+        "mobile_token": token,
         "token_expires_at": now + timedelta(days=3),
         "created_at": now,
         "updated_at": now,
@@ -15446,45 +15447,203 @@ async def build_daily_progress_check_for_job(job: Dict[str, Any], check_day: dat
     saved = await db.daily_progress_checks.find_one(
         {"check_date": check_day.isoformat(), "job_id": job.get("id"), "application_id": application.get("id")}, {"_id": 0}
     )
-    return {"check": saved, "token": token if saved and saved.get("id") == check_id else None}
+    if saved and not saved.get("mobile_token"):
+        replacement_token = daily_progress_token()
+        replacement_hash = hashlib.sha256(replacement_token.encode()).hexdigest()
+        await db.daily_progress_checks.update_one(
+            {"id": saved.get("id")},
+            {"$set": {
+                "mobile_token": replacement_token,
+                "token_hash": replacement_hash,
+                "token_expires_at": now + timedelta(days=3),
+                "updated_at": now,
+            }},
+        )
+        saved["mobile_token"] = replacement_token
+        saved["token_hash"] = replacement_hash
+        saved["token_expires_at"] = now + timedelta(days=3)
+    return {"check": saved, "token": (saved or {}).get("mobile_token")}
+
+
+def daily_progress_trigger_secret() -> str:
+    return (
+        os.environ.get("DAILY_PROGRESS_AUTOMATION_SECRET", "").strip()
+        or os.environ.get("DAILY_PROGRESS_TRIGGER_SECRET", "").strip()
+    )
+
+
+def daily_progress_frontend_url() -> str:
+    return (
+        os.environ.get("DAILY_PROGRESS_PUBLIC_URL", "").strip()
+        or os.environ.get("FRONTEND_URL", "").strip()
+    ).rstrip("/")
+
+
+def normalise_whatsapp_number(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if raw.lower().startswith("whatsapp:"):
+        raw = raw.split(":", 1)[1].strip()
+    cleaned = re.sub(r"[^0-9+]", "", raw)
+    if cleaned.startswith("00"):
+        cleaned = "+" + cleaned[2:]
+    elif cleaned.startswith("0"):
+        cleaned = "+44" + cleaned[1:]
+    elif cleaned and not cleaned.startswith("+"):
+        cleaned = "+" + cleaned
+    return f"whatsapp:{cleaned}" if cleaned else ""
+
+
+def daily_progress_message_body(kind: str, check: Dict[str, Any], mobile_link: str) -> str:
+    name = check.get("operations_manager_name") or "Operations Manager"
+    job = check.get("job_name") or "your project"
+    sections = [row for row in check.get("sections", []) if row.get("needs_review")]
+    section_count = len(sections)
+    if kind == "daily_progress_reminder":
+        return (
+            f"LDA Progress Check Reminder\n\nHi {name}, your Daily Progress Check for {job} "
+            f"has not yet been submitted.\n\nSections requiring review: {section_count}\n\n"
+            f"Complete it here:\n{mobile_link}"
+        )
+    return (
+        f"LDA Daily Progress Check\n\nHi {name}, your progress check for {job} is ready.\n\n"
+        f"Next application: {check.get('application_label') or 'Next application'}\n"
+        f"Application date: {check.get('application_date') or '-'}\n"
+        f"Sections requiring review: {section_count}\n\n"
+        f"Open your check:\n{mobile_link}"
+    )
+
+
+async def send_twilio_whatsapp(kind: str, check: Dict[str, Any], token: Optional[str] = None) -> Dict[str, Any]:
+    account_sid = os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
+    auth_token = os.environ.get("TWILIO_AUTH_TOKEN", "").strip()
+    from_number = normalise_whatsapp_number(os.environ.get("TWILIO_WHATSAPP_FROM", ""))
+    to_number = normalise_whatsapp_number(check.get("operations_manager_phone"))
+    frontend_url = daily_progress_frontend_url()
+    active_token = token or check.get("mobile_token")
+    mobile_link = f"{frontend_url}/daily-progress/{active_token}" if frontend_url and active_token else ""
+
+    missing = []
+    if not account_sid: missing.append("TWILIO_ACCOUNT_SID")
+    if not auth_token: missing.append("TWILIO_AUTH_TOKEN")
+    if not from_number: missing.append("TWILIO_WHATSAPP_FROM")
+    if not to_number: missing.append("Operations Manager phone number")
+    if not mobile_link: missing.append("DAILY_PROGRESS_PUBLIC_URL or mobile token")
+    if missing:
+        return {"sent": False, "reason": "Missing: " + ", ".join(missing)}
+
+    endpoint = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
+    data = {
+        "From": from_number,
+        "To": to_number,
+        "Body": daily_progress_message_body(kind, check, mobile_link),
+    }
+    callback_url = os.environ.get("TWILIO_STATUS_CALLBACK_URL", "").strip()
+    if callback_url:
+        data["StatusCallback"] = callback_url
+
+    try:
+        response = requests.post(endpoint, data=data, auth=(account_sid, auth_token), timeout=30)
+        response_data = response.json() if response.content else {}
+        if response.status_code >= 400:
+            error_message = response_data.get("message") or response.text or f"Twilio HTTP {response.status_code}"
+            await db.daily_progress_checks.update_one(
+                {"id": check.get("id")},
+                {"$push": {"notification_log": {
+                    "type": kind, "sent_at": datetime.utcnow(), "provider": "twilio",
+                    "sent": False, "status_code": response.status_code, "error": error_message,
+                }}},
+            )
+            return {"sent": False, "status_code": response.status_code, "reason": error_message}
+
+        message_sid = response_data.get("sid", "")
+        message_status = response_data.get("status", "queued")
+        await db.daily_progress_checks.update_one(
+            {"id": check.get("id")},
+            {"$push": {"notification_log": {
+                "type": kind, "sent_at": datetime.utcnow(), "provider": "twilio",
+                "sent": True, "message_sid": message_sid, "status": message_status,
+                "to": to_number,
+            }}, "$set": {"updated_at": datetime.utcnow()}},
+        )
+        return {"sent": True, "provider": "twilio", "message_sid": message_sid, "status": message_status, "to": to_number}
+    except Exception as exc:
+        logger.exception("Twilio WhatsApp send failed for check %s", check.get("id"))
+        return {"sent": False, "reason": str(exc)}
 
 
 async def daily_progress_send_webhook(kind: str, check: Dict[str, Any], token: Optional[str] = None) -> Dict[str, Any]:
+    # WhatsApp notifications are sent directly through Twilio. Email escalations
+    # continue to use the existing Power Automate webhook when configured.
+    if kind in {"daily_progress_whatsapp", "daily_progress_reminder"}:
+        return await send_twilio_whatsapp(kind, check, token)
+
     url = os.environ.get("POWER_AUTOMATE_DAILY_PROGRESS_URL", "").strip()
     secret = os.environ.get("POWER_AUTOMATE_DAILY_PROGRESS_SECRET", "").strip()
-    frontend_url = os.environ.get("FRONTEND_URL", "").rstrip("/")
+    frontend_url = daily_progress_frontend_url()
+    mobile_link = f"{frontend_url}/daily-progress/{token or check.get('mobile_token')}" if frontend_url and (token or check.get("mobile_token")) else ""
     if not url:
         return {"sent": False, "reason": "POWER_AUTOMATE_DAILY_PROGRESS_URL is not configured"}
-    mobile_link = f"{frontend_url}/daily-progress/{token}" if token and frontend_url else ""
     payload = {
-        "secret": secret,
-        "notification_type": kind,
-        "check_id": check.get("id"),
-        "check_date": check.get("check_date"),
-        "to_phone": check.get("operations_manager_phone"),
-        "to_name": check.get("operations_manager_name"),
-        "to_email": check.get("operations_manager_email"),
-        "office_manager_email": check.get("office_manager_email"),
-        "job_name": check.get("job_name"),
-        "application_label": check.get("application_label"),
-        "application_date": check.get("application_date"),
-        "application_value": check.get("application_value"),
-        "at_risk_value": check.get("at_risk_value"),
-        "help_count": check.get("help_count", 0),
-        "mobile_link": mobile_link,
-        "sections_needing_review": [s for s in check.get("sections", []) if s.get("needs_review")],
+        "secret": secret, "notification_type": kind, "check_id": check.get("id"),
+        "check_date": check.get("check_date"), "to_phone": check.get("operations_manager_phone"),
+        "to_name": check.get("operations_manager_name"), "to_email": check.get("operations_manager_email"),
+        "office_manager_email": check.get("office_manager_email"), "job_name": check.get("job_name"),
+        "application_label": check.get("application_label"), "application_date": check.get("application_date"),
+        "application_value": check.get("application_value"), "at_risk_value": check.get("at_risk_value"),
+        "help_count": check.get("help_count", 0), "mobile_link": mobile_link,
+        "sections_needing_review": [row for row in check.get("sections", []) if row.get("needs_review")],
     }
     response = requests.post(url, json=payload, timeout=30)
     response.raise_for_status()
     await db.daily_progress_checks.update_one({"id": check.get("id")}, {"$push": {"notification_log": {
-        "type": kind, "sent_at": datetime.utcnow(), "status_code": response.status_code
+        "type": kind, "sent_at": datetime.utcnow(), "provider": "power_automate", "status_code": response.status_code
     }}})
-    return {"sent": True, "status_code": response.status_code}
+    return {"sent": True, "provider": "power_automate", "status_code": response.status_code}
+
+
+class DailyProgressTwilioTestRequest(BaseModel):
+    phone: str
+    message: str = "LDA WhatsApp connection test successful."
+    secret: str = ""
+
+
+@api_router.get("/daily-progress-checks/twilio-status")
+async def daily_progress_twilio_status(admin: str = Depends(verify_admin)):
+    return {
+        "configured": all([
+            bool(os.environ.get("TWILIO_ACCOUNT_SID", "").strip()),
+            bool(os.environ.get("TWILIO_AUTH_TOKEN", "").strip()),
+            bool(os.environ.get("TWILIO_WHATSAPP_FROM", "").strip()),
+        ]),
+        "from": normalise_whatsapp_number(os.environ.get("TWILIO_WHATSAPP_FROM", "")),
+        "public_url_configured": bool(daily_progress_frontend_url()),
+    }
+
+
+@api_router.post("/daily-progress-checks/twilio-test")
+async def daily_progress_twilio_test(request: DailyProgressTwilioTestRequest):
+    configured = daily_progress_trigger_secret()
+    if configured and not secrets.compare_digest(request.secret, configured):
+        raise HTTPException(status_code=403, detail="Invalid trigger secret")
+    account_sid = os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
+    auth_token = os.environ.get("TWILIO_AUTH_TOKEN", "").strip()
+    from_number = normalise_whatsapp_number(os.environ.get("TWILIO_WHATSAPP_FROM", ""))
+    to_number = normalise_whatsapp_number(request.phone)
+    if not all([account_sid, auth_token, from_number, to_number]):
+        raise HTTPException(status_code=400, detail="Twilio credentials, sender and destination phone are required")
+    endpoint = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
+    response = requests.post(endpoint, data={"From": from_number, "To": to_number, "Body": request.message}, auth=(account_sid, auth_token), timeout=30)
+    payload = response.json() if response.content else {}
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=payload.get("message") or response.text)
+    return {"success": True, "message_sid": payload.get("sid"), "status": payload.get("status"), "to": to_number}
 
 
 @api_router.post("/daily-progress-checks/generate")
 async def generate_daily_progress_checks(request: DailyProgressTriggerRequest):
-    configured = os.environ.get("DAILY_PROGRESS_TRIGGER_SECRET", "").strip()
+    configured = daily_progress_trigger_secret()
     if configured and not secrets.compare_digest(request.secret, configured):
         raise HTTPException(status_code=403, detail="Invalid trigger secret")
     check_day = parse_iso_date_safe(request.check_date) if request.check_date else get_uk_time().date()
@@ -15640,7 +15799,7 @@ async def office_review_daily_progress(check_id: str, request: DailyProgressOffi
 
 @api_router.post("/daily-progress-checks/remind-incomplete")
 async def remind_incomplete_daily_progress(request: DailyProgressTriggerRequest):
-    configured = os.environ.get("DAILY_PROGRESS_TRIGGER_SECRET", "").strip()
+    configured = daily_progress_trigger_secret()
     if configured and not secrets.compare_digest(request.secret, configured): raise HTTPException(status_code=403, detail="Invalid trigger secret")
     check_day = parse_iso_date_safe(request.check_date) if request.check_date else get_uk_time().date()
     docs = await db.daily_progress_checks.find({"check_date": check_day.isoformat(), "operations_submitted_at": None}, {"_id": 0}).to_list(5000)
@@ -15652,7 +15811,7 @@ async def remind_incomplete_daily_progress(request: DailyProgressTriggerRequest)
 
 @api_router.post("/daily-progress-checks/escalate")
 async def escalate_daily_progress(request: DailyProgressTriggerRequest):
-    configured = os.environ.get("DAILY_PROGRESS_TRIGGER_SECRET", "").strip()
+    configured = daily_progress_trigger_secret()
     if configured and not secrets.compare_digest(request.secret, configured): raise HTTPException(status_code=403, detail="Invalid trigger secret")
     check_day = parse_iso_date_safe(request.check_date) if request.check_date else get_uk_time().date()
     docs = await db.daily_progress_checks.find({"check_date": check_day.isoformat(), "$or": [{"operations_submitted_at": None}, {"help_count": {"$gt": 0}}]}, {"_id": 0}).to_list(5000)

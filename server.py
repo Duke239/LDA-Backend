@@ -15467,20 +15467,48 @@ def daily_progress_last_updated(section: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def daily_progress_next_application(job: Dict[str, Any], today: date) -> Optional[Dict[str, Any]]:
+def daily_progress_application_window(job: Dict[str, Any], today: date) -> Optional[Dict[str, Any]]:
+    """Return the next unclaimed application and the immediately preceding application date.
+
+    The mobile Daily Progress Check must only show sections that contribute new planned
+    value between the previous and next application markers, plus unfinished work carried
+    forward from an earlier application. Fully completed historic sections and sections
+    that start after the next application are excluded.
+    """
     rows = build_finance_payment_schedule(job, job.get("gantt_sections") or [])
-    candidates = []
+    dated_rows = []
     for row in rows:
         if row.get("type") not in ["application", "interim", "final_invoice"]:
             continue
         marker_date = parse_iso_date_safe(row.get("date"))
-        if not marker_date or marker_date < today or finance_marker_is_claimed(row):
-            continue
-        candidates.append((marker_date, row))
-    if not candidates:
+        if marker_date:
+            dated_rows.append((marker_date, row))
+
+    if not dated_rows:
         return None
-    candidates.sort(key=lambda item: item[0])
-    return candidates[0][1]
+
+    dated_rows.sort(key=lambda item: item[0])
+    next_index = None
+    for index, (marker_date, row) in enumerate(dated_rows):
+        if marker_date < today or finance_marker_is_claimed(row):
+            continue
+        next_index = index
+        break
+
+    if next_index is None:
+        return None
+
+    previous_date = dated_rows[next_index - 1][0] if next_index > 0 else None
+    return {
+        "application": dated_rows[next_index][1],
+        "application_date": dated_rows[next_index][0],
+        "previous_application_date": previous_date,
+    }
+
+
+def daily_progress_next_application(job: Dict[str, Any], today: date) -> Optional[Dict[str, Any]]:
+    window = daily_progress_application_window(job, today)
+    return window.get("application") if window else None
 
 
 def daily_progress_public_check(doc: Dict[str, Any]) -> Dict[str, Any]:
@@ -15489,10 +15517,12 @@ def daily_progress_public_check(doc: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def build_daily_progress_check_for_job(job: Dict[str, Any], check_day: date) -> Optional[Dict[str, Any]]:
-    application = daily_progress_next_application(job, check_day)
-    if not application:
+    application_window = daily_progress_application_window(job, check_day)
+    if not application_window:
         return None
-    application_date = parse_iso_date_safe(application.get("date"))
+    application = application_window.get("application") or {}
+    application_date = application_window.get("application_date")
+    previous_application_date = application_window.get("previous_application_date")
     if not application_date:
         return None
 
@@ -15522,13 +15552,35 @@ async def build_daily_progress_check_for_job(job: Dict[str, Any], check_day: dat
     expected_total = 0.0
     for section in job.get("gantt_sections") or []:
         required = daily_progress_required_percent(section, application_date)
-        if required <= 0:
-            continue
+        previous_required = (
+            daily_progress_required_percent(section, previous_application_date)
+            if previous_application_date
+            else 0.0
+        )
         values = section_finance_values(section)
         section_value = values.get("section_value", 0.0)
         current = values.get("progress_percent", 0.0)
+
+        # Include only work relevant to the next application window:
+        # 1) the section gains planned progress between the previous and next marker; or
+        # 2) it should already have contributed by the previous marker but remains incomplete,
+        #    so its shortfall must be carried forward.
+        planned_increment = max(0.0, required - previous_required)
+        carried_forward = previous_required > 0 and current + 0.01 < previous_required
+        if planned_increment <= 0 and not carried_forward:
+            continue
+
+        inclusion_reason = "carried_forward" if carried_forward and planned_increment <= 0 else (
+            "window_and_carry_forward" if carried_forward else "application_window"
+        )
+
         expected_value = round(section_value * required / 100.0, 2)
         supported_value = round(section_value * min(current, required) / 100.0, 2)
+        application_window_value = round(section_value * planned_increment / 100.0, 2)
+        carry_forward_value = round(
+            section_value * max(0.0, previous_required - current) / 100.0,
+            2,
+        ) if carried_forward else 0.0
         expected_total += expected_value
         supported_total += supported_value
         last_updated = daily_progress_last_updated(section)
@@ -15539,7 +15591,12 @@ async def build_daily_progress_check_for_job(job: Dict[str, Any], check_day: dat
             "start_date": section.get("start_date"),
             "end_date": section.get("end_date"),
             "section_value": round(section_value, 2),
+            "previous_required_progress_percent": round(previous_required, 1),
             "required_progress_percent": required,
+            "planned_progress_in_application_percent": round(planned_increment, 1),
+            "application_window_value": application_window_value,
+            "carry_forward_value": carry_forward_value,
+            "inclusion_reason": inclusion_reason,
             "current_progress_percent": round(current, 1),
             "expected_value": expected_value,
             "supported_value": supported_value,
@@ -15572,6 +15629,7 @@ async def build_daily_progress_check_for_job(job: Dict[str, Any], check_day: dat
         "application_id": application.get("id"),
         "application_label": application.get("label") or "Next application",
         "application_date": application_date.isoformat(),
+        "previous_application_date": previous_application_date.isoformat() if previous_application_date else None,
         "application_value": round(application_value, 2),
         "supported_value": round(supported_application, 2),
         "at_risk_value": round(max(0.0, application_value - supported_application), 2),
@@ -15678,7 +15736,7 @@ async def send_twilio_whatsapp(kind: str, check: Dict[str, Any], token: Optional
     to_number = normalise_whatsapp_number(check.get("operations_manager_phone"))
     frontend_url = daily_progress_frontend_url()
     active_token = token or check.get("mobile_token")
-    mobile_link = f"{frontend_url}/daily-progress/{active_token}" if frontend_url and active_token else ""
+    mobile_link = f"{frontend_url}/#/daily-progress/{active_token}" if frontend_url and active_token else ""
 
     missing = []
     if not account_sid: missing.append("TWILIO_ACCOUNT_SID")
@@ -15738,7 +15796,7 @@ async def daily_progress_send_webhook(kind: str, check: Dict[str, Any], token: O
     url = os.environ.get("POWER_AUTOMATE_DAILY_PROGRESS_URL", "").strip()
     secret = os.environ.get("POWER_AUTOMATE_DAILY_PROGRESS_SECRET", "").strip()
     frontend_url = daily_progress_frontend_url()
-    mobile_link = f"{frontend_url}/daily-progress/{token or check.get('mobile_token')}" if frontend_url and (token or check.get("mobile_token")) else ""
+    mobile_link = f"{frontend_url}/#/daily-progress/{token or check.get('mobile_token')}" if frontend_url and (token or check.get("mobile_token")) else ""
     if not url:
         return {"sent": False, "reason": "POWER_AUTOMATE_DAILY_PROGRESS_URL is not configured"}
     payload = {

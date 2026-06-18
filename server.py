@@ -235,6 +235,10 @@ class Job(BaseModel):
     manager_name: str = ""
     supervisor_id: str = ""
     supervisor_name: str = ""
+    office_manager_id: str = ""
+    office_manager_name: str = ""
+    operations_manager_id: str = ""
+    operations_manager_name: str = ""
     quoted_cost: float
     original_quoted_cost: Optional[float] = None
     approved_variations_total: float = 0.0
@@ -285,6 +289,10 @@ class JobCreate(BaseModel):
     manager_name: str = ""
     supervisor_id: str = ""
     supervisor_name: str = ""
+    office_manager_id: str = ""
+    office_manager_name: str = ""
+    operations_manager_id: str = ""
+    operations_manager_name: str = ""
     quoted_cost: float
     original_quoted_cost: Optional[float] = None
     approved_variations_total: float = 0.0
@@ -326,6 +334,10 @@ class JobUpdate(BaseModel):
     manager_name: Optional[str] = None
     supervisor_id: Optional[str] = None
     supervisor_name: Optional[str] = None
+    office_manager_id: Optional[str] = None
+    office_manager_name: Optional[str] = None
+    operations_manager_id: Optional[str] = None
+    operations_manager_name: Optional[str] = None
     quoted_cost: Optional[float] = None
     original_quoted_cost: Optional[float] = None
     approved_variations_total: Optional[float] = None
@@ -1387,7 +1399,7 @@ def convert_decimals_to_float(obj):
         return obj
 
 # Security functions
-OFFICE_LOGIN_ROLES = ["admin", "super_admin", "project_manager", "accounts", "office_admin"]
+OFFICE_LOGIN_ROLES = ["admin", "super_admin", "project_manager", "accounts", "office_admin", "office_manager", "operations_manager"]
 
 # Users in this list always receive full Super Admin access when they log in successfully.
 # This prevents the owner account from being locked out by role-based navigation.
@@ -1402,6 +1414,12 @@ def normalise_app_role(value: Optional[str]) -> str:
         return "super_admin"
     if role in ["pm", "project", "project_manager", "project_managers"]:
         return "project_manager"
+    if role in ["office_manager", "office_based_manager", "commercial_manager"]:
+        return "office_manager"
+    if role in ["operations_manager", "operation_manager", "ops_manager", "operational_manager"]:
+        return "operations_manager"
+    if role in ["site_supervisor", "lead_man", "leadman", "site_lead"]:
+        return "site_supervisor"
     if role in ["account", "accounts", "finance"]:
         return "accounts"
     if role in ["office", "office_admin", "administrator", "admin"]:
@@ -1664,7 +1682,7 @@ async def get_admin_me(admin: str = Depends(verify_admin)):
 
 # ==================== APP USER / SETTINGS ENDPOINTS ====================
 
-APP_USER_ROLES = ["super_admin", "admin", "project_manager", "accounts", "worker"]
+APP_USER_ROLES = ["super_admin", "admin", "project_manager", "office_manager", "operations_manager", "site_supervisor", "accounts", "worker"]
 
 class AppUserCreate(BaseModel):
     name: str
@@ -15204,6 +15222,418 @@ async def repair_job_process_sync(job_id: str, request: ProcessSyncRepairRequest
         "repairs": repairs,
         "health": health,
     }
+
+
+
+# ==================== DAILY PROGRESS CHECK MODULE ====================
+
+DAILY_PROGRESS_HELP_REASONS = [
+    "Labour shortage", "Materials delayed", "Subcontractor delay", "Client delay",
+    "Access issue", "Additional work discovered", "Programme dates incorrect", "Other",
+]
+
+class DailyProgressSectionUpdate(BaseModel):
+    section_id: str
+    progress_percent: Optional[float] = None
+    confirm_current: bool = False
+    mark_complete: bool = False
+    needs_help: bool = False
+    reason: str = ""
+    notes: str = ""
+    revised_completion_date: Optional[str] = None
+
+class DailyProgressSubmitRequest(BaseModel):
+    sections: List[DailyProgressSectionUpdate] = []
+    submitted_by_id: str = ""
+    submitted_by_name: str = ""
+    submitted_by_email: str = ""
+
+class DailyProgressOfficeReviewRequest(BaseModel):
+    risk_confirmed: Optional[bool] = None
+    recovery_action: str = ""
+    programme_notes: str = ""
+    final_notes: str = ""
+    status: str = "completed"
+    reviewed_by_id: str = ""
+    reviewed_by_name: str = ""
+    reviewed_by_email: str = ""
+
+class DailyProgressTriggerRequest(BaseModel):
+    secret: str = ""
+    check_date: Optional[str] = None
+    dry_run: bool = False
+
+
+def daily_progress_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def daily_progress_required_percent(section: Dict[str, Any], application_date: date) -> float:
+    start = parse_iso_date_safe(section.get("start_date"))
+    end = parse_iso_date_safe(section.get("end_date")) or start
+    if not start or not end:
+        return 0.0
+    if end < start:
+        start, end = end, start
+    if application_date < start:
+        return 0.0
+    if application_date >= end:
+        return 100.0
+    total_days = max(1, (end - start).days + 1)
+    elapsed_days = max(0, (application_date - start).days + 1)
+    return round(max(0.0, min(100.0, (elapsed_days / total_days) * 100.0)), 1)
+
+
+def daily_progress_last_updated(section: Dict[str, Any]) -> Optional[str]:
+    for key in ["progress_updated_at", "progress_updated_date", "updated_at", "updated_date", "last_updated"]:
+        value = section.get(key)
+        if value:
+            if isinstance(value, datetime):
+                return value.isoformat()
+            return str(value)
+    return None
+
+
+def daily_progress_next_application(job: Dict[str, Any], today: date) -> Optional[Dict[str, Any]]:
+    rows = build_finance_payment_schedule(job, job.get("gantt_sections") or [])
+    candidates = []
+    for row in rows:
+        if row.get("type") not in ["application", "interim", "final_invoice"]:
+            continue
+        marker_date = parse_iso_date_safe(row.get("date"))
+        if not marker_date or marker_date < today or finance_marker_is_claimed(row):
+            continue
+        candidates.append((marker_date, row))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1]
+
+
+def daily_progress_public_check(doc: Dict[str, Any]) -> Dict[str, Any]:
+    clean = {k: v for k, v in doc.items() if k not in ["_id", "token_hash"]}
+    return clean
+
+
+async def build_daily_progress_check_for_job(job: Dict[str, Any], check_day: date) -> Optional[Dict[str, Any]]:
+    application = daily_progress_next_application(job, check_day)
+    if not application:
+        return None
+    application_date = parse_iso_date_safe(application.get("date"))
+    if not application_date:
+        return None
+
+    operations_manager_id = str(job.get("operations_manager_id") or job.get("manager_id") or "").strip()
+    operations_manager = await db.workers.find_one({"id": operations_manager_id}, {"_id": 0}) if operations_manager_id else None
+    operations_manager = operations_manager or {}
+    operations_name = job.get("operations_manager_name") or operations_manager.get("name") or job.get("manager_name") or "Operations Manager"
+    operations_phone = str(operations_manager.get("phone") or job.get("operations_manager_phone") or "").strip()
+    operations_email = str(operations_manager.get("email") or job.get("operations_manager_email") or "").strip()
+
+    office_manager_id = str(job.get("office_manager_id") or "").strip()
+    office_manager = await db.workers.find_one({"id": office_manager_id}, {"_id": 0}) if office_manager_id else None
+    office_manager = office_manager or {}
+
+    sections_out = []
+    supported_total = 0.0
+    expected_total = 0.0
+    for section in job.get("gantt_sections") or []:
+        required = daily_progress_required_percent(section, application_date)
+        if required <= 0:
+            continue
+        values = section_finance_values(section)
+        section_value = values.get("section_value", 0.0)
+        current = values.get("progress_percent", 0.0)
+        expected_value = round(section_value * required / 100.0, 2)
+        supported_value = round(section_value * min(current, required) / 100.0, 2)
+        expected_total += expected_value
+        supported_total += supported_value
+        last_updated = daily_progress_last_updated(section)
+        status = "on_target" if current >= required else ("not_updated" if current <= 0 else "behind_target")
+        sections_out.append({
+            "section_id": str(section.get("id") or section.get("section_id") or ""),
+            "section_name": section.get("name") or section.get("section_name") or "Unnamed section",
+            "start_date": section.get("start_date"),
+            "end_date": section.get("end_date"),
+            "section_value": round(section_value, 2),
+            "required_progress_percent": required,
+            "current_progress_percent": round(current, 1),
+            "expected_value": expected_value,
+            "supported_value": supported_value,
+            "at_risk_value": round(max(0.0, expected_value - supported_value), 2),
+            "last_progress_update": last_updated,
+            "status": status,
+            "needs_review": status != "on_target",
+            "needs_help": False,
+            "reason": "",
+            "notes": "",
+            "revised_completion_date": None,
+            "photos": [],
+        })
+
+    if not sections_out:
+        return None
+
+    token = daily_progress_token()
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    application_value = finance_to_number(application.get("gross_value") or application.get("application_value") or application.get("value") or expected_total)
+    supported_application = min(application_value, supported_total)
+    check_id = str(uuid.uuid4())
+    now = datetime.utcnow()
+    doc = {
+        "id": check_id,
+        "check_date": check_day.isoformat(),
+        "job_id": job.get("id"),
+        "job_name": job.get("name") or "Unnamed job",
+        "client": job.get("client_name") or job.get("client") or "",
+        "application_id": application.get("id"),
+        "application_label": application.get("label") or "Next application",
+        "application_date": application_date.isoformat(),
+        "application_value": round(application_value, 2),
+        "supported_value": round(supported_application, 2),
+        "at_risk_value": round(max(0.0, application_value - supported_application), 2),
+        "operations_manager_id": operations_manager_id,
+        "operations_manager_name": operations_name,
+        "operations_manager_phone": operations_phone,
+        "operations_manager_email": operations_email,
+        "office_manager_id": office_manager_id,
+        "office_manager_name": job.get("office_manager_name") or office_manager.get("name") or "",
+        "office_manager_email": str(office_manager.get("email") or job.get("office_manager_email") or "").strip(),
+        "sections": sections_out,
+        "status": "outstanding",
+        "operations_submitted_at": None,
+        "office_reviewed_at": None,
+        "help_count": 0,
+        "token_hash": token_hash,
+        "token_expires_at": now + timedelta(days=3),
+        "created_at": now,
+        "updated_at": now,
+        "notification_log": [],
+    }
+    await db.daily_progress_checks.update_one(
+        {"check_date": check_day.isoformat(), "job_id": job.get("id"), "application_id": application.get("id")},
+        {"$setOnInsert": doc},
+        upsert=True,
+    )
+    saved = await db.daily_progress_checks.find_one(
+        {"check_date": check_day.isoformat(), "job_id": job.get("id"), "application_id": application.get("id")}, {"_id": 0}
+    )
+    return {"check": saved, "token": token if saved and saved.get("id") == check_id else None}
+
+
+async def daily_progress_send_webhook(kind: str, check: Dict[str, Any], token: Optional[str] = None) -> Dict[str, Any]:
+    url = os.environ.get("POWER_AUTOMATE_DAILY_PROGRESS_URL", "").strip()
+    secret = os.environ.get("POWER_AUTOMATE_DAILY_PROGRESS_SECRET", "").strip()
+    frontend_url = os.environ.get("FRONTEND_URL", "").rstrip("/")
+    if not url:
+        return {"sent": False, "reason": "POWER_AUTOMATE_DAILY_PROGRESS_URL is not configured"}
+    mobile_link = f"{frontend_url}/daily-progress/{token}" if token and frontend_url else ""
+    payload = {
+        "secret": secret,
+        "notification_type": kind,
+        "check_id": check.get("id"),
+        "check_date": check.get("check_date"),
+        "to_phone": check.get("operations_manager_phone"),
+        "to_name": check.get("operations_manager_name"),
+        "to_email": check.get("operations_manager_email"),
+        "office_manager_email": check.get("office_manager_email"),
+        "job_name": check.get("job_name"),
+        "application_label": check.get("application_label"),
+        "application_date": check.get("application_date"),
+        "application_value": check.get("application_value"),
+        "at_risk_value": check.get("at_risk_value"),
+        "help_count": check.get("help_count", 0),
+        "mobile_link": mobile_link,
+        "sections_needing_review": [s for s in check.get("sections", []) if s.get("needs_review")],
+    }
+    response = requests.post(url, json=payload, timeout=30)
+    response.raise_for_status()
+    await db.daily_progress_checks.update_one({"id": check.get("id")}, {"$push": {"notification_log": {
+        "type": kind, "sent_at": datetime.utcnow(), "status_code": response.status_code
+    }}})
+    return {"sent": True, "status_code": response.status_code}
+
+
+@api_router.post("/daily-progress-checks/generate")
+async def generate_daily_progress_checks(request: DailyProgressTriggerRequest):
+    configured = os.environ.get("DAILY_PROGRESS_TRIGGER_SECRET", "").strip()
+    if configured and not secrets.compare_digest(request.secret, configured):
+        raise HTTPException(status_code=403, detail="Invalid trigger secret")
+    check_day = parse_iso_date_safe(request.check_date) if request.check_date else get_uk_time().date()
+    jobs = await db.jobs.find({"archived": {"$ne": True}, "status": {"$nin": ["cancelled", "canceled", "completed"]}}, {"_id": 0}).to_list(5000)
+    created, skipped, errors = [], [], []
+    for job in jobs:
+        try:
+            result = await build_daily_progress_check_for_job(job, check_day)
+            if not result:
+                skipped.append({"job_id": job.get("id"), "job_name": job.get("name"), "reason": "No future application or contributing sections"})
+                continue
+            check, token = result["check"], result.get("token")
+            send_result = {"sent": False, "reason": "dry run or existing check"}
+            if not request.dry_run and token:
+                send_result = await daily_progress_send_webhook("daily_progress_whatsapp", check, token)
+            created.append({"check": daily_progress_public_check(check), "notification": send_result})
+        except Exception as exc:
+            errors.append({"job_id": job.get("id"), "job_name": job.get("name"), "error": str(exc)})
+    return {"success": not errors, "check_date": check_day.isoformat(), "created_count": len(created), "skipped_count": len(skipped), "error_count": len(errors), "created": created, "skipped": skipped, "errors": errors}
+
+
+@api_router.get("/daily-progress-checks/mobile/{token}")
+async def get_daily_progress_mobile(token: str):
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    check = await db.daily_progress_checks.find_one({"token_hash": token_hash}, {"_id": 0})
+    if not check:
+        raise HTTPException(status_code=404, detail="Daily progress check not found")
+    expires = check.get("token_expires_at")
+    if expires and isinstance(expires, datetime) and expires < datetime.utcnow():
+        raise HTTPException(status_code=410, detail="This daily progress link has expired")
+    return daily_progress_public_check(check)
+
+
+@api_router.put("/daily-progress-checks/mobile/{token}/submit")
+async def submit_daily_progress_mobile(token: str, request: DailyProgressSubmitRequest):
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    check = await db.daily_progress_checks.find_one({"token_hash": token_hash}, {"_id": 0})
+    if not check:
+        raise HTTPException(status_code=404, detail="Daily progress check not found")
+    job = await db.jobs.find_one({"id": check.get("job_id")}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    update_lookup = {item.section_id: item for item in request.sections}
+    gantt_sections = job.get("gantt_sections") or []
+    check_sections = check.get("sections") or []
+    audit_rows = []
+    now = datetime.utcnow()
+    for section in gantt_sections:
+        section_id = str(section.get("id") or section.get("section_id") or "")
+        item = update_lookup.get(section_id)
+        if not item:
+            continue
+        old_progress = max(0.0, min(100.0, finance_to_number(section.get("progress_percent"))))
+        new_progress = 100.0 if item.mark_complete else (old_progress if item.progress_percent is None else max(0.0, min(100.0, item.progress_percent)))
+        section["progress_percent"] = round(new_progress, 1)
+        section["progress_updated_at"] = now.isoformat()
+        section["progress_updated_by_id"] = request.submitted_by_id or check.get("operations_manager_id")
+        section["progress_updated_by_name"] = request.submitted_by_name or check.get("operations_manager_name")
+        if item.revised_completion_date:
+            section["revised_completion_date"] = item.revised_completion_date
+        audit_rows.append({"section_id": section_id, "section_name": section.get("name"), "old_progress": old_progress, "new_progress": new_progress, "changed_at": now, "changed_by": request.submitted_by_name or check.get("operations_manager_name"), "reason": item.reason, "notes": item.notes})
+        for row in check_sections:
+            if str(row.get("section_id")) == section_id:
+                row["current_progress_percent"] = round(new_progress, 1)
+                row["supported_value"] = round(row.get("section_value", 0) * min(new_progress, row.get("required_progress_percent", 0)) / 100.0, 2)
+                row["at_risk_value"] = round(max(0.0, row.get("expected_value", 0) - row["supported_value"]), 2)
+                row["status"] = "on_target" if new_progress >= row.get("required_progress_percent", 0) else "behind_target"
+                row["needs_review"] = row["status"] != "on_target"
+                row["needs_help"] = bool(item.needs_help)
+                row["reason"] = item.reason
+                row["notes"] = item.notes
+                row["revised_completion_date"] = item.revised_completion_date
+                row["last_progress_update"] = now.isoformat()
+                break
+
+    await db.jobs.update_one({"id": job.get("id")}, {"$set": {"gantt_sections": gantt_sections, "updated_at": now}})
+    supported = round(sum(finance_to_number(row.get("supported_value")) for row in check_sections), 2)
+    app_value = finance_to_number(check.get("application_value"))
+    help_count = sum(1 for row in check_sections if row.get("needs_help"))
+    status = "help_requested" if help_count else "operations_submitted"
+    patch = {
+        "sections": check_sections,
+        "supported_value": min(app_value, supported),
+        "at_risk_value": round(max(0.0, app_value - min(app_value, supported)), 2),
+        "help_count": help_count,
+        "status": status,
+        "operations_submitted_at": now,
+        "operations_submitted_by_id": request.submitted_by_id or check.get("operations_manager_id"),
+        "operations_submitted_by_name": request.submitted_by_name or check.get("operations_manager_name"),
+        "operations_submitted_by_email": request.submitted_by_email or check.get("operations_manager_email"),
+        "updated_at": now,
+    }
+    await db.daily_progress_checks.update_one({"id": check.get("id")}, {"$set": patch, "$push": {"audit_history": {"$each": audit_rows}}})
+    updated = await db.daily_progress_checks.find_one({"id": check.get("id")}, {"_id": 0})
+    return {"success": True, "message": "Progress saved and forecast updated", "check": daily_progress_public_check(updated)}
+
+
+@api_router.post("/daily-progress-checks/mobile/{token}/sections/{section_id}/photos")
+async def upload_daily_progress_photos(token: str, section_id: str, files: List[UploadFile] = File(...)):
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    check = await db.daily_progress_checks.find_one({"token_hash": token_hash}, {"_id": 0})
+    if not check:
+        raise HTTPException(status_code=404, detail="Daily progress check not found")
+    if len(files) > 10:
+        raise HTTPException(status_code=400, detail="Maximum 10 photos per section")
+    job = await db.jobs.find_one({"id": check.get("job_id")}, {"_id": 0})
+    folder_id = get_job_drive_folder_id(job or {})
+    drive_service = get_google_drive_service() if get_google_drive_service and folder_id else None
+    photos = []
+    for file in files:
+        if not file.content_type or not file.content_type.startswith("image/"):
+            continue
+        content = await file.read()
+        if len(content) > 15 * 1024 * 1024:
+            continue
+        if drive_service:
+            uploaded = drive_service.upload_post_work_image(folder_id, content, file.filename, file.content_type, check.get("operations_manager_name", ""), check.get("job_name", ""))
+            photo = {"id": str(uuid.uuid4()), "filename": uploaded.get("filename") or file.filename, "file_id": uploaded.get("file_id"), "share_url": uploaded.get("share_url"), "direct_url": uploaded.get("direct_url", ""), "uploaded_at": datetime.utcnow()}
+        else:
+            photo = {"id": str(uuid.uuid4()), "filename": file.filename, "uploaded_at": datetime.utcnow(), "storage_status": "drive_not_configured"}
+        photos.append(photo)
+    await db.daily_progress_checks.update_one({"id": check.get("id"), "sections.section_id": section_id}, {"$push": {"sections.$.photos": {"$each": photos}}, "$set": {"updated_at": datetime.utcnow()}})
+    return {"success": True, "photos": photos}
+
+
+@api_router.get("/daily-progress-checks")
+async def list_daily_progress_checks(check_date: Optional[str] = Query(None), status: Optional[str] = Query(None), admin: str = Depends(verify_admin)):
+    query: Dict[str, Any] = {}
+    if check_date: query["check_date"] = check_date
+    if status: query["status"] = status
+    docs = await db.daily_progress_checks.find(query, {"_id": 0, "token_hash": 0}).sort([("check_date", -1), ("job_name", 1)]).to_list(5000)
+    return docs
+
+
+@api_router.get("/daily-progress-checks/{check_id}")
+async def get_daily_progress_check(check_id: str, admin: str = Depends(verify_admin)):
+    doc = await db.daily_progress_checks.find_one({"id": check_id}, {"_id": 0, "token_hash": 0})
+    if not doc: raise HTTPException(status_code=404, detail="Daily progress check not found")
+    return doc
+
+
+@api_router.put("/daily-progress-checks/{check_id}/office-review")
+async def office_review_daily_progress(check_id: str, request: DailyProgressOfficeReviewRequest, admin: str = Depends(verify_admin)):
+    existing = await db.daily_progress_checks.find_one({"id": check_id}, {"_id": 0})
+    if not existing: raise HTTPException(status_code=404, detail="Daily progress check not found")
+    now = datetime.utcnow()
+    patch = {"risk_confirmed": request.risk_confirmed, "recovery_action": request.recovery_action, "programme_notes": request.programme_notes, "final_notes": request.final_notes, "status": request.status or "completed", "office_reviewed_at": now, "office_reviewed_by_id": request.reviewed_by_id, "office_reviewed_by_name": request.reviewed_by_name, "office_reviewed_by_email": request.reviewed_by_email, "updated_at": now}
+    await db.daily_progress_checks.update_one({"id": check_id}, {"$set": patch})
+    updated = await db.daily_progress_checks.find_one({"id": check_id}, {"_id": 0, "token_hash": 0})
+    return {"success": True, "check": updated}
+
+
+@api_router.post("/daily-progress-checks/remind-incomplete")
+async def remind_incomplete_daily_progress(request: DailyProgressTriggerRequest):
+    configured = os.environ.get("DAILY_PROGRESS_TRIGGER_SECRET", "").strip()
+    if configured and not secrets.compare_digest(request.secret, configured): raise HTTPException(status_code=403, detail="Invalid trigger secret")
+    check_day = parse_iso_date_safe(request.check_date) if request.check_date else get_uk_time().date()
+    docs = await db.daily_progress_checks.find({"check_date": check_day.isoformat(), "operations_submitted_at": None}, {"_id": 0}).to_list(5000)
+    results = []
+    for doc in docs:
+        results.append({"check_id": doc.get("id"), "result": await daily_progress_send_webhook("daily_progress_reminder", doc, None)})
+    return {"success": True, "count": len(results), "results": results}
+
+
+@api_router.post("/daily-progress-checks/escalate")
+async def escalate_daily_progress(request: DailyProgressTriggerRequest):
+    configured = os.environ.get("DAILY_PROGRESS_TRIGGER_SECRET", "").strip()
+    if configured and not secrets.compare_digest(request.secret, configured): raise HTTPException(status_code=403, detail="Invalid trigger secret")
+    check_day = parse_iso_date_safe(request.check_date) if request.check_date else get_uk_time().date()
+    docs = await db.daily_progress_checks.find({"check_date": check_day.isoformat(), "$or": [{"operations_submitted_at": None}, {"help_count": {"$gt": 0}}]}, {"_id": 0}).to_list(5000)
+    results = []
+    for doc in docs:
+        kind = "daily_progress_help_escalation" if doc.get("help_count", 0) > 0 else "daily_progress_no_update_escalation"
+        results.append({"check_id": doc.get("id"), "result": await daily_progress_send_webhook(kind, doc, None)})
+    return {"success": True, "count": len(results), "results": results}
+
 
 # Include the router in the main app after all routes have been registered.
 # Important: FastAPI copies the APIRouter routes at include time, so this must stay at the end.

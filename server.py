@@ -16257,6 +16257,10 @@ class DailyProgressSessionGenerateRequest(BaseModel):
     review_date: Optional[str] = None
     send_whatsapp: bool = True
     force_send: bool = False
+    # Optional rollout filter. When supplied, only this Operations Manager is
+    # included in generate, reminder and escalation runs.
+    operations_manager_email: Optional[str] = None
+    operations_manager_id: Optional[str] = None
 
 
 class DailyProgressSessionOnTrackRequest(BaseModel):
@@ -16354,6 +16358,27 @@ def _dps_manager_key(check: Dict[str, Any]) -> str:
         or _dps_phone(check.get("operations_manager_phone", ""))
         or ""
     ).strip()
+
+
+def _dps_matches_manager_filter(
+    item: Dict[str, Any],
+    operations_manager_email: Optional[str] = None,
+    operations_manager_id: Optional[str] = None,
+) -> bool:
+    requested_email = str(operations_manager_email or "").strip().lower()
+    requested_id = str(operations_manager_id or "").strip()
+
+    if requested_email:
+        actual_email = str(item.get("operations_manager_email") or "").strip().lower()
+        if actual_email != requested_email:
+            return False
+
+    if requested_id:
+        actual_id = str(item.get("operations_manager_id") or "").strip()
+        if actual_id != requested_id:
+            return False
+
+    return True
 
 
 def _dps_check_summary(check: Dict[str, Any]) -> Dict[str, Any]:
@@ -16538,7 +16563,20 @@ async def generate_daily_progress_sessions(request: DailyProgressSessionGenerate
 
     groups: Dict[str, List[Dict[str, Any]]] = {}
     skipped = []
+    filtered_checks = []
     for check in checks:
+        if not _dps_matches_manager_filter(
+            check,
+            request.operations_manager_email,
+            request.operations_manager_id,
+        ):
+            skipped.append({
+                "check_id": check.get("id"),
+                "reason": "Excluded by Operations Manager rollout filter",
+            })
+            continue
+
+        filtered_checks.append(check)
         key = _dps_manager_key(check)
         if not key:
             skipped.append({"check_id": check.get("id"), "reason": "No Operations Manager assigned"})
@@ -16601,7 +16639,12 @@ async def generate_daily_progress_sessions(request: DailyProgressSessionGenerate
         "success": True,
         "review_date": review_date,
         "manager_count": len(results),
-        "check_count": len(checks),
+        "check_count": len(filtered_checks),
+        "total_checks_found": len(checks),
+        "operations_manager_filter": {
+            "email": request.operations_manager_email or "",
+            "id": request.operations_manager_id or "",
+        },
         "results": results,
         "skipped": skipped,
     }
@@ -16769,8 +16812,20 @@ async def remind_daily_progress_sessions(request: DailyProgressSessionGenerateRe
     if not _dps_trigger_secret_ok(request.secret):
         raise HTTPException(status_code=403, detail="Invalid trigger secret")
     review_date = request.review_date or get_uk_time().date().isoformat()
+    session_filter: Dict[str, Any] = {
+        "review_date": review_date,
+        "status": {"$ne": "completed"},
+    }
+    if request.operations_manager_email:
+        session_filter["operations_manager_email"] = {
+            "$regex": f"^{re.escape(request.operations_manager_email.strip())}$",
+            "$options": "i",
+        }
+    if request.operations_manager_id:
+        session_filter["operations_manager_id"] = request.operations_manager_id.strip()
+
     sessions = await _dps_session_collection().find(
-        {"review_date": review_date, "status": {"$ne": "completed"}}, {"_id": 0}
+        session_filter, {"_id": 0}
     ).to_list(500)
     results = []
     for session in sessions:
@@ -16794,8 +16849,20 @@ async def escalate_daily_progress_sessions(request: DailyProgressSessionGenerate
     if not _dps_trigger_secret_ok(request.secret):
         raise HTTPException(status_code=403, detail="Invalid trigger secret")
     review_date = request.review_date or get_uk_time().date().isoformat()
+    session_filter: Dict[str, Any] = {
+        "review_date": review_date,
+        "status": {"$ne": "completed"},
+    }
+    if request.operations_manager_email:
+        session_filter["operations_manager_email"] = {
+            "$regex": f"^{re.escape(request.operations_manager_email.strip())}$",
+            "$options": "i",
+        }
+    if request.operations_manager_id:
+        session_filter["operations_manager_id"] = request.operations_manager_id.strip()
+
     sessions = await _dps_session_collection().find(
-        {"review_date": review_date, "status": {"$ne": "completed"}}, {"_id": 0}
+        session_filter, {"_id": 0}
     ).to_list(500)
     results = []
     url = os.environ.get("POWER_AUTOMATE_DAILY_PROGRESS_URL", "").strip()

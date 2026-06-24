@@ -16044,26 +16044,76 @@ async def daily_progress_twilio_test(request: DailyProgressTwilioTestRequest):
 
 @api_router.post("/daily-progress-checks/generate")
 async def generate_daily_progress_checks(request: DailyProgressTriggerRequest):
+    """Create/update the per-job Daily Progress Check records only.
+
+    Individual WhatsApp messages are deliberately disabled here. The grouped
+    session endpoint is now the only place that sends Operations Manager
+    WhatsApp notifications:
+
+        POST /api/daily-progress-sessions/generate
+
+    The legacy ``dry_run`` field is accepted for backwards compatibility but
+    no longer controls message sending.
+    """
     configured = daily_progress_trigger_secret()
     if configured and not secrets.compare_digest(request.secret, configured):
         raise HTTPException(status_code=403, detail="Invalid trigger secret")
+
     check_day = parse_iso_date_safe(request.check_date) if request.check_date else get_uk_time().date()
-    jobs = await db.jobs.find({"archived": {"$ne": True}, "status": {"$nin": ["cancelled", "canceled", "completed"]}}, {"_id": 0}).to_list(5000)
+    jobs = await db.jobs.find(
+        {
+            "archived": {"$ne": True},
+            "status": {"$nin": ["cancelled", "canceled", "completed"]},
+        },
+        {"_id": 0},
+    ).to_list(5000)
+
     created, skipped, errors = [], [], []
+
     for job in jobs:
         try:
             result = await build_daily_progress_check_for_job(job, check_day)
             if not result:
-                skipped.append({"job_id": job.get("id"), "job_name": job.get("name"), "reason": "No future application or contributing sections"})
+                skipped.append({
+                    "job_id": job.get("id"),
+                    "job_name": job.get("name"),
+                    "reason": "No future application or contributing sections",
+                })
                 continue
-            check, token = result["check"], result.get("token")
-            send_result = {"sent": False, "reason": "dry run or existing check"}
-            if not request.dry_run and token:
-                send_result = await daily_progress_send_webhook("daily_progress_whatsapp", check, token)
-            created.append({"check": daily_progress_public_check(check), "notification": send_result})
+
+            check = result["check"]
+
+            # IMPORTANT: never send one WhatsApp per project from this endpoint.
+            # Notifications are sent only after checks have been grouped into a
+            # single Operations Manager session.
+            notification = {
+                "sent": False,
+                "reason": "Individual WhatsApp disabled; use /api/daily-progress-sessions/generate",
+            }
+
+            created.append({
+                "check": daily_progress_public_check(check),
+                "notification": notification,
+            })
         except Exception as exc:
-            errors.append({"job_id": job.get("id"), "job_name": job.get("name"), "error": str(exc)})
-    return {"success": not errors, "check_date": check_day.isoformat(), "created_count": len(created), "skipped_count": len(skipped), "error_count": len(errors), "created": created, "skipped": skipped, "errors": errors}
+            errors.append({
+                "job_id": job.get("id"),
+                "job_name": job.get("name"),
+                "error": str(exc),
+            })
+
+    return {
+        "success": not errors,
+        "check_date": check_day.isoformat(),
+        "created_count": len(created),
+        "skipped_count": len(skipped),
+        "error_count": len(errors),
+        "individual_notifications_disabled": True,
+        "next_step": "POST /api/daily-progress-sessions/generate",
+        "created": created,
+        "skipped": skipped,
+        "errors": errors,
+    }
 
 
 @api_router.get("/daily-progress-checks/mobile/{token}")

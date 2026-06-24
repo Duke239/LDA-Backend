@@ -3357,31 +3357,43 @@ async def get_job_detail_report(job_id: str, admin: str = Depends(verify_admin))
         workforce_status = "missing"
         workforce_status_label = "Missing"
 
-    # Job management is also a three-stage status:
-    # missing = neither Manager nor Supervisor assigned
-    # partial = either Manager or Supervisor assigned
-    # assigned = both Manager and Supervisor assigned
-    manager_id = _job_detail_first(job, ["manager_id", "managerId", "project_manager_id", "projectManagerId"], "")
-    manager_name = _job_detail_first(job, ["manager_name", "managerName", "project_manager_name", "projectManagerName"], "")
-    supervisor_id = _job_detail_first(job, ["supervisor_id", "supervisorId"], "")
-    supervisor_name = _job_detail_first(job, ["supervisor_name", "supervisorName"], "")
+    # Job management is now based on the three current personnel roles:
+    # Office Manager, Operations Manager and Supervisor.
+    # Legacy manager fields remain elsewhere on older job records, but are no
+    # longer used to decide whether management setup is complete.
+    office_manager_id = _job_detail_first(job, ["office_manager_id", "officeManagerId"], "")
+    office_manager_name = _job_detail_first(job, ["office_manager_name", "officeManagerName"], "")
+    operations_manager_id = _job_detail_first(job, ["operations_manager_id", "operationsManagerId", "operation_manager_id"], "")
+    operations_manager_name = _job_detail_first(job, ["operations_manager_name", "operationsManagerName", "operation_manager_name"], "")
+    supervisor_id = _job_detail_first(job, ["supervisor_id", "supervisorId", "site_supervisor_id", "siteSupervisorId"], "")
+    supervisor_name = _job_detail_first(job, ["supervisor_name", "supervisorName", "site_supervisor_name", "siteSupervisorName"], "")
 
     def _assigned_person(person_id, person_name):
         name_value = str(person_name or "").strip().lower()
-        return bool(str(person_id or "").strip()) or (bool(name_value) and name_value not in ["unassigned", "none", "not set", "-"])
+        return bool(str(person_id or "").strip()) or (
+            bool(name_value)
+            and name_value not in ["unassigned", "none", "not set", "-"]
+        )
 
-    has_manager_assigned = _assigned_person(manager_id, manager_name)
+    has_office_manager_assigned = _assigned_person(office_manager_id, office_manager_name)
+    has_operations_manager_assigned = _assigned_person(operations_manager_id, operations_manager_name)
     has_supervisor_assigned = _assigned_person(supervisor_id, supervisor_name)
 
-    if has_manager_assigned and has_supervisor_assigned:
+    assigned_management_count = sum([
+        has_office_manager_assigned,
+        has_operations_manager_assigned,
+        has_supervisor_assigned,
+    ])
+
+    if assigned_management_count == 3:
         management_status = "assigned"
-        management_status_label = "Manager & Supervisor assigned"
-    elif has_manager_assigned or has_supervisor_assigned:
+        management_status_label = "All personnel assigned"
+    elif assigned_management_count > 0:
         management_status = "partial"
-        management_status_label = "Partially assigned"
+        management_status_label = f"{assigned_management_count}/3 personnel assigned"
     else:
         management_status = "missing"
-        management_status_label = "Missing"
+        management_status_label = "No personnel assigned"
 
     has_management = management_status == "assigned"
 
@@ -3421,8 +3433,10 @@ async def get_job_detail_report(job_id: str, admin: str = Depends(verify_admin))
             "location": job.get("location", ""),
             "status": job.get("status", ""),
             "division": _job_detail_first(job, ["division", "job_division", "jobDivision"], ""),
-            "manager_id": manager_id,
-            "manager_name": manager_name,
+            "office_manager_id": office_manager_id,
+            "office_manager_name": office_manager_name,
+            "operations_manager_id": operations_manager_id,
+            "operations_manager_name": operations_manager_name,
             "supervisor_id": supervisor_id,
             "supervisor_name": supervisor_name,
             "start_date": _job_detail_date_to_iso(start_date),
@@ -3436,7 +3450,8 @@ async def get_job_detail_report(job_id: str, admin: str = Depends(verify_admin))
         "checks": {
             "setup_score": f"{sum(1 for item in checklist if item)}/{len(checklist)}",
             "has_management": has_management,
-            "has_manager_assigned": has_manager_assigned,
+            "has_office_manager_assigned": has_office_manager_assigned,
+            "has_operations_manager_assigned": has_operations_manager_assigned,
             "has_supervisor_assigned": has_supervisor_assigned,
             "management_status": management_status,
             "management_status_label": management_status_label,
@@ -3454,12 +3469,17 @@ async def get_job_detail_report(job_id: str, admin: str = Depends(verify_admin))
             "has_work_orders": has_work_orders,
         },
         "management": {
-            "manager_id": manager_id,
-            "manager_name": manager_name,
+            "office_manager_id": office_manager_id,
+            "office_manager_name": office_manager_name,
+            "operations_manager_id": operations_manager_id,
+            "operations_manager_name": operations_manager_name,
             "supervisor_id": supervisor_id,
             "supervisor_name": supervisor_name,
-            "has_manager_assigned": has_manager_assigned,
+            "has_office_manager_assigned": has_office_manager_assigned,
+            "has_operations_manager_assigned": has_operations_manager_assigned,
             "has_supervisor_assigned": has_supervisor_assigned,
+            "assigned_count": assigned_management_count,
+            "required_count": 3,
             "status": management_status,
             "status_label": management_status_label,
         },

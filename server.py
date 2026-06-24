@@ -16232,6 +16232,582 @@ async def escalate_daily_progress(request: DailyProgressTriggerRequest):
         results.append({"check_id": doc.get("id"), "result": await daily_progress_send_webhook(kind, doc, None)})
     return {"success": True, "count": len(results), "results": results}
 
+class DailyProgressSessionGenerateRequest(BaseModel):
+    secret: str = ""
+    review_date: Optional[str] = None
+    send_whatsapp: bool = True
+    force_send: bool = False
+
+
+class DailyProgressSessionOnTrackRequest(BaseModel):
+    manager_name: str = ""
+    manager_email: str = ""
+
+
+class DailyProgressSessionSectionUpdate(BaseModel):
+    section_id: str
+    current_progress_percent: float
+    reason: str = ""
+    notes: str = ""
+    revised_completion_date: Optional[str] = None
+    needs_help: bool = False
+
+
+class DailyProgressSessionOffTrackRequest(BaseModel):
+    manager_name: str = ""
+    manager_email: str = ""
+    sections: List[DailyProgressSessionSectionUpdate] = []
+    call_for_help: bool = False
+    help_category: str = ""
+    help_notes: str = ""
+    requested_office_action: str = ""
+
+
+class DailyProgressSessionCompleteRequest(BaseModel):
+    manager_name: str = ""
+    manager_email: str = ""
+
+
+def _dps_now_iso() -> str:
+    return datetime.utcnow().isoformat()
+
+
+def _dps_money(value: Any) -> float:
+    try:
+        return round(float(value or 0), 2)
+    except Exception:
+        return 0.0
+
+
+def _dps_percent(value: Any) -> float:
+    try:
+        return round(max(0.0, min(100.0, float(value or 0))), 2)
+    except Exception:
+        return 0.0
+
+
+def _dps_phone(value: str) -> str:
+    phone = re.sub(r"[^0-9+]", "", str(value or "").strip())
+    if phone.startswith("00"):
+        phone = "+" + phone[2:]
+    elif phone.startswith("0"):
+        phone = "+44" + phone[1:]
+    elif phone and not phone.startswith("+"):
+        phone = "+" + phone
+    return phone
+
+
+def _dps_frontend_url() -> str:
+    return (
+        os.environ.get("FRONTEND_URL", "").strip().rstrip("/")
+        or os.environ.get("PUBLIC_FRONTEND_URL", "").strip().rstrip("/")
+        or "https://lda-group.vercel.app"
+    )
+
+
+def _dps_check_collection():
+    return db.daily_progress_checks
+
+
+def _dps_session_collection():
+    return db.daily_progress_sessions
+
+
+def _dps_trigger_secret_ok(value: str) -> bool:
+    configured = (
+        os.environ.get("DAILY_PROGRESS_AUTOMATION_SECRET", "").strip()
+        or os.environ.get("DAILY_PROGRESS_TRIGGER_SECRET", "").strip()
+    )
+    return bool(configured) and secrets.compare_digest(str(value or ""), configured)
+
+
+def _dps_public_check(check: Dict[str, Any]) -> Dict[str, Any]:
+    clean = dict(check or {})
+    clean.pop("_id", None)
+    return clean
+
+
+def _dps_manager_key(check: Dict[str, Any]) -> str:
+    return str(
+        check.get("operations_manager_id")
+        or check.get("operations_manager_email")
+        or _dps_phone(check.get("operations_manager_phone", ""))
+        or ""
+    ).strip()
+
+
+def _dps_check_summary(check: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "check_id": check.get("id", ""),
+        "job_id": check.get("job_id", ""),
+        "job_name": check.get("job_name", ""),
+        "client": check.get("client", ""),
+        "application_id": check.get("application_id", ""),
+        "application_label": check.get("application_label", ""),
+        "application_date": check.get("application_date", ""),
+        "application_value": _dps_money(check.get("application_value")),
+        "supported_value": _dps_money(check.get("supported_value")),
+        "at_risk_value": _dps_money(check.get("at_risk_value")),
+        "review_status": check.get("manager_review_status") or "pending",
+        "reviewed_at": check.get("manager_reviewed_at"),
+        "call_for_help": bool(check.get("manager_call_for_help", False)),
+    }
+
+
+async def _dps_refresh_session(session_id: str) -> Dict[str, Any]:
+    session = await _dps_session_collection().find_one({"id": session_id}, {"_id": 0})
+    if not session:
+        raise HTTPException(status_code=404, detail="Daily review session not found")
+
+    check_ids = [item.get("check_id") for item in session.get("checks", []) if item.get("check_id")]
+    checks = await _dps_check_collection().find({"id": {"$in": check_ids}}, {"_id": 0}).to_list(500)
+    lookup = {item.get("id"): item for item in checks}
+    rows = [_dps_check_summary(lookup[item_id]) for item_id in check_ids if item_id in lookup]
+    rows.sort(key=lambda item: (item.get("application_date") or "9999-12-31", item.get("job_name") or ""))
+
+    reviewed = sum(1 for row in rows if row.get("review_status") in {"on_track", "off_track", "help_requested"})
+    on_track = sum(1 for row in rows if row.get("review_status") == "on_track")
+    off_track = sum(1 for row in rows if row.get("review_status") in {"off_track", "help_requested"})
+    help_count = sum(1 for row in rows if row.get("call_for_help"))
+    complete = bool(rows) and reviewed == len(rows)
+
+    patch = {
+        "checks": rows,
+        "total_jobs": len(rows),
+        "reviewed_jobs": reviewed,
+        "on_track_jobs": on_track,
+        "off_track_jobs": off_track,
+        "help_jobs": help_count,
+        "status": "completed" if complete else "outstanding",
+        "updated_at": _dps_now_iso(),
+    }
+    if complete and not session.get("submitted_at"):
+        patch["submitted_at"] = _dps_now_iso()
+
+    await _dps_session_collection().update_one({"id": session_id}, {"$set": patch})
+    session.update(patch)
+    return session
+
+
+async def _dps_send_whatsapp(session: Dict[str, Any], reminder: bool = False) -> Dict[str, Any]:
+    sid = os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
+    auth = os.environ.get("TWILIO_AUTH_TOKEN", "").strip()
+    from_number = os.environ.get("TWILIO_WHATSAPP_FROM", "").strip()
+    phone = _dps_phone(session.get("operations_manager_phone", ""))
+    if not sid or not auth or not from_number:
+        return {"sent": False, "reason": "Twilio is not configured"}
+    if not phone:
+        return {"sent": False, "reason": "Operations Manager phone is missing"}
+
+    link = f"{_dps_frontend_url()}/#/daily-review/{session.get('session_token')}"
+    name = session.get("operations_manager_name") or "Operations Manager"
+    outstanding = max(0, int(session.get("total_jobs", 0)) - int(session.get("reviewed_jobs", 0)))
+    if reminder:
+        body = (
+            f"LDA Daily Progress Reminder\n\nHi {name}, you still have {outstanding} project"
+            f"{'s' if outstanding != 1 else ''} to review.\n\nOpen your daily review:\n{link}"
+        )
+    else:
+        total = int(session.get("total_jobs", 0))
+        body = (
+            f"LDA Daily Progress Review\n\nHi {name}, your 6pm project review is ready. "
+            f"You have {total} project{'s' if total != 1 else ''} to review.\n\n"
+            f"Confirm whether each next application is On track or Off track.\n\n{link}"
+        )
+
+    endpoint = f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json"
+    response = requests.post(
+        endpoint,
+        data={
+            "To": f"whatsapp:{phone}",
+            "From": from_number if from_number.startswith("whatsapp:") else f"whatsapp:{from_number}",
+            "Body": body,
+        },
+        auth=(sid, auth),
+        timeout=30,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    return {
+        "sent": True,
+        "provider": "twilio",
+        "message_sid": payload.get("sid"),
+        "status": payload.get("status"),
+        "to": f"whatsapp:{phone}",
+    }
+
+
+async def _dps_email_off_track(check: Dict[str, Any], session: Dict[str, Any]) -> Dict[str, Any]:
+    url = os.environ.get("POWER_AUTOMATE_DAILY_PROGRESS_URL", "").strip()
+    if not url:
+        return {"sent": False, "reason": "POWER_AUTOMATE_DAILY_PROGRESS_URL is not configured"}
+
+    office_email = check.get("office_manager_email") or check.get("operations_manager_email") or ""
+    office_link = f"{_dps_frontend_url()}/#/daily-progress-office/{check.get('id')}"
+    payload = {
+        "notification_type": "daily_progress_off_track",
+        "to_email": office_email,
+        "office_manager_email": office_email,
+        "to_name": check.get("office_manager_name") or "Office Manager",
+        "check_id": check.get("id"),
+        "check_date": check.get("check_date"),
+        "job_name": check.get("job_name"),
+        "application_label": check.get("application_label"),
+        "application_date": check.get("application_date"),
+        "application_value": _dps_money(check.get("application_value")),
+        "supported_value": _dps_money(check.get("supported_value")),
+        "at_risk_value": _dps_money(check.get("at_risk_value")),
+        "call_for_help": bool(check.get("manager_call_for_help", False)),
+        "help_category": check.get("manager_help_category", ""),
+        "help_notes": check.get("manager_help_notes", ""),
+        "requested_office_action": check.get("manager_requested_office_action", ""),
+        "operations_manager_name": session.get("operations_manager_name", ""),
+        "office_review_link": office_link,
+        "mobile_link": office_link,
+        "sections_needing_review": [
+            row for row in check.get("sections", [])
+            if row.get("needs_review") or row.get("needs_help")
+        ],
+    }
+    response = requests.post(url, json=payload, timeout=30)
+    response.raise_for_status()
+    return {"sent": True, "provider": "power_automate", "status_code": response.status_code}
+
+
+async def _dps_update_live_gantt(job_id: str, section_updates: List[DailyProgressSessionSectionUpdate]) -> None:
+    job = await db.jobs.find_one({"id": job_id}, {"_id": 0})
+    if not job:
+        return
+    sections = list(job.get("gantt_sections") or [])
+    by_id = {row.section_id: row for row in section_updates}
+    changed = False
+    for section in sections:
+        section_id = str(section.get("id") or section.get("section_id") or "")
+        update = by_id.get(section_id)
+        if not update:
+            continue
+        progress = _dps_percent(update.current_progress_percent)
+        # Write the common aliases used by older/newer Gantt versions.
+        section["progress"] = progress
+        section["progress_percent"] = progress
+        section["progress_percentage"] = progress
+        section["completion_percentage"] = progress
+        section["updated_at"] = _dps_now_iso()
+        changed = True
+    if changed:
+        await db.jobs.update_one(
+            {"id": job_id},
+            {"$set": {"gantt_sections": sections, "updated_at": datetime.utcnow()}},
+        )
+
+
+@api_router.post("/daily-progress-sessions/generate")
+async def generate_daily_progress_sessions(request: DailyProgressSessionGenerateRequest):
+    if not _dps_trigger_secret_ok(request.secret):
+        raise HTTPException(status_code=403, detail="Invalid trigger secret")
+
+    review_date = request.review_date or get_uk_time().date().isoformat()
+    checks = await _dps_check_collection().find(
+        {
+            "check_date": review_date,
+            "status": {"$ne": "cancelled"},
+            "notification_enabled": {"$ne": False},
+        },
+        {"_id": 0},
+    ).to_list(5000)
+
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    skipped = []
+    for check in checks:
+        key = _dps_manager_key(check)
+        if not key:
+            skipped.append({"check_id": check.get("id"), "reason": "No Operations Manager assigned"})
+            continue
+        if not _dps_phone(check.get("operations_manager_phone", "")):
+            skipped.append({"check_id": check.get("id"), "reason": "Operations Manager phone missing"})
+            continue
+        groups.setdefault(key, []).append(check)
+
+    results = []
+    for manager_key, manager_checks in groups.items():
+        manager_checks.sort(key=lambda item: (item.get("application_date") or "9999-12-31", item.get("job_name") or ""))
+        first = manager_checks[0]
+        existing = await _dps_session_collection().find_one(
+            {"review_date": review_date, "operations_manager_key": manager_key},
+            {"_id": 0},
+        )
+        token = (existing or {}).get("session_token") or secrets.token_urlsafe(32)
+        session_id = (existing or {}).get("id") or str(uuid.uuid4())
+        rows = [_dps_check_summary(item) for item in manager_checks]
+        session = {
+            "id": session_id,
+            "review_date": review_date,
+            "operations_manager_key": manager_key,
+            "operations_manager_id": first.get("operations_manager_id", ""),
+            "operations_manager_name": first.get("operations_manager_name", ""),
+            "operations_manager_email": first.get("operations_manager_email", ""),
+            "operations_manager_phone": first.get("operations_manager_phone", ""),
+            "session_token": token,
+            "checks": rows,
+            "total_jobs": len(rows),
+            "reviewed_jobs": sum(1 for row in rows if row.get("review_status") != "pending"),
+            "status": "outstanding",
+            "created_at": (existing or {}).get("created_at") or _dps_now_iso(),
+            "updated_at": _dps_now_iso(),
+            "notification_log": (existing or {}).get("notification_log", []),
+        }
+        await _dps_session_collection().update_one(
+            {"id": session_id}, {"$set": session}, upsert=True
+        )
+        await _dps_check_collection().update_many(
+            {"id": {"$in": [row.get("check_id") for row in rows]}},
+            {"$set": {"manager_session_id": session_id}},
+        )
+
+        notification = {"sent": False, "reason": "send_whatsapp=false"}
+        already_sent = any(log.get("type") == "manager_session_whatsapp" for log in session.get("notification_log", []))
+        if request.send_whatsapp and (request.force_send or not already_sent):
+            try:
+                notification = await _dps_send_whatsapp(session)
+            except Exception as exc:
+                logger.exception("Grouped Daily Progress WhatsApp failed: %s", exc)
+                notification = {"sent": False, "error": str(exc)}
+            log = {"type": "manager_session_whatsapp", "sent_at": _dps_now_iso(), **notification}
+            await _dps_session_collection().update_one({"id": session_id}, {"$push": {"notification_log": log}})
+
+        results.append({"session": session, "notification": notification})
+
+    return {
+        "success": True,
+        "review_date": review_date,
+        "manager_count": len(results),
+        "check_count": len(checks),
+        "results": results,
+        "skipped": skipped,
+    }
+
+
+@api_router.get("/daily-progress-sessions/mobile/{token}")
+async def get_daily_progress_session_mobile(token: str):
+    session = await _dps_session_collection().find_one({"session_token": token}, {"_id": 0})
+    if not session:
+        raise HTTPException(status_code=404, detail="Daily review link is invalid or expired")
+    return await _dps_refresh_session(session.get("id"))
+
+
+async def _dps_session_and_check(token: str, check_id: str):
+    session = await _dps_session_collection().find_one({"session_token": token}, {"_id": 0})
+    if not session:
+        raise HTTPException(status_code=404, detail="Daily review link is invalid or expired")
+    allowed_ids = {item.get("check_id") for item in session.get("checks", [])}
+    if check_id not in allowed_ids:
+        raise HTTPException(status_code=403, detail="This project is not part of your daily review")
+    check = await _dps_check_collection().find_one({"id": check_id}, {"_id": 0})
+    if not check or check.get("status") == "cancelled":
+        raise HTTPException(status_code=404, detail="Daily Progress Check not found")
+    return session, check
+
+
+@api_router.get("/daily-progress-sessions/mobile/{token}/checks/{check_id}")
+async def get_daily_progress_session_check(token: str, check_id: str):
+    session, check = await _dps_session_and_check(token, check_id)
+    return {"session": session, "check": _dps_public_check(check)}
+
+
+@api_router.put("/daily-progress-sessions/mobile/{token}/checks/{check_id}/on-track")
+async def mark_daily_progress_check_on_track(token: str, check_id: str, request: DailyProgressSessionOnTrackRequest):
+    session, check = await _dps_session_and_check(token, check_id)
+    now = _dps_now_iso()
+    patch = {
+        "manager_review_status": "on_track",
+        "manager_reviewed_at": now,
+        "manager_reviewed_by_name": request.manager_name or session.get("operations_manager_name", ""),
+        "manager_reviewed_by_email": request.manager_email or session.get("operations_manager_email", ""),
+        "manager_call_for_help": False,
+        "updated_at": now,
+    }
+    await _dps_check_collection().update_one({"id": check_id}, {"$set": patch})
+    refreshed = await _dps_refresh_session(session.get("id"))
+    return {"success": True, "check_id": check_id, "session": refreshed}
+
+
+@api_router.put("/daily-progress-sessions/mobile/{token}/checks/{check_id}/off-track")
+async def save_daily_progress_check_off_track(token: str, check_id: str, request: DailyProgressSessionOffTrackRequest):
+    session, check = await _dps_session_and_check(token, check_id)
+    current_sections = list(check.get("sections") or [])
+    allowed_ids = {str(row.get("section_id") or "") for row in current_sections}
+    supplied_ids = {row.section_id for row in request.sections}
+    if not supplied_ids.issubset(allowed_ids):
+        raise HTTPException(status_code=400, detail="One or more sections do not belong to this application")
+
+    updates = {row.section_id: row for row in request.sections}
+    now = _dps_now_iso()
+    audit_rows = list(check.get("audit_history") or [])
+    supported_total = 0.0
+    risk_total = 0.0
+    help_count = 0
+
+    for section in current_sections:
+        section_id = str(section.get("section_id") or "")
+        update = updates.get(section_id)
+        old_progress = _dps_percent(section.get("current_progress_percent"))
+        if update:
+            new_progress = _dps_percent(update.current_progress_percent)
+            section["current_progress_percent"] = new_progress
+            section["reason"] = update.reason
+            section["notes"] = update.notes
+            section["revised_completion_date"] = update.revised_completion_date
+            section["needs_help"] = bool(update.needs_help or request.call_for_help)
+            section["last_progress_update"] = now
+            audit_rows.append({
+                "section_id": section_id,
+                "section_name": section.get("section_name", ""),
+                "old_progress": old_progress,
+                "new_progress": new_progress,
+                "changed_at": now,
+                "changed_by": request.manager_name or session.get("operations_manager_name", ""),
+                "reason": update.reason,
+                "notes": update.notes,
+            })
+
+        required = _dps_percent(section.get("required_progress_percent"))
+        current = _dps_percent(section.get("current_progress_percent"))
+        expected = _dps_money(section.get("expected_value") or section.get("application_window_value"))
+        supported = expected if required <= 0 else round(expected * min(current, required) / required, 2)
+        risk = max(0.0, round(expected - supported, 2))
+        section["supported_value"] = supported
+        section["at_risk_value"] = risk
+        section["needs_review"] = current < required
+        section["status"] = "behind_target" if current < required else "on_target"
+        supported_total += supported
+        risk_total += risk
+        if section.get("needs_help"):
+            help_count += 1
+
+    review_status = "help_requested" if request.call_for_help else "off_track"
+    patch = {
+        "sections": current_sections,
+        "supported_value": round(supported_total, 2),
+        "at_risk_value": round(risk_total, 2),
+        "help_count": help_count,
+        "manager_review_status": review_status,
+        "manager_reviewed_at": now,
+        "manager_reviewed_by_name": request.manager_name or session.get("operations_manager_name", ""),
+        "manager_reviewed_by_email": request.manager_email or session.get("operations_manager_email", ""),
+        "manager_call_for_help": bool(request.call_for_help),
+        "manager_help_category": request.help_category,
+        "manager_help_notes": request.help_notes,
+        "manager_requested_office_action": request.requested_office_action,
+        "audit_history": audit_rows,
+        "status": "help_requested" if request.call_for_help else "operations_submitted",
+        "operations_submitted_at": now,
+        "updated_at": now,
+    }
+    await _dps_check_collection().update_one({"id": check_id}, {"$set": patch})
+    await _dps_update_live_gantt(check.get("job_id", ""), request.sections)
+    updated = await _dps_check_collection().find_one({"id": check_id}, {"_id": 0})
+
+    email_result = {"sent": False}
+    try:
+        email_result = await _dps_email_off_track(updated, session)
+    except Exception as exc:
+        logger.exception("Off-track Daily Progress email failed: %s", exc)
+        email_result = {"sent": False, "error": str(exc)}
+
+    await _dps_check_collection().update_one(
+        {"id": check_id},
+        {"$push": {"notification_log": {"type": "manager_off_track_email", "sent_at": now, **email_result}}},
+    )
+    refreshed = await _dps_refresh_session(session.get("id"))
+    return {"success": True, "check": updated, "session": refreshed, "email": email_result}
+
+
+@api_router.post("/daily-progress-sessions/mobile/{token}/complete")
+async def complete_daily_progress_session(token: str, request: DailyProgressSessionCompleteRequest):
+    session = await _dps_session_collection().find_one({"session_token": token}, {"_id": 0})
+    if not session:
+        raise HTTPException(status_code=404, detail="Daily review link is invalid or expired")
+    refreshed = await _dps_refresh_session(session.get("id"))
+    if refreshed.get("reviewed_jobs", 0) != refreshed.get("total_jobs", 0):
+        raise HTTPException(status_code=400, detail="Every project must be reviewed before completing the session")
+    now = _dps_now_iso()
+    await _dps_session_collection().update_one(
+        {"id": session.get("id")},
+        {"$set": {
+            "status": "completed",
+            "submitted_at": now,
+            "submitted_by_name": request.manager_name or session.get("operations_manager_name", ""),
+            "submitted_by_email": request.manager_email or session.get("operations_manager_email", ""),
+            "updated_at": now,
+        }},
+    )
+    return {"success": True, "session": await _dps_refresh_session(session.get("id"))}
+
+
+@api_router.post("/daily-progress-sessions/remind")
+async def remind_daily_progress_sessions(request: DailyProgressSessionGenerateRequest):
+    if not _dps_trigger_secret_ok(request.secret):
+        raise HTTPException(status_code=403, detail="Invalid trigger secret")
+    review_date = request.review_date or get_uk_time().date().isoformat()
+    sessions = await _dps_session_collection().find(
+        {"review_date": review_date, "status": {"$ne": "completed"}}, {"_id": 0}
+    ).to_list(500)
+    results = []
+    for session in sessions:
+        refreshed = await _dps_refresh_session(session.get("id"))
+        if refreshed.get("reviewed_jobs", 0) >= refreshed.get("total_jobs", 0):
+            continue
+        try:
+            result = await _dps_send_whatsapp(refreshed, reminder=True)
+        except Exception as exc:
+            result = {"sent": False, "error": str(exc)}
+        await _dps_session_collection().update_one(
+            {"id": session.get("id")},
+            {"$push": {"notification_log": {"type": "manager_session_reminder", "sent_at": _dps_now_iso(), **result}}},
+        )
+        results.append({"session_id": session.get("id"), "result": result})
+    return {"success": True, "count": len(results), "results": results}
+
+
+@api_router.post("/daily-progress-sessions/escalate")
+async def escalate_daily_progress_sessions(request: DailyProgressSessionGenerateRequest):
+    if not _dps_trigger_secret_ok(request.secret):
+        raise HTTPException(status_code=403, detail="Invalid trigger secret")
+    review_date = request.review_date or get_uk_time().date().isoformat()
+    sessions = await _dps_session_collection().find(
+        {"review_date": review_date, "status": {"$ne": "completed"}}, {"_id": 0}
+    ).to_list(500)
+    results = []
+    url = os.environ.get("POWER_AUTOMATE_DAILY_PROGRESS_URL", "").strip()
+    for session in sessions:
+        refreshed = await _dps_refresh_session(session.get("id"))
+        if refreshed.get("reviewed_jobs", 0) >= refreshed.get("total_jobs", 0):
+            continue
+        payload = {
+            "notification_type": "daily_progress_manager_session_incomplete",
+            "to_email": refreshed.get("operations_manager_email", ""),
+            "office_manager_email": refreshed.get("operations_manager_email", ""),
+            "to_name": refreshed.get("operations_manager_name", ""),
+            "operations_manager_name": refreshed.get("operations_manager_name", ""),
+            "review_date": review_date,
+            "total_jobs": refreshed.get("total_jobs", 0),
+            "reviewed_jobs": refreshed.get("reviewed_jobs", 0),
+            "outstanding_jobs": max(0, refreshed.get("total_jobs", 0) - refreshed.get("reviewed_jobs", 0)),
+            "mobile_link": f"{_dps_frontend_url()}/#/daily-review/{refreshed.get('session_token')}",
+            "office_review_link": f"{_dps_frontend_url()}/#/daily-review/{refreshed.get('session_token')}",
+            "checks": refreshed.get("checks", []),
+        }
+        if not url:
+            result = {"sent": False, "reason": "POWER_AUTOMATE_DAILY_PROGRESS_URL is not configured"}
+        else:
+            try:
+                response = requests.post(url, json=payload, timeout=30)
+                response.raise_for_status()
+                result = {"sent": True, "provider": "power_automate", "status_code": response.status_code}
+            except Exception as exc:
+                result = {"sent": False, "error": str(exc)}
+        results.append({"session_id": refreshed.get("id"), "result": result})
+    return {"success": True, "count": len(results), "results": results}
 
 # Include the router in the main app after all routes have been registered.
 # Important: FastAPI copies the APIRouter routes at include time, so this must stay at the end.
